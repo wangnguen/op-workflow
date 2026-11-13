@@ -16,4 +16,16 @@ describe("groupSessions", () => {
     expect(all.some((s) => s.agent === "codex" && s.inApp)).toBe(true);
     expect(all.filter((s) => !s.inApp)).toHaveLength(3);
   });
+
+  it("shows a task in progress without an AI session as your turn, with its branch", () => {
+    const snap = orbitForFrame(10, NOW);
+    const active = snap.active!;
+    const idle = { ...active, taskId: "WP-9", branch: "f/WP-9", agents: [], gate: undefined };
+    const g = groupSessions({ ...snap, others: [idle] });
+    const item = g.waiting.find((s) => s.taskId === "WP-9");
+    expect(item).toMatchObject({ id: "task:WP-9", branch: "f/WP-9", inApp: true });
+    expect(item?.agent).toBeUndefined();
+    // sessions of a task with agents point back at their task
+    expect(g.running.concat(g.idle, g.waiting).some((s) => s.agent && s.taskId === active.taskId)).toBe(true);
+  });
 });

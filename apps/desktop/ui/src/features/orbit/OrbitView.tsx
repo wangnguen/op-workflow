@@ -18,6 +18,11 @@ import "./orbit.css";
 interface Props {
   snapshot: OrbitSnapshot;
   now: number;
+  /** task in the centre; when given, the parent owns it (Phiên centres a task it just started) */
+  focusId?: string | null;
+  onFocus?: (taskId: string | null) => void;
+  /** "Bắt đầu làm việc" on an Inbox task picked on the map */
+  onStartTask?: (taskId: string) => void;
 }
 
 function statusLine(s: OrbitSnapshot): string {
@@ -39,10 +44,12 @@ function statusLine(s: OrbitSnapshot): string {
   return parts.join(" · ");
 }
 
-export function OrbitView({ snapshot: live, now }: Props) {
+export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, onStartTask }: Props) {
   const [picked, setPicked] = useState<Selection | null>(null);
   // several tasks can be in progress; the picked one sits in the centre
-  const [focusId, setFocusId] = useState<string | null>(null);
+  const [ownFocus, setOwnFocus] = useState<string | null>(null);
+  const focusId = focusProp !== undefined ? focusProp : ownFocus;
+  const setFocusId = onFocus ?? setOwnFocus;
   const snapshot = useMemo(() => focusSystem(live, focusId), [live, focusId]);
   const systems = systemsOf(live);
   const [view, setView] = useState<ViewState>(HOME_VIEW);
@@ -137,7 +144,7 @@ ${vi.orbit.systemPick}`,
           </button>
         </div>
       </div>
-      <DetailPanel snapshot={snapshot} selection={selection} onSelect={setPicked} now={now} />
+      <DetailPanel snapshot={snapshot} selection={selection} onSelect={setPicked} now={now} onStartTask={onStartTask} />
     </div>
   );
 }

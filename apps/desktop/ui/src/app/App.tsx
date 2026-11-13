@@ -49,7 +49,9 @@ export function App() {
           <TaskBoard board={board.data} onSettings={() => setSettingsOpen(true)} onChanged={refreshAll} />
         )}
         {tab === "workspace" && <WorkspacePlaceholder />}
-        {tab === "sessions" && <SessionsView snapshot={orbit.data} now={now} />}
+        {tab === "sessions" && (
+          <SessionsView snapshot={orbit.data} board={board.data} now={now} onChanged={refreshAll} />
+        )}
       </main>
       {settingsOpen && (
         <SettingsDialog

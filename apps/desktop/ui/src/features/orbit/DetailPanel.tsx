@@ -19,6 +19,8 @@ interface Props {
   snapshot: OrbitSnapshot;
   selection: Selection | null;
   onSelect: (s: Selection) => void;
+  /** start an Inbox task (absent: the button explains to use the Task board) */
+  onStartTask?: (taskId: string) => void;
   now: number;
 }
 
@@ -116,7 +118,7 @@ function AgentDetail({ agent, now, onSelect }: { agent: AgentView; now: number; 
   );
 }
 
-export function DetailPanel({ snapshot, selection, onSelect, now }: Props) {
+export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask }: Props) {
   const a = snapshot.active;
   let body: ReactNode = <p className="dp-empty">{t.noneSelected}</p>;
 
@@ -208,7 +210,12 @@ export function DetailPanel({ snapshot, selection, onSelect, now }: Props) {
           <h3 className="dp-title">{item.title}</h3>
           <Row label="Task">{item.taskId}</Row>
           <Row label={t.project}>{item.project}</Row>
-          <button className="btn btn--primary" disabled title={t.startFromBoard}>
+          <button
+            className="btn btn--primary"
+            disabled={!onStartTask}
+            title={onStartTask ? undefined : t.startFromBoard}
+            onClick={() => onStartTask?.(item.taskId)}
+          >
             {vi.board.start}
           </button>
         </>
