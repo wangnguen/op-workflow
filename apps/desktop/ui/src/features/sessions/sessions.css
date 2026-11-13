@@ -6,43 +6,88 @@
   min-height: 0;
 }
 
-/* Quỹ đạo / Bảng switch + "Bắt đầu task", floating over the content */
-.sessions-bar {
-  position: absolute;
-  top: 12px;
-  left: 50%;
-  z-index: 6;
-  display: inline-flex;
+/* Quỹ đạo / Bảng switch + "Bắt đầu task": a fixed row, so nothing moves when the mode changes */
+.sessions-head {
+  display: flex;
+  flex: none;
   align-items: center;
-  gap: 8px;
-  padding: 4px;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-  background: var(--overlay);
-  box-shadow: var(--shadow-pop);
-  backdrop-filter: blur(8px);
-  transform: translateX(-50%);
+  gap: 12px;
+  height: 46px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--chrome);
 }
-/* centre over the map, not over the map + detail panel */
-.sessions-bar--orbit {
-  transform: translateX(calc(-50% - 150px));
+.sessions-summary {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.sessions-head .s-start {
+  margin-left: auto;
+}
+
+.sessions-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Both views stay mounted. The one being shown fades in on top; the other stays visible
+   underneath until the fade ends, then hides (no blank frame, no rebuild). */
+.sessions-pane {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: var(--bg);
+  visibility: hidden;
+  transition: visibility 0s linear var(--dur-base);
+}
+.sessions-pane.is-shown {
+  z-index: 2;
+  visibility: visible;
+  transition: none;
+  animation: pane-in var(--dur-base) var(--ease-out);
+}
+/* the hidden map stops moving and resumes where it was */
+.sessions-pane:not(.is-shown) .orbit-svg,
+.sessions-pane:not(.is-shown) .orbit-svg * {
+  animation-play-state: paused !important;
+}
+@keyframes pane-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 .sessions-banner {
   position: absolute;
-  top: 56px;
+  top: 10px;
   left: 50%;
   z-index: 6;
-  width: min(720px, calc(100% - 32px));
+  width: min(680px, calc(100% - 28px));
   transform: translateX(-50%);
-}
-.sessions-banner--orbit {
-  width: min(720px, calc(100% - 332px));
-  transform: translateX(calc(-50% - 150px));
+  animation: banner-in var(--dur-fast) var(--ease-out);
 }
 .sessions-banner .board-banner {
   margin: 0;
   background: var(--panel);
   box-shadow: var(--shadow-pop);
+}
+@keyframes banner-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%);
+  }
 }
 
 .s-start {
@@ -126,10 +171,6 @@
   overflow-wrap: anywhere;
 }
 
-.sessions-body {
-  flex: 1;
-  min-height: 0;
-}
 
 /* Columns wrap under each other on narrow windows; each column scrolls on its own. */
 .session-board {
@@ -138,7 +179,7 @@
   grid-auto-rows: minmax(0, 1fr);
   gap: 14px;
   height: 100%;
-  padding: 56px 14px 14px;
+  padding: 14px;
   overflow: auto;
 }
 .s-column {

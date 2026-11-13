@@ -40,13 +40,48 @@ export function orbitRadius(index: number): number {
   return ORBIT_BASE + (index - 1) * ORBIT_GAP;
 }
 
-/** Planets form an outward spiral: the journey reads clockwise from upper-left. */
-export function planetAngle(index: number): number {
-  return JOURNEY_START_DEG + (index - 1) * JOURNEY_STEP_DEG;
+/**
+ * How far planets have moved along their orbits, in degrees. A number moves every planet by the
+ * same angle; a function gives each step (1-based, may be fractional for the ship in flight) its
+ * own offset. Ship, gate, trail and belt follow the planets they belong to.
+ */
+export type Spin = number | ((index: number) => number);
+
+function offsetOf(spin: Spin, index: number): number {
+  if (typeof spin === "number") return spin;
+  const lo = Math.floor(index);
+  const hi = Math.ceil(index);
+  if (lo === hi) return spin(lo);
+  const t = index - lo;
+  return spin(lo) * (1 - t) + spin(hi) * t;
 }
 
-export function planetPosition(index: number): Point {
-  return polar(orbitRadius(index), planetAngle(index));
+/**
+ * Planets sway together along their orbits (a slow common swing) and each adds a small wobble of
+ * its own. Neighbours keep their spacing, so labels never meet, and the fuel gauge stays clear.
+ */
+const SWAY_DEG = 7;
+const SWAY_PERIOD_S = 48;
+const WOBBLE_DEG = 3;
+const WOBBLE_PERIOD_S = 21;
+const WOBBLE_PERIOD_STEP_S = 4;
+export const DRIFT_DEG = SWAY_DEG + WOBBLE_DEG;
+
+/** Offset of every planet `t` seconds into the motion (degrees, at most DRIFT_DEG). */
+export function planetDrift(t: number): (index: number) => number {
+  const sway = SWAY_DEG * Math.sin((2 * Math.PI * t) / SWAY_PERIOD_S);
+  return (index) =>
+    sway +
+    WOBBLE_DEG * Math.sin((2 * Math.PI * t) / (WOBBLE_PERIOD_S + index * WOBBLE_PERIOD_STEP_S) + index * 1.7);
+}
+
+/** Planets form an outward spiral: the journey reads clockwise from upper-left. */
+export function planetAngle(index: number, rot: Spin = 0): number {
+  return JOURNEY_START_DEG + (index - 1) * JOURNEY_STEP_DEG + offsetOf(rot, index);
+}
+
+export function planetPosition(index: number, rot: Spin = 0): Point {
+  return polar(orbitRadius(index), planetAngle(index, rot));
 }
 
 const SHIP_LEAD = 62;
@@ -54,43 +89,187 @@ const GATE_LAG = 50;
 const arcDeg = (length: number, r: number) => (length / r) * (180 / Math.PI);
 
 /** Ship rides its step's orbit a fixed arc length ahead of the planet (toward open space). */
-export function shipAngle(index: number): number {
-  return planetAngle(index) + arcDeg(SHIP_LEAD, orbitRadius(index));
+export function shipAngle(index: number, rot: Spin = 0): number {
+  return planetAngle(index, rot) + arcDeg(SHIP_LEAD, orbitRadius(index));
 }
 
-export function shipPosition(index: number): Point {
-  return polar(orbitRadius(index), shipAngle(index));
+export function shipPosition(index: number, rot: Spin = 0): Point {
+  return polar(orbitRadius(index), shipAngle(index, rot));
 }
 
 /** Heading of the ship (tangent of the clockwise orbit), in degrees. */
-export function shipHeading(index: number): number {
-  return shipAngle(index) + 90;
+export function shipHeading(index: number, rot: Spin = 0): number {
+  return shipAngle(index, rot) + 90;
 }
 
-/** Ship label just outside the handoff ring, on the side facing away from the star. */
-export function shipLabelOffset(index: number, ringRadius: number): Point & { anchor: "start" | "end" | "middle" } {
-  const p = polar(ringRadius + 14, shipAngle(index));
+/** Axis-aligned box in map units (for keeping labels apart). */
+export interface Box {
+  l: number;
+  r: number;
+  t: number;
+  b: number;
+}
+
+export const boxesHit = (a: Box, b: Box) => a.l < b.r && b.l < a.r && a.t < b.b && b.t < a.b;
+
+/** Widest ship label ("Claude + Codex · 100%") and planet label we plan room for. */
+export const SHIP_LABEL_W = 138;
+const PLANET_LABEL_W = 120;
+/** The task name under the star. */
+export const STAR_LABEL_BOX: Box = { l: -62, r: 62, t: 32, b: 68 };
+/** The "+N comment" badge up and right of the star (see Meteor). */
+export const COMMENT_BADGE_BOX: Box = { l: STAR_R + 10, r: STAR_R + 94, t: -STAR_R - 24, b: -STAR_R - 4 };
+
+/** Box of planet `index`'s two-line label (conservative width). */
+export function planetLabelBox(index: number, rot: Spin = 0, width = PLANET_LABEL_W): Box {
+  const c = labelPosition(index, rot, width);
+  return { l: c.x - width / 2, r: c.x + width / 2, t: c.y - 13, b: c.y + 15 };
+}
+
+/** Moments of the drift used to check that a label spot stays clear while planets move. */
+let driftSamples: Spin[] | null = null;
+const samples = () => (driftSamples ??= Array.from({ length: 160 }, (_, k) => planetDrift(k * 2.5)));
+
+/** Extra room around a label being placed, so it stays clear between the sampled moments. */
+const CLEARANCE = 5;
+
+/**
+ * True when the box `at(rot)` (plus CLEARANCE) never meets a planet label (except planet `own`'s)
+ * or the star's name, at any sampled moment of the drift.
+ */
+function clearWhileDrifting(at: (rot: Spin) => Box, own?: number): boolean {
+  return samples().every((rot) => {
+    const b0 = at(rot);
+    const box = { l: b0.l - CLEARANCE, r: b0.r + CLEARANCE, t: b0.t - CLEARANCE, b: b0.b + CLEARANCE };
+    if (boxesHit(box, STAR_LABEL_BOX) || boxesHit(box, COMMENT_BADGE_BOX)) return false;
+    for (let i = 1; i <= STEPS.length; i++) {
+      if (own !== undefined && i === Math.round(own)) continue;
+      if (boxesHit(box, planetLabelBox(i, rot))) return false;
+    }
+    return true;
+  });
+}
+
+type ShipLabel = Point & { anchor: "start" | "end" | "middle" };
+
+function shipLabelAt(index: number, ringRadius: number, rot: Spin, turn: number, gap = 12): ShipLabel {
+  const p = polar(ringRadius + gap, shipAngle(index, rot) + turn);
   const anchor = Math.abs(p.x) < 12 ? "middle" : p.x > 0 ? "start" : "end";
   return { x: p.x, y: p.y + (p.y > 0 ? 8 : 0), anchor };
 }
 
-/** Gate station sits on the orbit just behind the planet. */
-export function gatePosition(index: number): Point {
-  return polar(orbitRadius(index), planetAngle(index) - arcDeg(GATE_LAG, orbitRadius(index)));
+/** Box of a ship label placed at `o` (relative to the ship at `at`). */
+export function shipLabelBox(at: Point, o: ShipLabel, width = SHIP_LABEL_W): Box {
+  const x = at.x + o.x;
+  const l = o.anchor === "start" ? x : o.anchor === "end" ? x - width : x - width / 2;
+  return { l, r: l + width, t: at.y + o.y - 12, b: at.y + o.y + 4 };
 }
 
-/** Gate label offset (relative to the gate), pointing away from its planet. */
-export function gateLabelOffset(index: number): Point & { anchor: "start" | "end" } {
-  const g = gatePosition(index);
-  const p = planetPosition(index);
-  const dx = g.x - p.x;
-  const dy = g.y - p.y;
-  const len = Math.hypot(dx, dy) || 1;
+/** Sides tried for the ship label, relative to the ship's angle: toward the star first, then away,
+ * behind, ahead and the diagonals; a little farther out when nothing close is free. */
+const SHIP_LABEL_TURNS = [180, 0, -90, 90, 135, -135, 45, -45];
+const SHIP_LABEL_GAPS = [12, 26];
+const shipTurnCache = new Map<string, { turn: number; gap: number }>();
+
+/**
+ * Which side the ship label goes on for a ship on orbit `index`: the first side that clears
+ * every planet label and the star's name in the resting layout. Fixed per orbit, so the label
+ * follows the drifting ship smoothly and never flips sides.
+ */
+function shipLabelSpot(index: number, ringRadius: number): { turn: number; gap: number } {
+  const key = `${index}|${ringRadius}`;
+  const cached = shipTurnCache.get(key);
+  if (cached !== undefined) return cached;
+  let spot = { turn: 180, gap: 12 };
+  search: for (const gap of SHIP_LABEL_GAPS) {
+    for (const turn of SHIP_LABEL_TURNS) {
+      const clear = clearWhileDrifting(
+        (rot) => shipLabelBox(shipPosition(index, rot), shipLabelAt(index, ringRadius, rot, turn, gap)),
+        index,
+      );
+      if (clear) {
+        spot = { turn, gap };
+        break search;
+      }
+    }
+  }
+  shipTurnCache.set(key, spot);
+  return spot;
+}
+
+/** Ship label just outside the handoff ring, on the side that keeps clear of other labels. */
+export function shipLabelOffset(index: number, ringRadius: number, rot: Spin = 0): ShipLabel {
+  // a ship in flight between orbits uses the side of the orbit it is closest to
+  const spot = shipLabelSpot(Math.round(index), ringRadius);
+  return shipLabelAt(index, ringRadius, rot, spot.turn, spot.gap);
+}
+
+/** Gate station sits on the orbit just behind the planet. */
+export function gatePosition(index: number, rot: Spin = 0): Point {
+  return polar(orbitRadius(index), planetAngle(index, rot) - arcDeg(GATE_LAG, orbitRadius(index)));
+}
+
+/** Widest gate label we plan room for ("Quyết finding" and the like). */
+export const GATE_LABEL_W = 112;
+
+type GateLabel = Point & { anchor: "start" | "end" | "middle" };
+
+/** Direction (degrees) from the planet to its gate: "behind" the planet on the orbit. */
+function gateBehindDeg(index: number, rot: Spin): number {
+  const g = gatePosition(index, rot);
+  const p = planetPosition(index, rot);
+  return (Math.atan2(g.y - p.y, g.x - p.x) * 180) / Math.PI;
+}
+
+function gateLabelAt(index: number, rot: Spin, turn: number, dist = 24): GateLabel {
+  const deg = gateBehindDeg(index, rot) + turn;
+  const a = (deg * Math.PI) / 180;
+  const dx = Math.cos(a);
+  const dy = Math.sin(a);
   return {
-    x: round2((dx / len) * 24),
-    y: round2((dy / len) * 24 + 4),
-    anchor: dx >= 0 ? "start" : "end",
+    x: round2(dx * dist),
+    y: round2(dy * dist + 4),
+    anchor: Math.abs(dx) < 0.35 ? "middle" : dx > 0 ? "start" : "end",
   };
+}
+
+/** Box of a gate label placed at `o` (relative to the gate at `at`). */
+export function gateLabelBox(at: Point, o: GateLabel, width = GATE_LABEL_W): Box {
+  const x = at.x + o.x;
+  const l = o.anchor === "start" ? x : o.anchor === "end" ? x - width : x - width / 2;
+  return { l, r: l + width, t: at.y + o.y - 12, b: at.y + o.y + 4 };
+}
+
+/** Behind the planet first, then turning away from it step by step. */
+const GATE_TURNS = [0, -30, 30, -60, 60, -90, 90, -120, 120, -150, 150, 180];
+/** Close to the station first; a little farther when every close spot is taken. */
+const GATE_DISTS = [24, 38, 52];
+const gateTurnCache = new Map<number, { turn: number; dist: number }>();
+
+/** The spot nearest "behind" whose label clears every resting label (fixed per step). */
+function gateLabelSpot(index: number): { turn: number; dist: number } {
+  const cached = gateTurnCache.get(index);
+  if (cached !== undefined) return cached;
+  let spot = { turn: 0, dist: 24 };
+  search: for (const dist of GATE_DISTS) {
+    for (const turn of GATE_TURNS) {
+      const clear = clearWhileDrifting(
+        (rot) => gateLabelBox(gatePosition(index, rot), gateLabelAt(index, rot, turn, dist)),
+      );
+      if (clear) {
+        spot = { turn, dist };
+        break search;
+      }
+    }
+  }
+  gateTurnCache.set(index, spot);
+  return spot;
+}
+
+/** Gate label offset (relative to the gate), on a side fixed per step that keeps clear of labels. */
+export function gateLabelOffset(index: number, rot: Spin = 0): GateLabel {
+  const spot = gateLabelSpot(index);
+  return gateLabelAt(index, rot, spot.turn, spot.dist);
 }
 
 export interface LabelLayout extends Point {
@@ -100,24 +279,33 @@ export interface LabelLayout extends Point {
   subDy: number;
 }
 
+/** Height of the two-line planet label block. */
+const LABEL_H = 28;
+
 /**
- * Two-line planet label pushed outward from the star. Planets near the top or
- * bottom get a centred label stacked away from the planet; side planets get a
- * left/right aligned one.
+ * Two-line planet label, centred on a point pushed outward from the star just far enough that
+ * the label box (`width` wide) clears the planet. It changes continuously with the angle, so a
+ * turning system never makes a label jump from one side to the other.
  */
-export function labelPosition(index: number): LabelLayout {
-  const angle = planetAngle(index);
-  const sin = Math.sin((angle * Math.PI) / 180);
-  if (sin < -0.5) {
-    const p = polar(orbitRadius(index) + 16, angle);
-    return { ...p, anchor: "middle", mainDy: -14, subDy: 0 };
-  }
-  if (sin > 0.5) {
-    const p = polar(orbitRadius(index) + 16, angle);
-    return { ...p, anchor: "middle", mainDy: 12, subDy: 26 };
-  }
-  const p = polar(orbitRadius(index) + 18, angle);
-  return { ...p, anchor: p.x > 0 ? "start" : "end", mainDy: 3, subDy: 17 };
+export function labelPosition(index: number, rot: Spin = 0, width = 96): LabelLayout {
+  const a = (planetAngle(index, rot) * Math.PI) / 180;
+  const ux = Math.cos(a);
+  const uy = Math.sin(a);
+  const gap = PLANET_R + 8;
+  const push = gap + Math.abs(ux) * (width / 2) + Math.abs(uy) * (LABEL_H / 2);
+  const r = orbitRadius(index);
+  return {
+    x: round2((r + push) * ux),
+    y: round2((r + push) * uy),
+    anchor: "middle",
+    mainDy: -2,
+    subDy: 12,
+  };
+}
+
+/** Rough width of a label in user units (Inter at the planet label sizes). */
+export function labelWidth(main: string, sub: string): number {
+  return Math.max(main.length * 7.2, sub.length * 6.2);
 }
 
 export function arcPath(r: number, startDeg: number, endDeg: number): string {
@@ -129,14 +317,14 @@ export function arcPath(r: number, startDeg: number, endDeg: number): string {
 }
 
 /** Spiral flight path from planet `from` to planet `to` (indices, from < to). */
-export function spiralPath(from: number, to: number, samples = 14): string {
+export function spiralPath(from: number, to: number, samples = 14, rot: Spin = 0): string {
   if (to <= from) return "";
   const pts: Point[] = [];
   for (let seg = from; seg < to; seg++) {
     const r0 = orbitRadius(seg);
     const r1 = orbitRadius(seg + 1);
-    const a0 = planetAngle(seg);
-    const a1 = planetAngle(seg + 1);
+    const a0 = planetAngle(seg, rot);
+    const a1 = planetAngle(seg + 1, rot);
     for (let k = seg === from ? 0 : 1; k <= samples; k++) {
       const t = k / samples;
       pts.push(polar(r0 + (r1 - r0) * t, a0 + (a1 - a0) * t));
@@ -146,10 +334,10 @@ export function spiralPath(from: number, to: number, samples = 14): string {
 }
 
 /** Curved shuttle lane between two planets, bulging away from the star. */
-export function shuttlePath(a: number, b: number): { d: string; mid: Point } {
-  const pa = planetPosition(a);
-  const pb = planetPosition(b);
-  const c = polar((orbitRadius(a) + orbitRadius(b)) / 2 + 95, (planetAngle(a) + planetAngle(b)) / 2);
+export function shuttlePath(a: number, b: number, rot: Spin = 0): { d: string; mid: Point } {
+  const pa = planetPosition(a, rot);
+  const pb = planetPosition(b, rot);
+  const c = polar((orbitRadius(a) + orbitRadius(b)) / 2 + 95, (planetAngle(a, rot) + planetAngle(b, rot)) / 2);
   const mx = 0.25 * pa.x + 0.5 * c.x + 0.25 * pb.x;
   const my = 0.25 * pa.y + 0.5 * c.y + 0.25 * pb.y;
   // the round tag sits a little outside the lane so the ship's moons never cover it
@@ -196,8 +384,12 @@ const ASTEROID_SIZE: Record<Severity, number> = { critical: 11.5, high: 10, medi
 export const BELT_START_DEG = 104;
 export const BELT_END_DEG = 204;
 
-export function beltArcPath(): string {
-  return arcPath(beltRadius(), BELT_START_DEG - 6, BELT_END_DEG + 6);
+/** The belt lies between the review and fix orbits and drifts with them. */
+const beltOffset = (rot: Spin) => offsetOf(rot, (stepIndex("crossReview") + stepIndex("fix")) / 2);
+
+export function beltArcPath(rot: Spin = 0): string {
+  const o = beltOffset(rot);
+  return arcPath(beltRadius(), BELT_START_DEG - 6 + o, BELT_END_DEG + 6 + o);
 }
 
 export interface AsteroidPlacement {
@@ -208,10 +400,14 @@ export interface AsteroidPlacement {
 }
 
 /** Spread findings along the belt. */
-export function asteroidLayout(items: { fingerprint: string; severity: Severity }[]): Map<string, AsteroidPlacement> {
+export function asteroidLayout(
+  items: { fingerprint: string; severity: Severity }[],
+  rot: Spin = 0,
+): Map<string, AsteroidPlacement> {
   const out = new Map<string, AsteroidPlacement>();
-  const start = BELT_START_DEG;
-  const end = BELT_END_DEG;
+  const o = beltOffset(rot);
+  const start = BELT_START_DEG + o;
+  const end = BELT_END_DEG + o;
   const n = items.length;
   items.forEach((item, i) => {
     const rnd = seededRandom(hashString(item.fingerprint));
@@ -335,9 +531,11 @@ export function nebulaLayout(n: number): Placement[] {
 }
 
 /** Hand-placed corners for the usual few outside sessions. */
+// The top corners sit a little lower than the very edge: the status chip (left) and the legend
+// button (right) float over the top band of the map.
 const DISTANT_SLOTS: Point[] = [
-  { x: -418, y: -330 },
-  { x: 414, y: -334 },
+  { x: -418, y: -262 },
+  { x: 414, y: -266 },
   { x: 416, y: 326 },
   { x: -412, y: 330 },
   { x: 440, y: 40 },

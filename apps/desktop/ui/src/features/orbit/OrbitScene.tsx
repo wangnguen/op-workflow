@@ -1,3 +1,4 @@
+import type { Spin } from "./geometry";
 import { useRef, useState } from "react";
 import type { PointerEvent, WheelEvent } from "react";
 import type { OrbitSnapshot } from "../../ipc/types";
@@ -37,6 +38,8 @@ interface Props {
   layout: LayoutOverrides;
   /** `persist` is true once, when the drag ends */
   onMoveItem: (key: string, p: Point, persist: boolean) => void;
+  /** degrees the planetary system has turned (see useSpin) */
+  rot?: Spin;
 }
 
 /** Starts dragging one map item (nebula, far star) from where it is drawn now. */
@@ -44,7 +47,7 @@ export type ItemDragStart = (key: string, from: Point) => (e: PointerEvent<SVGGE
 
 const DRAG_THRESHOLD_PX = 4;
 
-export function OrbitScene({ snapshot, selection, onSelect, view, onView, markers, now, layout, onMoveItem }: Props) {
+export function OrbitScene({ snapshot, selection, onSelect, view, onView, markers, now, layout, onMoveItem, rot = 0 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<{ px: number; py: number; vx: number; vy: number; moved: boolean } | null>(null);
   const justDragged = useRef(false);
@@ -155,19 +158,22 @@ export function OrbitScene({ snapshot, selection, onSelect, view, onView, marker
         <FuelRing quota={snapshot.quota} now={now} />
         {active ? (
           <>
-            <Orbits steps={active.steps} current={current} markers={markers} />
+            <Orbits steps={active.steps} current={current} markers={markers} rot={rot} />
             <Asteroids
+              rot={rot}
               findings={active.findings}
               selectedFingerprint={selection?.kind === "finding" ? selection.fingerprint : undefined}
               onSelect={(fingerprint) => onSelect({ kind: "finding", fingerprint })}
             />
             <Planets
+              rot={rot}
               steps={active.steps}
               selectedStep={selection?.kind === "step" ? selection.step : undefined}
               onSelect={(step) => onSelect({ kind: "step", step })}
             />
             {active.gate && current > 0 && (
               <GateStation
+                rot={rot}
                 gate={active.gate}
                 stepIndex={current}
                 selected={selection?.kind === "gate"}
@@ -178,6 +184,7 @@ export function OrbitScene({ snapshot, selection, onSelect, view, onView, marker
             {active.agents.map((agent) => (
               <Ship
                 key={agent.id}
+                rot={rot}
                 agent={agent}
                 orbit={agentOrbit}
                 selectedId={selection?.kind === "agent" ? selection.id : undefined}

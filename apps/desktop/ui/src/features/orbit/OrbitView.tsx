@@ -9,10 +9,11 @@ import { DetailPanel } from "./DetailPanel";
 import { Legend } from "./Legend";
 import { HOME_VIEW, OrbitScene, type ViewState } from "./OrbitScene";
 import { focusSystem, systemsOf } from "./focus";
-import { clampZoom } from "./geometry";
+import { clampZoom, planetDrift } from "./geometry";
 import { resolveSelection, type Selection } from "./selection";
 import { useCompactionMarkers } from "./useCompactionMarkers";
 import { useLayout } from "./useLayout";
+import { useMotionClock } from "./motion";
 import "./orbit.css";
 
 interface Props {
@@ -23,6 +24,8 @@ interface Props {
   onFocus?: (taskId: string | null) => void;
   /** "Bắt đầu làm việc" on an Inbox task picked on the map */
   onStartTask?: (taskId: string) => void;
+  /** the map is hidden (Phiên shows Bảng): stop the motion, keep the angle */
+  paused?: boolean;
 }
 
 function statusLine(s: OrbitSnapshot): string {
@@ -44,7 +47,7 @@ function statusLine(s: OrbitSnapshot): string {
   return parts.join(" · ");
 }
 
-export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, onStartTask }: Props) {
+export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, onStartTask, paused = false }: Props) {
   const [picked, setPicked] = useState<Selection | null>(null);
   // several tasks can be in progress; the picked one sits in the centre
   const [ownFocus, setOwnFocus] = useState<string | null>(null);
@@ -60,6 +63,9 @@ export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, on
   const markers = useCompactionMarkers(snapshot.active);
   const layout = useLayout();
   const selection = resolveSelection(picked, snapshot);
+  // planets drift on their orbits; reduced motion, a hidden map or no task stops them in place
+  const seconds = useMotionClock(!still && !paused && snapshot.active !== undefined);
+  const rot = useMemo(() => planetDrift(seconds), [seconds]);
 
   return (
     <div className={`orbit-view${still ? " is-still" : ""}`}>
@@ -74,6 +80,7 @@ export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, on
           now={now}
           layout={layout.overrides}
           onMoveItem={layout.move}
+          rot={rot}
         />
 
         <div

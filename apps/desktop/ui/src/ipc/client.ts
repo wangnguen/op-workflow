@@ -4,6 +4,7 @@ import {
   mockAppInfo,
   mockBoard,
   mockClearToken,
+  mockDeleteBranch,
   mockFetchIssues,
   mockFetchRepo,
   mockOrbit,
@@ -22,6 +23,7 @@ import type {
   BoardSnapshot,
   CommandArgs,
   Commands,
+  DeleteBranchRequest,
   IssueFetch,
   OrbitSnapshot,
   Provider,
@@ -78,6 +80,9 @@ export const getRepoState = (repo: string, wpId?: number): Promise<RepoState> =>
 /** `git fetch --prune origin` (read-only on the remote), then the fresh state. */
 export const fetchRepo = (repo: string, wpId?: number): Promise<RepoState> =>
   call("fetch_repo", () => mockFetchRepo(repo, wpId), { repo, wpId });
+/** Deletes a branch the user confirmed: local (git branch -d/-D) or on origin (git push --delete). */
+export const deleteBranch = (request: DeleteBranchRequest): Promise<RepoState> =>
+  call("delete_branch", () => mockDeleteBranch(request), { request });
 /** Creates (or switches to) the branch locally, writes brief.md, moves the task to "Đang làm". */
 export const startTask = (request: StartRequest): Promise<StartResult> =>
   call("start_task", () => mockStartTask(request), { request });

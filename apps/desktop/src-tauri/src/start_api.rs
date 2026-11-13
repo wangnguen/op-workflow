@@ -2,7 +2,9 @@
 //! Names and payloads must match `apps/desktop/ui/src/ipc/types.ts` (`Commands`).
 //! Everything that runs git, scans folders or calls OpenProject is `async` (off the UI thread).
 
-use opw_domain::view::{ApiError, IssueFetch, RepoState, StartOptions, StartRequest, StartResult};
+use opw_domain::view::{
+    ApiError, DeleteBranchRequest, IssueFetch, RepoState, StartOptions, StartRequest, StartResult,
+};
 use opw_orchestrator::AppService;
 use tauri::State;
 
@@ -27,6 +29,15 @@ pub fn fetch_repo(
     service: State<'_, AppService>,
 ) -> Result<RepoState, ApiError> {
     service.fetch_repo(&repo, wp_id)
+}
+
+/// Delete a branch the user confirmed (local, or on origin).
+#[tauri::command(async)]
+pub fn delete_branch(
+    request: DeleteBranchRequest,
+    service: State<'_, AppService>,
+) -> Result<RepoState, ApiError> {
+    service.delete_branch(&request)
 }
 
 #[tauri::command(async)]

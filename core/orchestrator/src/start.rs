@@ -2,7 +2,8 @@
 //! the brief. Plain functions over explicit inputs so they can be tested with temp repos;
 //! [`crate::AppService`] wires them to config, storage and the live task cache.
 //!
-//! Never commits, never pushes, never writes to OpenProject.
+//! Never commits, never pushes on its own, never writes to OpenProject. The branch list can
+//! delete a branch the user picked and confirmed (local, or `origin/<branch>`).
 
 use std::path::{Path, PathBuf};
 
@@ -13,11 +14,12 @@ use opw_domain::task::{
     validate_branch_name,
 };
 use opw_domain::view::{
-    ApiError, BranchOption, RepoOption, RepoState, StartOptions, StartRequest, StartResult,
+    ApiError, BranchOption, DeleteBranchRequest, RepoOption, RepoState, StartOptions, StartRequest,
+    StartResult,
 };
 use opw_storage::TaskRow;
 use opw_tracker::{Comment, WorkPackage, extract_issue_links};
-use opw_vcs::{Git, VcsError, discover_repos, origin_url, remote_slug};
+use opw_vcs::{Git, VcsError, discover_repos, is_protected_branch, origin_url, remote_slug, short_branch};
 
 /// How deep to look for repos under each workspace folder (`~/Desktop/<repo>` or
 /// `~/Desktop/<group>/<repo>`).
@@ -139,6 +141,11 @@ fn git_error(e: VcsError) -> ApiError {
         ),
         VcsError::Spawn(e) => ApiError::new("git.missing", format!("Không chạy được git: {e}")),
         VcsError::Git { stderr, .. } => ApiError::new("git", stderr),
+        VcsError::NotMerged(_) => ApiError::new(
+            "branch.notMerged",
+            "Nhánh còn commit chưa merge vào đâu. Bấm “Xoá hẳn” nếu chắc chắn bỏ các commit đó.",
+        ),
+        VcsError::Refused(why) => ApiError::new("branch.protected", format!("Không xoá: {why}")),
     }
 }
 
@@ -166,11 +173,13 @@ fn open_repo(path: &str) -> Result<(Git, PathBuf), ApiError> {
 pub fn repo_state(config: &Config, path: &str, wp_id: Option<u64>) -> Result<RepoState, ApiError> {
     let (git, top) = open_repo(path)?;
     let refs = git.branches().map_err(git_error)?;
+    let remote_default = git.remote_default();
     let branches: Vec<BranchOption> = refs
         .into_iter()
         .map(|b| {
             let track = b.track.trim_matches(['[', ']']).trim().to_owned();
             BranchOption {
+                protected: is_protected_branch(&b.name, remote_default.as_deref()),
                 name: b.name,
                 remote: b.remote,
                 committed_at: (!b.committed_at.is_empty()).then_some(b.committed_at),
@@ -203,6 +212,38 @@ pub fn repo_state(config: &Config, path: &str, wp_id: Option<u64>) -> Result<Rep
         last_base,
         suggested_branch,
     })
+}
+
+/// Delete a branch the user picked and confirmed: local (`git branch -d`, or `-D` when
+/// `force`), or `origin/<branch>` (`git push origin --delete`). Main branches, the checked-out
+/// branch and the branch of a task in "Đang làm" are refused. Returns the fresh repo state.
+pub fn delete_branch(
+    config: &Config,
+    active: &[TaskRow],
+    req: &DeleteBranchRequest,
+) -> Result<RepoState, ApiError> {
+    let (git, top) = open_repo(&req.repo)?;
+    let name = short_branch(req.branch.trim());
+    validate_branch_name(name).map_err(|e| ApiError::new("branch.invalid", e.to_string()))?;
+    if !req.remote {
+        let key = contract_home(&top);
+        let owner = active.iter().find(|t| {
+            t.branch.as_deref() == Some(name) && t.repo.as_deref().is_some_and(|r| same_path(r, &key))
+        });
+        if let Some(t) = owner {
+            return Err(ApiError::new(
+                "branch.inUse",
+                format!(
+                    "Đây là nhánh của task {} đang làm. Tạm dừng task trước rồi xoá.",
+                    t.display_id
+                ),
+            ));
+        }
+        git.delete_local_branch(name, req.force).map_err(git_error)?;
+    } else {
+        git.delete_remote_branch(name).map_err(git_error)?;
+    }
+    repo_state(config, &top.to_string_lossy(), req.wp_id)
 }
 
 /// `git fetch --prune origin` (reads the remote, never writes), then the fresh state.
@@ -432,6 +473,56 @@ mod tests {
             workspaces: vec![root.to_string_lossy().into_owned()],
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn delete_branch_keeps_main_and_in_progress_branches() {
+        let root = workspace();
+        let cfg = config_for(root.path());
+        let web = root.path().join("web");
+        let repo = web.to_string_lossy().into_owned();
+        let req = |branch: &str, force: bool| DeleteBranchRequest {
+            repo: repo.clone(),
+            branch: branch.into(),
+            remote: false,
+            force,
+            wp_id: None,
+        };
+        let (_, top) = open_repo(&repo).unwrap();
+        let active = vec![TaskRow {
+            wp_id: 1001,
+            display_id: "WP-1001".into(),
+            title: "t".into(),
+            project: "p".into(),
+            repo: Some(contract_home(&top)),
+            branch: Some("f/WP-1001".into()),
+            base: Some("development".into()),
+            column: "active".into(),
+            updated_at: "2026-11-13T00:00:00Z".into(),
+        }];
+
+        let err = delete_branch(&cfg, &active, &req("f/WP-1001", true)).unwrap_err();
+        assert_eq!(err.code, "branch.inUse");
+        assert_eq!(
+            delete_branch(&cfg, &active, &req("development", true))
+                .unwrap_err()
+                .code,
+            "branch.protected"
+        );
+        let state = delete_branch(&cfg, &active, &req("f/WP-1002", false)).unwrap();
+        assert!(!state.branches.iter().any(|b| b.name == "f/WP-1002"));
+        assert!(
+            state
+                .branches
+                .iter()
+                .any(|b| b.name == "development" && b.protected)
+        );
+        assert!(
+            state
+                .branches
+                .iter()
+                .any(|b| b.name == "f/WP-1001" && !b.protected)
+        );
     }
 
     #[test]

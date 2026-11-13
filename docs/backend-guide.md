@@ -13,6 +13,7 @@
 | Nguồn quota mới | `core/quota/src/lib.rs` | Trả về `QuotaSnapshot`; thêm fixture thật đã xoá thông tin cá nhân |
 | Kết nối quota, Kết nối lại, Đăng nhập Claude/Codex | `core/orchestrator/src/live.rs` (`ProviderLink`, `reconnect`, `open_login`) | Đăng nhập chỉ mở lệnh login của CLI trong cửa sổ console; app không đọc hay lưu thông tin đăng nhập |
 | Đọc issue GitHub qua Chrome ("Lấy issue") | `core/browser/src/github.rs` (script đọc trang, `strip_mentions`), `core/browser/src/cdp.rs`, `core/orchestrator/src/issues.rs` | Chỉ mở `github.com/<org>/<repo>/issues/<n>`; không lấy tên người; thử thật bằng test `live_read_issues` (cần bấm Allow) |
+| Xoá nhánh local / trên origin | `core/vcs/src/lib.rs` (`delete_local_branch`, `delete_remote_branch`, `PROTECTED_BRANCHES`), `start::delete_branch` | `delete_remote_branch` là lần ghi duy nhất lên remote; chỉ gọi khi người dùng bấm và gõ tên nhánh. Test chạy với một bare repo tạm |
 | Thư mục brief (`tasksDir`) | `core/orchestrator/src/folders.rs`, `AppService::set_tasks_dir` | Ghi thử trước khi chuyển; không ghi đè thư mục trùng tên |
 | Cách gọi `claude` / `codex` | `core/agents/src/claude.rs` | Tham số dạng mảng, prompt qua stdin, luôn kèm `DISALLOWED_GIT` cho bước sửa code |
 | Chặn commit/push | `core/vcs/src/guard.rs` | Test `guard_blocks_commit_and_push_but_not_fetch` phải luôn xanh |

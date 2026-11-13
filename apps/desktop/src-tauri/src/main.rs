@@ -45,6 +45,7 @@ fn main() {
             start_api::start_task,
             start_api::pause_task,
             start_api::open_brief,
+            start_api::delete_branch,
             start_api::fetch_issues,
             start_api::open_browser_debug,
             settings_api::settings_status,

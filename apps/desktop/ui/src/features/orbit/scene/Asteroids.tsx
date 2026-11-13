@@ -1,3 +1,4 @@
+import type { Spin } from "../geometry";
 import { findingStateLabel, severityLabel } from "../../../i18n/vi";
 import type { FindingView } from "../../../ipc/types";
 import { asteroidLayout, asteroidShape, beltArcPath } from "../geometry";
@@ -7,15 +8,17 @@ interface Props {
   findings: FindingView[];
   selectedFingerprint: string | undefined;
   onSelect: (fingerprint: string) => void;
+  /** degrees the system has turned */
+  rot?: Spin;
 }
 
 /** Findings as an asteroid belt between the Review and Fix orbits. */
-export function Asteroids({ findings, selectedFingerprint, onSelect }: Props) {
+export function Asteroids({ findings, selectedFingerprint, onSelect, rot = 0 }: Props) {
   if (findings.length === 0) return null;
-  const layout = asteroidLayout(findings);
+  const layout = asteroidLayout(findings, rot);
   return (
     <g className="belt">
-      <path d={beltArcPath()} className="belt-ring" aria-hidden="true" />
+      <path d={beltArcPath(rot)} className="belt-ring" aria-hidden="true" />
       {findings.map((f) => {
         const p = layout.get(f.fingerprint);
         if (!p) return null;

@@ -319,6 +319,26 @@ pub struct BranchOption {
     /// e.g. `ahead 2`, `behind 14`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track: Option<String>,
+    /// Main branch (main, development, the remote's default, ...): never offered for deletion.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub protected: bool,
+}
+
+/// Delete one branch from the branch list (the user picked it and confirmed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteBranchRequest {
+    pub repo: String,
+    /// `f/WP-1` or `origin/f/WP-1`.
+    pub branch: String,
+    /// delete `origin/<branch>` instead of the local branch
+    pub remote: bool,
+    /// local only: also drop commits that are not merged anywhere (`git branch -D`)
+    #[serde(default)]
+    pub force: bool,
+    /// to refresh the suggested branch name of the dialog's task
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wp_id: Option<u64>,
 }
 
 /// Branches and working-tree state of one repo.
@@ -593,6 +613,7 @@ mod tests {
                 remote: true,
                 committed_at: None,
                 track: None,
+                protected: true,
             }],
             current: Some("development".into()),
             dirty: vec![],
@@ -603,7 +624,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&state).unwrap(),
             json!({"path": "C:/code/acme-web", "name": "acme-web",
-                   "branches": [{"name": "origin/development", "remote": true}],
+                   "branches": [{"name": "origin/development", "remote": true, "protected": true}],
                    "current": "development", "dirty": [], "dirtyCount": 0,
                    "suggestedBranch": "f/WP-188001"})
         );

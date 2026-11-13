@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- op-workflow: a task flowing through its steps to done.
+       Done step (violet) → step in progress (ring) → finished task (amber, check),
+       over a faint orbit that ties it to the app's Quỹ đạo map.
+       Source for every app icon: pnpm tauri icon apps/desktop/src-tauri/icons/app-icon.svg -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#262b57"/>
+      <stop offset="1" stop-color="#0b0d1b"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="300" y1="724" x2="724" y2="300" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b7bff"/>
+      <stop offset="0.55" stop-color="#c79bff"/>
+      <stop offset="1" stop-color="#ffb35c"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="724" cy="300" r="230" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffb35c" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffb35c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="goal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffc979"/>
+      <stop offset="1" stop-color="#ff8f3a"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="32" y="32" width="960" height="960" rx="216" fill="url(#bg)"/>
+  <rect x="32" y="32" width="960" height="960" rx="216" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="6"/>
+
+  <!-- faint orbit -->
+  <circle cx="512" cy="512" r="318" fill="none" stroke="#a9b4ff" stroke-opacity="0.16" stroke-width="16"/>
+
+  <!-- the flow -->
+  <circle cx="724" cy="300" r="230" fill="url(#glow)"/>
+  <path d="M 300 724 C 300 604 420 560 512 512 C 604 464 724 420 724 300"
+        fill="none" stroke="url(#flow)" stroke-width="58" stroke-linecap="round"/>
+
+  <!-- step done -->
+  <circle cx="300" cy="724" r="66" fill="#8b7bff"/>
+  <circle cx="300" cy="724" r="66" fill="none" stroke="#0b0d1b" stroke-opacity="0.35" stroke-width="10"/>
+
+  <!-- step in progress -->
+  <circle cx="512" cy="512" r="60" fill="#13162c" stroke="#d6b8ff" stroke-width="26"/>
+
+  <!-- task done -->
+  <circle cx="724" cy="300" r="118" fill="url(#goal)"/>
+  <path d="M 670 302 L 710 342 L 784 262" fill="none" stroke="#ffffff" stroke-width="40"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

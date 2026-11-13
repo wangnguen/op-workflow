@@ -45,13 +45,16 @@ export function App() {
         onOpenRelease={openRelease}
       />
       <main className="app-main">
-        {tab === "task" && board.data && (
-          <TaskBoard board={board.data} onSettings={() => setSettingsOpen(true)} onChanged={refreshAll} />
-        )}
-        {tab === "workspace" && <WorkspacePlaceholder />}
-        {tab === "sessions" && (
-          <SessionsView snapshot={orbit.data} board={board.data} now={now} onChanged={refreshAll} />
-        )}
+        {/* keyed by tab: the new screen fades in instead of popping */}
+        <div className="tab-pane" key={tab}>
+          {tab === "task" && board.data && (
+            <TaskBoard board={board.data} onSettings={() => setSettingsOpen(true)} onChanged={refreshAll} />
+          )}
+          {tab === "workspace" && <WorkspacePlaceholder />}
+          {tab === "sessions" && (
+            <SessionsView snapshot={orbit.data} board={board.data} now={now} onChanged={refreshAll} />
+          )}
+        </div>
       </main>
       {settingsOpen && (
         <SettingsDialog

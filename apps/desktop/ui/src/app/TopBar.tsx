@@ -54,10 +54,13 @@ export function TopBar({
   return (
     <header className="topbar">
       <div className="brand">
-        <svg viewBox="-12 -12 24 24" width={20} height={20} aria-hidden="true">
-          <circle r={4} className="brand-star" />
-          <circle r={8} className="brand-orbit" />
-          <circle cx={8} r={2} className="brand-planet" />
+        {/* the app icon in small: a task flows from a done step through the current one to done */}
+        <svg viewBox="0 0 24 24" width={20} height={20} aria-hidden="true" className="brand-mark">
+          <path d="M6.5 17.5C6.5 14.6 9.5 13.2 12 12s5.5-2.6 5.5-5.5" className="brand-flow" />
+          <circle cx={6.5} cy={17.5} r={2.4} className="brand-done" />
+          <circle cx={12} cy={12} r={1.9} className="brand-live" />
+          <circle cx={17.5} cy={6.5} r={4.2} className="brand-goal" />
+          <path d="M15.6 6.6l1.3 1.3 2.4-2.6" className="brand-check" />
         </svg>
         <span>{vi.app.name}</span>
       </div>

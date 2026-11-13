@@ -8,6 +8,20 @@
   min-height: 0;
   overflow: hidden;
 }
+.tab-pane {
+  height: 100%;
+  animation: tab-in var(--dur-base) var(--ease-out);
+}
+@keyframes tab-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
 
 /* ---------- top bar ---------- */
 
@@ -26,15 +40,32 @@
   font-weight: 700;
   letter-spacing: 0.01em;
 }
-.brand-star {
-  fill: var(--star-mid);
+.brand-mark {
+  flex: none;
 }
-.brand-orbit {
+.brand-flow {
   fill: none;
-  stroke: rgba(200, 210, 255, 0.35);
+  stroke: #b49bff;
+  stroke-width: 2.2;
+  stroke-linecap: round;
 }
-.brand-planet {
-  fill: var(--codex);
+.brand-done {
+  fill: #8b7bff;
+}
+.brand-live {
+  fill: var(--chrome);
+  stroke: #d6b8ff;
+  stroke-width: 1.6;
+}
+.brand-goal {
+  fill: #ffa94d;
+}
+.brand-check {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .tabs {
   display: flex;

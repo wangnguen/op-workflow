@@ -5,6 +5,7 @@ import type {
   AgentView,
   AppInfo,
   BoardSnapshot,
+  DeleteBranchRequest,
   DistantSession,
   FindingState,
   FindingView,
@@ -282,7 +283,7 @@ export function mockReconnect(provider?: Provider): null {
 }
 
 export function mockAppInfo(): AppInfo {
-  return { version: "0.1.0-demo", core: "mock" };
+  return { version: "0.2.0-demo", core: "mock" };
 }
 
 export function mockQuota(frameIndex: number, now: number): QuotaSnapshot[] {
@@ -633,12 +634,15 @@ export function mockRepoState(path: string, wpId?: number): RepoState {
   return {
     path,
     name: repo.name,
-    branches: repo.branches.map(([name, ageMin, track]) => ({
-      name,
-      remote: name.startsWith("origin/"),
-      committedAt: new Date(now - ageMin * 60_000).toISOString(),
-      track,
-    })),
+    branches: repo.branches
+      .filter(([name]) => !mockDeleted.has(`${path}|${name}`))
+      .map(([name, ageMin, track]) => ({
+        name,
+        remote: name.startsWith("origin/"),
+        committedAt: new Date(now - ageMin * 60_000).toISOString(),
+        track,
+        protected: MOCK_PROTECTED.has(name.replace(/^origin\//, "")) || undefined,
+      })),
     current: repo.branches.find(([n]) => !n.startsWith("origin/"))?.[0],
     dirty: repo.dirty,
     dirtyCount: repo.dirty.length,
@@ -648,6 +652,21 @@ export function mockRepoState(path: string, wpId?: number): RepoState {
 }
 
 export const mockFetchRepo = (path: string, wpId?: number): RepoState => mockRepoState(path, wpId);
+
+const MOCK_PROTECTED = new Set(["main", "master", "develop", "development", "production", "staging", "release"]);
+/** Branches deleted in the browser preview (memory only). */
+const mockDeleted = new Set<string>();
+
+/** Browser preview: hides the branch; a local branch named *wip* pretends to be unmerged. */
+export function mockDeleteBranch(req: DeleteBranchRequest): RepoState {
+  const short = req.branch.replace(/^origin\//, "");
+  if (MOCK_PROTECTED.has(short)) throw { code: "branch.protected", message: `Không xoá: ${short} là nhánh chính` };
+  if (!req.remote && !req.force && short.includes("wip")) {
+    throw { code: "branch.notMerged", message: "Nhánh còn commit chưa merge vào đâu." };
+  }
+  mockDeleted.add(`${req.repo}|${req.remote ? `origin/${short}` : short}`);
+  return mockRepoState(req.repo, req.wpId);
+}
 
 export function mockStartTask(req: StartRequest): StartResult {
   const repo = MOCK_REPOS.find((r) => mockPath(r.name) === req.repo);
@@ -665,9 +684,9 @@ export function mockStartTask(req: StartRequest): StartResult {
 
 export function mockUpdate(): UpdateView {
   return {
-    current: "0.1.0",
+    current: "0.2.0",
     enabled: true,
-    latest: "0.2.0",
+    latest: "0.3.0",
     available: true,
     url: "https://github.com/wangnguen/op-workflow/releases",
     publishedAt: new Date(Date.now() - 2 * 86_400_000).toISOString(),

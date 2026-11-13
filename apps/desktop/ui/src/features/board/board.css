@@ -410,6 +410,100 @@
   color: var(--text-faint);
   font-size: 11.5px;
   text-align: right;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+/* delete: a trash button takes the age's place on hover, so nothing shifts */
+.branch-row {
+  position: relative;
+}
+.branch-del {
+  position: absolute;
+  top: 2px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-faint);
+  opacity: 0;
+  cursor: pointer;
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.branch-row:hover .branch-del,
+.branch-row:focus-within .branch-del,
+.branch-row.is-confirming .branch-del {
+  opacity: 1;
+}
+.branch-del:hover,
+.branch-row.is-confirming .branch-del {
+  background: var(--st-failed-soft);
+  color: var(--st-failed);
+}
+.branch-row.has-delete:hover .branch-age,
+.branch-row.has-delete:focus-within .branch-age,
+.branch-row.is-confirming .branch-age {
+  opacity: 0;
+}
+.branch-confirm {
+  display: grid;
+  gap: 8px;
+  margin: 2px 4px 6px 28px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--fill);
+  animation: confirm-in var(--dur-fast) var(--ease-out);
+}
+.branch-confirm p {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.branch-confirm p .icon {
+  flex: none;
+  margin-top: 2px;
+}
+.branch-confirm p.branch-confirm-warn {
+  color: var(--st-failed);
+}
+.branch-confirm input {
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: var(--control);
+  box-shadow: var(--shadow-control);
+  color: var(--text);
+  font-size: 12.5px;
+}
+.branch-confirm input:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--focus);
+}
+.branch-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+@keyframes confirm-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .branch-empty {
   display: flex;

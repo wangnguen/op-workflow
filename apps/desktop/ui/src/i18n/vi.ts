@@ -183,6 +183,20 @@ export const vi = {
     context: "context",
   },
   start: {
+    deleteLocalHint: "Xoá nhánh này ở máy",
+    deleteRemoteHint: "Xoá nhánh này trên origin",
+    deleteLocalAsk: (b: string) =>
+      `Xoá nhánh local ${b}? Commit đã merge không mất; nhánh cùng tên trên origin (nếu có) vẫn giữ.`,
+    deleteNotMerged: (b: string) =>
+      `${b} còn commit chưa merge vào nhánh nào. "Xoá hẳn" sẽ bỏ các commit đó ở máy này.`,
+    deleteRemoteAsk: (b: string) =>
+      `Xoá ${b} trên origin? Không hoàn tác được: ai đang dùng nhánh này sẽ mất nó. Nhánh local cùng tên vẫn giữ.`,
+    deleteTypeName: (b: string) => `Gõ ${b} để xác nhận`,
+    deleteCancel: "Huỷ",
+    deleteLocalDo: "Xoá nhánh",
+    deleteForceDo: "Xoá hẳn",
+    deleteRemoteDo: "Xoá trên origin",
+    deleting: "Đang xoá…",
     title: "Bắt đầu làm việc",
     loading: "Đang tìm repo trong workspace…",
     repo: "Repo",
@@ -253,6 +267,7 @@ export const vi = {
     showOnMap: "Trên bản đồ",
     showOnMapHint: "Đưa task này vào giữa bản đồ Quỹ đạo",
     yourTurn: (step: string) => `Xong ${step} · tới lượt bạn code`,
+    summary: (active: number, inbox: number) => `${active} đang làm · ${inbox} trong Inbox`,
     notStarted: "Chưa chạy bước nào",
   },
   orbit: {
@@ -315,6 +330,7 @@ export const vi = {
       ["satellite", "Vệ tinh", "subagent; vệ tinh tím là Codex do Claude gọi"],
       ["asteroid", "Thiên thạch", "finding, màu theo mức; tan khi đã fix, xám khi chấp nhận"],
       ["gate", "Trạm vàng", "cổng chờ bạn: duyệt plan, quyết finding, AI hỏi"],
+      ["compaction", "Hình thoi nhỏ", "AI đã compact context ở bước này (rê chuột để xem số lần)"],
       ["meteor", "Sao băng", "comment mới trên OpenProject"],
       ["fuel", "Vành nhiên liệu", "quota Claude và Codex (5 giờ, tuần)"],
       ["nebula", "Tinh vân", "task trong Inbox khi chưa có task đang làm"],

@@ -103,6 +103,14 @@ button:disabled {
   color: var(--on-accent);
   font-weight: 600;
 }
+.btn--danger {
+  background: var(--st-failed);
+  color: #fff;
+  font-weight: 600;
+}
+.btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--st-failed) 86%, black);
+}
 .btn--primary:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 88%, white);
 }

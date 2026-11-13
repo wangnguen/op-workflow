@@ -1,3 +1,4 @@
+import type { Spin } from "../geometry";
 import { gateLabel } from "../../../i18n/vi";
 import type { GateView } from "../../../ipc/types";
 import { gateLabelOffset, gatePosition } from "../geometry";
@@ -8,12 +9,14 @@ interface Props {
   stepIndex: number;
   selected: boolean;
   onSelect: () => void;
+  /** degrees the system has turned */
+  rot?: Spin;
 }
 
 /** Glowing amber station on the orbit where the workflow waits for you. */
-export function GateStation({ gate, stepIndex, selected, onSelect }: Props) {
-  const p = gatePosition(stepIndex);
-  const label = gateLabelOffset(stepIndex);
+export function GateStation({ gate, stepIndex, selected, onSelect, rot = 0 }: Props) {
+  const p = gatePosition(stepIndex, rot);
+  const label = gateLabelOffset(stepIndex, rot);
   return (
     <g
       transform={`translate(${p.x} ${p.y})`}

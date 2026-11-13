@@ -97,12 +97,21 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
   };
   const card = (taskId: string) => tasks.find((t) => t.id === taskId);
   const inbox = tasks.filter((t) => t.column === "inbox");
+  const activeCount = tasks.filter((t) => t.column === "active").length;
   const reading = new Set(tasks.filter((t) => start.reading.has(t.wpId)).map((t) => t.id));
   const fail = (e: unknown) => start.setFlash({ kind: "warn", text: errorMessage(e) });
 
+  // Both views stay mounted: switching only fades the other one in on top, so nothing is
+  // rebuilt and the map keeps its zoom, position and selection.
+  const pane = (which: Mode) => ({
+    className: `sessions-pane sessions-pane--${which}${mode === which ? " is-shown" : ""}`,
+    "aria-hidden": mode !== which,
+    inert: mode !== which,
+  });
+
   return (
     <div className="sessions">
-      <div className={`sessions-bar sessions-bar--${mode}`}>
+      <header className="sessions-head">
         <SegmentedControl<Mode>
           label={vi.tabs.sessions}
           value={mode}
@@ -112,45 +121,50 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
             { value: "board", label: vi.sessions.board, icon: <Icon name="layers" size={12} /> },
           ]}
         />
+        {board && <span className="sessions-summary faint">{vi.sessions.summary(activeCount, inbox.length)}</span>}
         <StartMenu inbox={inbox} disabled={!board} onPick={start.open} />
-      </div>
-      {start.banner && <div className={`sessions-banner sessions-banner--${mode}`}>{start.banner}</div>}
+      </header>
       <div className="sessions-body">
-        {snapshot ? (
-          mode === "orbit" ? (
-            <OrbitView
-              snapshot={snapshot}
-              now={now}
-              focusId={focusId}
-              onFocus={setFocusId}
-              onStartTask={(taskId) => {
-                const c = card(taskId);
-                if (c) start.open(c);
-              }}
-            />
-          ) : (
-            <SessionBoard
-              snapshot={snapshot}
-              onShow={(taskId) => {
-                setFocusId(taskId);
-                changeMode("orbit");
-              }}
-              onIssues={(taskId) => {
-                const c = card(taskId);
-                if (c) start.readIssues(c);
-              }}
-              onBrief={
-                isMockMode()
-                  ? undefined
-                  : (taskId) => {
-                      const c = card(taskId);
-                      if (c) openBrief(c.wpId).catch(fail);
-                    }
-              }
-              reading={reading}
-            />
-          )
-        ) : null}
+        {start.banner && <div className="sessions-banner">{start.banner}</div>}
+        {snapshot && (
+          <>
+            <div {...pane("orbit")}>
+              <OrbitView
+                snapshot={snapshot}
+                now={now}
+                focusId={focusId}
+                onFocus={setFocusId}
+                paused={mode !== "orbit"}
+                onStartTask={(taskId) => {
+                  const c = card(taskId);
+                  if (c) start.open(c);
+                }}
+              />
+            </div>
+            <div {...pane("board")}>
+              <SessionBoard
+                snapshot={snapshot}
+                onShow={(taskId) => {
+                  setFocusId(taskId);
+                  changeMode("orbit");
+                }}
+                onIssues={(taskId) => {
+                  const c = card(taskId);
+                  if (c) start.readIssues(c);
+                }}
+                onBrief={
+                  isMockMode()
+                    ? undefined
+                    : (taskId) => {
+                        const c = card(taskId);
+                        if (c) openBrief(c.wpId).catch(fail);
+                      }
+                }
+                reading={reading}
+              />
+            </div>
+          </>
+        )}
       </div>
       {start.dialog}
     </div>

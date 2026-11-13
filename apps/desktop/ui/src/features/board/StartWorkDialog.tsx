@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { vi } from "../../i18n/vi";
-import { errorCode, errorMessage, fetchRepo, getRepoState, getStartOptions, startTask } from "../../ipc/client";
+import {
+  deleteBranch,
+  errorCode,
+  errorMessage,
+  fetchRepo,
+  getRepoState,
+  getStartOptions,
+  startTask,
+} from "../../ipc/client";
 import type { BranchOption, RepoOption, RepoState, StartOptions, StartResult, TaskCard } from "../../ipc/types";
 import { formatRelative } from "../../shared/format";
 import { Icon } from "../../shared/ui/Icon";
@@ -24,13 +32,31 @@ interface RowProps {
   current: boolean;
   lastBase: boolean;
   onPick: (name: string) => void;
+  /** absent for main branches, the checked-out one and branches of tasks in progress */
+  onDelete?: () => void;
+  /** the confirm panel, while this branch is being deleted */
+  confirm?: ReactNode;
 }
 
-function BranchRow({ b, picked, current, lastBase, onPick }: RowProps) {
+/** A branch being deleted: what the user confirmed so far. */
+interface Deleting {
+  name: string;
+  remote: boolean;
+  /** "force": git refused because of unmerged commits; ask once more */
+  stage: "ask" | "force";
+  /** remote only: the user types the branch name to confirm */
+  typed: string;
+  busy: boolean;
+  error?: string;
+}
+
+const shortName = (name: string) => name.replace(/^origin\//, "");
+
+function BranchRow({ b, picked, current, lastBase, onPick, onDelete, confirm }: RowProps) {
   const { prefix, leaf } = branchParts(b.name);
   const track = trackText(b.track);
   return (
-    <li>
+    <li className={`branch-row${onDelete ? " has-delete" : ""}${confirm ? " is-confirming" : ""}`}>
       <button
         type="button"
         role="option"
@@ -55,6 +81,18 @@ function BranchRow({ b, picked, current, lastBase, onPick }: RowProps) {
         </span>
         <span className="branch-age">{formatRelative(b.committedAt, Date.now())}</span>
       </button>
+      {onDelete && (
+        <button
+          type="button"
+          className="branch-del"
+          title={b.remote ? t.deleteRemoteHint : t.deleteLocalHint}
+          aria-label={`${b.remote ? t.deleteRemoteHint : t.deleteLocalHint}: ${b.name}`}
+          onClick={onDelete}
+        >
+          <Icon name="trash" size={13} />
+        </button>
+      )}
+      {confirm}
     </li>
   );
 }
@@ -77,6 +115,7 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
   const [showDirty, setShowDirty] = useState(false);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [del, setDel] = useState<Deleting | null>(null);
   const filterRef = useRef<HTMLInputElement>(null);
   const request = useRef(0);
   const baseRef = useRef(base);
@@ -84,11 +123,17 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !starting) onClose();
+      if (e.key !== "Escape") return;
+      // Esc first closes an open delete confirmation, then the dialog
+      if (del) {
+        if (!del.busy) setDel(null);
+        return;
+      }
+      if (!starting) onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose, starting]);
+  }, [onClose, starting, del]);
 
   useEffect(() => {
     let alive = true;
@@ -148,6 +193,7 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
   const loadRef = useRef(loadRepo);
   loadRef.current = loadRepo;
   useEffect(() => {
+    setDel(null);
     if (!opts || !repoPath) {
       setRepo(null);
       return;
@@ -176,6 +222,77 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
     setBase(b);
     const found = repo?.branches.find((x) => x.name === b);
     if (found) setScope(scopeOf(found));
+  };
+
+  // tasks in "Đang làm" keep their branch; main branches and the checked-out one are never offered
+  const inUse = new Set(inProgress.filter((c) => c.repo === repo?.name && c.branch).map((c) => c.branch));
+  const canDelete = (b: BranchOption) =>
+    !b.protected && repoBusy === null && (b.remote || (b.name !== repo?.current && !inUse.has(b.name)));
+
+  const runDelete = (force: boolean) => {
+    if (!repo || !del) return;
+    const target = del;
+    setDel({ ...target, busy: true, error: undefined });
+    deleteBranch({ repo: repo.path, branch: target.name, remote: target.remote, force, wpId: task.wpId })
+      .then((s) => {
+        setDel(null);
+        applyRepo(s, true);
+      })
+      .catch((e: unknown) => {
+        const notMerged = errorCode(e) === "branch.notMerged";
+        setDel({
+          ...target,
+          busy: false,
+          stage: notMerged ? "force" : target.stage,
+          error: notMerged ? undefined : errorMessage(e),
+        });
+      });
+  };
+
+  const confirmFor = (b: BranchOption): ReactNode => {
+    if (!del || del.name !== b.name) return undefined;
+    const short = shortName(b.name);
+    const typedOk = !del.remote || del.typed.trim() === short;
+    const text = del.remote
+      ? t.deleteRemoteAsk(short)
+      : del.stage === "force"
+        ? t.deleteNotMerged(short)
+        : t.deleteLocalAsk(short);
+    const doLabel = del.remote ? t.deleteRemoteDo : del.stage === "force" ? t.deleteForceDo : t.deleteLocalDo;
+    return (
+      <div className="branch-confirm" role="alertdialog" aria-label={text}>
+        <p className={del.remote || del.stage === "force" ? "branch-confirm-warn" : undefined}>
+          <Icon name="alert" size={13} />
+          <span>{text}</span>
+        </p>
+        {del.remote && (
+          <input
+            className="mono"
+            autoFocus
+            spellCheck={false}
+            placeholder={t.deleteTypeName(short)}
+            aria-label={t.deleteTypeName(short)}
+            value={del.typed}
+            disabled={del.busy}
+            onChange={(e) => setDel({ ...del, typed: e.target.value })}
+            onKeyDown={(e) => e.key === "Enter" && typedOk && !del.busy && runDelete(false)}
+          />
+        )}
+        {del.error && <p className="note note--error">{del.error}</p>}
+        <div className="branch-confirm-actions">
+          <button className="btn btn--sm btn--ghost" disabled={del.busy} onClick={() => setDel(null)}>
+            {t.deleteCancel}
+          </button>
+          <button
+            className="btn btn--sm btn--danger"
+            disabled={del.busy || !typedOk}
+            onClick={() => runDelete(del.stage === "force")}
+          >
+            {del.busy ? t.deleting : doLabel}
+          </button>
+        </div>
+      </div>
+    );
   };
 
   const addOther = () => {
@@ -357,6 +474,12 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
                         current={b.name === repo?.current}
                         lastBase={b.name === repo?.lastBase}
                         onPick={pickBase}
+                        onDelete={
+                          canDelete(b)
+                            ? () => setDel({ name: b.name, remote: b.remote, stage: "ask", typed: "", busy: false })
+                            : undefined
+                        }
+                        confirm={confirmFor(b)}
                       />
                     ))}
                   </ul>

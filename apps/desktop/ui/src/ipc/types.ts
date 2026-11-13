@@ -201,6 +201,20 @@ export interface BranchOption {
   committedAt?: string;
   /** "ahead 2", "behind 14" */
   track?: string;
+  /** main branch (main, development, the remote's default…): never offered for deletion */
+  protected?: boolean;
+}
+
+/** Delete one branch from the branch list (the user picked it and confirmed). */
+export interface DeleteBranchRequest {
+  repo: string;
+  /** "f/WP-1" or "origin/f/WP-1" */
+  branch: string;
+  /** delete origin/<branch> instead of the local branch */
+  remote: boolean;
+  /** local only: also drop commits that are not merged anywhere (git branch -D) */
+  force?: boolean;
+  wpId?: number;
 }
 
 export interface RepoState {
@@ -368,6 +382,7 @@ export interface Commands {
   start_options: StartOptions;
   repo_state: RepoState;
   fetch_repo: RepoState;
+  delete_branch: RepoState;
   start_task: StartResult;
   pause_task: null;
   open_brief: null;
@@ -387,6 +402,7 @@ export interface CommandArgs {
   start_options: { wpId: number };
   repo_state: { repo: string; wpId?: number };
   fetch_repo: { repo: string; wpId?: number };
+  delete_branch: { request: DeleteBranchRequest };
   start_task: { request: StartRequest };
   pause_task: { wpId: number };
   open_brief: { wpId: number };

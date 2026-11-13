@@ -17,6 +17,7 @@ export function Meteor({ count, onSelect }: Props) {
         <circle r={2.4} className="meteor-head" />
       </g>
       <g
+        // geometry's COMMENT_BADGE_BOX keeps ship and gate labels off this badge
         transform={`translate(${STAR_R + 10} ${-STAR_R - 14})`}
         className="comment-badge"
         {...interactive(vi.orbit.newComment(count), onSelect)}

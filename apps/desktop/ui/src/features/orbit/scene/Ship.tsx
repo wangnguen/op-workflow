@@ -1,6 +1,8 @@
+import type { Spin } from "../geometry";
 import { agentLabel } from "../../../i18n/vi";
 import type { AgentView } from "../../../ipc/types";
 import { atmosphereRadius, handoffRingRadius, polar, shipHeading, shipLabelOffset, shipPosition } from "../geometry";
+import { useTween } from "../motion";
 import { interactive } from "./interactive";
 
 interface Props {
@@ -9,6 +11,8 @@ interface Props {
   orbit: number;
   selectedId: string | undefined;
   onSelect: (agentId: string) => void;
+  /** degrees the system has turned */
+  rot?: Spin;
 }
 
 // Ship art drawn by Codex (codex exec, 2026-11-13): nose toward +x, mirror-symmetric.
@@ -27,15 +31,17 @@ const SHIP_SCALE = 1.15;
  * The agent as a ship. Its atmosphere is the context (dashed ring = handoff
  * threshold); subagents orbit as satellites, child agents (Codex) as violet moons.
  */
-export function Ship({ agent, orbit, selectedId, onSelect }: Props) {
-  const p = shipPosition(orbit);
+export function Ship({ agent, orbit, selectedId, onSelect, rot = 0 }: Props) {
+  // a new step flies the ship along the spiral to its next orbit
+  const at = useTween(orbit);
+  const p = shipPosition(at, rot);
   const atmo = atmosphereRadius(agent.contextTokens, agent.handoffAt);
   const ring = handoffRingRadius();
   const ratio = agent.handoffAt > 0 ? agent.contextTokens / agent.handoffAt : 0;
   const running = agent.subagents.filter((s) => s.status === "running");
   const selected = selectedId === agent.id;
   const pct = Math.round(ratio * 100);
-  const label = shipLabelOffset(orbit, ring);
+  const label = shipLabelOffset(at, ring, rot);
 
   return (
     <g className="ship-anchor" style={{ transform: `translate(${p.x}px, ${p.y}px)` }}>
@@ -46,7 +52,7 @@ export function Ship({ agent, orbit, selectedId, onSelect }: Props) {
         <circle r={1} className="ship-atmo" fill={`url(#g-atmo-${agent.kind})`} style={{ transform: `scale(${atmo})` }} />
         <circle r={ring} className={`ship-handoff${ratio >= 0.9 ? " is-hot" : ""}`} />
         <circle r={ring + 4} className="ship-hit" />
-        <g transform={`rotate(${shipHeading(orbit)}) scale(${SHIP_SCALE})`}>
+        <g transform={`rotate(${shipHeading(at, rot)}) scale(${SHIP_SCALE})`}>
           {agent.status === "running" && (
             <g className="ship-flame">
               <path d={SHIP.flame} className="ship-flame-outer" />

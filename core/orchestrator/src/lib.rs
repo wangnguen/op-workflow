@@ -20,9 +20,9 @@ use std::time::Duration;
 use opw_config::{Config, secrets};
 use opw_domain::task::display_id;
 use opw_domain::view::{
-    ApiError, AppInfo, BoardSnapshot, DataMode, InboxItem, IssueFetch, OrbitSnapshot, ProjectMemory,
-    Provider, QuotaSnapshot, RepoState, SettingsView, StartOptions, StartRequest, StartResult, StepRef,
-    StepView, TaskCard, TaskColumn, TaskSystem, TasksDirChange, TodayStats, UpdateView,
+    ApiError, AppInfo, BoardSnapshot, DataMode, DeleteBranchRequest, InboxItem, IssueFetch, OrbitSnapshot,
+    ProjectMemory, Provider, QuotaSnapshot, RepoState, SettingsView, StartOptions, StartRequest, StartResult,
+    StepRef, StepView, TaskCard, TaskColumn, TaskSystem, TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
@@ -332,6 +332,24 @@ impl AppService {
     /// Branches and working tree of one repo (runs git; off the UI thread).
     pub fn repo_state(&self, repo: &str, wp_id: Option<u64>) -> Result<RepoState, ApiError> {
         start::repo_state(&self.config(), repo, wp_id)
+    }
+
+    /// Delete a branch the user confirmed in the branch list (local, or on origin: network).
+    pub fn delete_branch(&self, req: &DeleteBranchRequest) -> Result<RepoState, ApiError> {
+        let state = start::delete_branch(&self.config(), &self.active_rows(), req)?;
+        if let Some(store) = &self.store {
+            if let Ok(store) = store.lock() {
+                let where_ = if req.remote { "origin" } else { "local" };
+                let detail = format!("{} ({where_}) in {}", req.branch, state.name);
+                let _ = store.log_event(
+                    &opw_quota::now_rfc3339(),
+                    req.wp_id,
+                    "branch.deleted",
+                    Some(&detail),
+                );
+            }
+        }
+        Ok(state)
     }
 
     /// `git fetch --prune origin`, then the fresh state (network; off the UI thread).

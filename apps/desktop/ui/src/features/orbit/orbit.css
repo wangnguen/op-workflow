@@ -120,12 +120,9 @@
 .legend li {
   display: grid;
   grid-template-columns: 22px 1fr;
-  gap: 8px;
-  align-items: start;
+  gap: 10px;
+  align-items: center;
   font-size: 12px;
-}
-.legend svg {
-  margin-top: 1px;
 }
 
 .orbit-controls {
@@ -136,6 +133,8 @@
   flex-direction: column;
   gap: 6px;
 }
+/* buttons floating over the map are solid, so labels under them never show through */
+.orbit-legend > .btn,
 .orbit-controls .btn {
   background: var(--overlay);
   font-size: 15px;
@@ -215,8 +214,8 @@
 }
 .compaction-text {
   fill: #a9e8ff;
-  font-size: 10.5px;
-  text-anchor: end;
+  font-size: 10px;
+  text-anchor: middle;
 }
 
 /* ---------- star ---------- */
@@ -385,8 +384,10 @@
 
 /* ---------- ship ---------- */
 
+/* no CSS transition here: the system turns every frame, and the move to a new orbit is tweened
+   in JS (useTween) along the spiral, so the ship never lags behind its planet */
 .ship-anchor {
-  transition: transform 1.5s cubic-bezier(0.65, 0, 0.35, 1);
+  will-change: transform;
 }
 .ship-atmo {
   transition: transform 0.9s ease;
@@ -719,40 +720,38 @@
   text-anchor: middle;
 }
 
-/* ---------- legend icons ---------- */
+/* ---------- legend icons: one plain shape each, in a uniform tile ---------- */
 
+.legend-ico {
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  overflow: visible;
+}
+.legend-ico * {
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .lg-star {
   fill: var(--star-mid);
 }
-.lg-orbit {
+.lg-line {
   fill: none;
-  stroke: rgba(200, 210, 255, 0.5);
+  stroke: rgba(200, 210, 255, 0.55);
 }
-.lg-planet-done {
+.lg-planet {
   fill: var(--st-done);
-}
-.lg-planet-pending {
-  fill: #2a2f45;
-  stroke: #4a5175;
 }
 .lg-ship {
   fill: var(--claude);
 }
 .lg-atmo {
-  fill: var(--claude-soft);
-  stroke: var(--claude);
-  stroke-width: 0.6;
-}
-.lg-handoff {
   fill: none;
-  stroke: #c9cef0;
-  stroke-dasharray: 2 2;
+  stroke: var(--claude);
+  stroke-dasharray: 2.4 2;
 }
 .lg-sat {
   fill: #e9ecff;
-}
-.lg-moon {
-  fill: var(--codex);
 }
 .lg-rock {
   fill: var(--sev-high);
@@ -760,24 +759,24 @@
 .lg-gate {
   fill: var(--st-waiting);
 }
-.lg-meteor {
-  stroke: #cfe5ff;
-  stroke-width: 1.6;
+.lg-compact {
+  fill: #9fe7ff;
 }
-.lg-meteor-head {
-  fill: #ffffff;
+.lg-meteor {
+  fill: none;
+  stroke: #cfe5ff;
 }
 .lg-fuel {
   fill: none;
   stroke: var(--claude);
-  stroke-width: 3;
-  stroke-linecap: round;
+  stroke-width: 2.4;
 }
 .lg-nebula {
-  fill: rgba(140, 123, 255, 0.5);
+  fill: rgba(140, 123, 255, 0.55);
 }
 .lg-far {
-  fill: var(--codex);
+  fill: none;
+  stroke: var(--codex);
 }
 
 /* ---------- detail panel ---------- */
