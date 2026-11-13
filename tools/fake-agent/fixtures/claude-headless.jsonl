@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000001","model":"claude-haiku","tools":[]}
+{"type":"assistant","message":{"content":[{"type":"text","text":"."}]}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1794568800,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.17,"resetsAt":1794568800},"seven_day":{"utilization":0.74,"resetsAt":1794744000}}}}
+{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.001095,"duration_ms":1794,"num_turns":1,"usage":{"input_tokens":645,"output_tokens":90}}

@@ -1,0 +1,7 @@
+# Keep LF everywhere (rustfmt, prettier and the .sh scripts expect it) so git does not
+# convert files to CRLF on checkout or print "LF will be replaced by CRLF" on every add.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.icns binary

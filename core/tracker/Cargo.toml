@@ -1,0 +1,17 @@
+[package]
+name = "opw-tracker"
+description = "OpenProject (OpenProject API v3), read-only: work packages, comments, issue links"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

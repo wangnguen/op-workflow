@@ -1,0 +1,15 @@
+[package]
+name = "opw-quota"
+description = "Normalizes Claude and Codex rate-limit data into QuotaSnapshot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+opw-domain.workspace = true
+serde_json.workspace = true
+time.workspace = true
+
+[lints]
+workspace = true

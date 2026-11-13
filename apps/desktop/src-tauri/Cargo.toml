@@ -1,0 +1,19 @@
+[package]
+name = "op-workflow-desktop"
+description = "Thin Tauri shell: window, tray, notifications, IPC commands (*_api.rs)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+opw-domain.workspace = true
+opw-orchestrator.workspace = true
+tauri.workspace = true
+
+# Not inheriting workspace lints: tauri's macros expand code we don't control.
+[lints.clippy]
+all = { level = "warn", priority = -1 }

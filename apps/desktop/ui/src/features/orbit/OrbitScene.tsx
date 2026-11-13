@@ -1,0 +1,159 @@
+import { useRef, useState } from "react";
+import type { PointerEvent, WheelEvent } from "react";
+import type { OrbitSnapshot } from "../../ipc/types";
+import { VIEW, clampZoom, stepIndex } from "./geometry";
+import { Asteroids } from "./scene/Asteroids";
+import { DistantStars } from "./scene/DistantStars";
+import { FuelRing } from "./scene/FuelRing";
+import { GateStation } from "./scene/GateStation";
+import { Meteor } from "./scene/Meteor";
+import { Nebulae } from "./scene/Nebulae";
+import { Orbits, type CompactionMarker } from "./scene/Orbits";
+import { Planets } from "./scene/Planets";
+import { SceneDefs } from "./scene/SceneDefs";
+import { Ship } from "./scene/Ship";
+import { Star } from "./scene/Star";
+import { Starfield } from "./scene/Starfield";
+import type { Selection } from "./selection";
+
+export interface ViewState {
+  zoom: number;
+  x: number;
+  y: number;
+}
+
+export const HOME_VIEW: ViewState = { zoom: 1, x: 0, y: 0 };
+
+interface Props {
+  snapshot: OrbitSnapshot;
+  selection: Selection | null;
+  onSelect: (s: Selection) => void;
+  view: ViewState;
+  onView: (v: ViewState) => void;
+  markers: CompactionMarker[];
+  now: number;
+}
+
+const DRAG_THRESHOLD_PX = 4;
+
+export function OrbitScene({ snapshot, selection, onSelect, view, onView, markers, now }: Props) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const drag = useRef<{ px: number; py: number; vx: number; vy: number; moved: boolean } | null>(null);
+  const justDragged = useRef(false);
+  const [dragging, setDragging] = useState(false);
+  const active = snapshot.active;
+
+  const unitsPerPx = () => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return 1;
+    return Math.max(VIEW.w / rect.width, VIEW.h / rect.height);
+  };
+
+  const onPointerDown = (e: PointerEvent<SVGSVGElement>) => {
+    if (e.button !== 0) return;
+    drag.current = { px: e.clientX, py: e.clientY, vx: view.x, vy: view.y, moved: false };
+  };
+  const onPointerMove = (e: PointerEvent<SVGSVGElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    const dx = e.clientX - d.px;
+    const dy = e.clientY - d.py;
+    if (!d.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+    if (!d.moved) {
+      d.moved = true;
+      setDragging(true);
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
+    const k = unitsPerPx();
+    onView({ ...view, x: d.vx + dx * k, y: d.vy + dy * k });
+  };
+  const endDrag = () => {
+    if (drag.current?.moved) {
+      // the click that follows this pointerup must not select anything
+      justDragged.current = true;
+      window.setTimeout(() => (justDragged.current = false), 0);
+    }
+    drag.current = null;
+    setDragging(false);
+  };
+  const onWheel = (e: WheelEvent<SVGSVGElement>) => {
+    onView({ ...view, zoom: clampZoom(view.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)) });
+  };
+
+  const current = active
+    ? (active.steps.find((s) => s.state === "running" || s.state === "waitingUser")?.index ??
+      active.steps.filter((s) => s.state === "done").length)
+    : 0;
+  const agentOrbit = active?.agents[0] ? stepIndex(active.agents[0].step) : current;
+
+  return (
+    <svg
+      ref={svgRef}
+      className={`orbit-svg${dragging ? " is-dragging" : ""}`}
+      viewBox={`${VIEW.x} ${VIEW.y} ${VIEW.w} ${VIEW.h}`}
+      preserveAspectRatio="xMidYMid meet"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onWheel={onWheel}
+      onClickCapture={(e) => {
+        if (justDragged.current) e.stopPropagation();
+      }}
+    >
+      <SceneDefs />
+      <Starfield />
+      <g
+        className={`orbit-world${dragging ? "" : " is-smooth"}`}
+        style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}
+      >
+        <FuelRing quota={snapshot.quota} now={now} />
+        {active ? (
+          <>
+            <Orbits steps={active.steps} current={current} markers={markers} />
+            <Asteroids
+              findings={active.findings}
+              selectedFingerprint={selection?.kind === "finding" ? selection.fingerprint : undefined}
+              onSelect={(fingerprint) => onSelect({ kind: "finding", fingerprint })}
+            />
+            <Planets
+              steps={active.steps}
+              selectedStep={selection?.kind === "step" ? selection.step : undefined}
+              onSelect={(step) => onSelect({ kind: "step", step })}
+            />
+            {active.gate && current > 0 && (
+              <GateStation
+                gate={active.gate}
+                stepIndex={current}
+                selected={selection?.kind === "gate"}
+                onSelect={() => onSelect({ kind: "gate" })}
+              />
+            )}
+            <Star task={active} selected={selection?.kind === "star"} onSelect={() => onSelect({ kind: "star" })} />
+            {active.agents.map((agent) => (
+              <Ship
+                key={agent.id}
+                agent={agent}
+                orbit={agentOrbit}
+                selectedId={selection?.kind === "agent" ? selection.id : undefined}
+                onSelect={(id) => onSelect({ kind: "agent", id })}
+              />
+            ))}
+            <Meteor count={active.newComments} onSelect={() => onSelect({ kind: "star" })} />
+          </>
+        ) : (
+          <Nebulae
+            inbox={snapshot.inbox}
+            selectedTaskId={selection?.kind === "nebula" ? selection.taskId : undefined}
+            onSelect={(taskId) => onSelect({ kind: "nebula", taskId })}
+          />
+        )}
+        <DistantStars
+          sessions={snapshot.distant}
+          selectedId={selection?.kind === "distant" ? selection.id : undefined}
+          onSelect={(id) => onSelect({ kind: "distant", id })}
+        />
+      </g>
+    </svg>
+  );
+}

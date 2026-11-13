@@ -1,0 +1,17 @@
+[package]
+name = "opw-domain"
+description = "Pure domain model: tasks, workflow state machine, findings, IPC view DTOs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

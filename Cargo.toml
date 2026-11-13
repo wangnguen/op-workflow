@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = ["core/*", "tools/*", "apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+# internal crates (core/ never depends on tauri; see scripts/check-core-deps.*)
+opw-domain = { path = "core/domain" }
+opw-config = { path = "core/config" }
+opw-storage = { path = "core/storage" }
+opw-quota = { path = "core/quota" }
+opw-tracker = { path = "core/tracker" }
+opw-vcs = { path = "core/vcs" }
+opw-agents = { path = "core/agents" }
+opw-monitor = { path = "core/monitor" }
+opw-pty = { path = "core/pty" }
+opw-context = { path = "core/context" }
+opw-orchestrator = { path = "core/orchestrator" }
+
+# third party
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+regex = "1.13.1"
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+dirs = "7.0.0"
+time = { version = "0.3.55", features = ["formatting", "parsing", "macros"] }
+tempfile = "3.27.0"
+portable-pty = "0.9.0"
+# HTTP for OpenProject: native-tls = SChannel on Windows (system certificate store, no C build)
+ureq = { version = "3.5.2", default-features = false, features = ["native-tls-no-default"] }
+keyring = { version = "3.6.3", features = ["windows-native"] }
+tauri = { version = "2.12.5", features = [] }
+tauri-build = { version = "2.7.4", features = [] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

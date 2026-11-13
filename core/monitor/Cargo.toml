@@ -1,0 +1,12 @@
+[package]
+name = "opw-monitor"
+description = "Watches CLI-owned files: Claude session registry, transcripts, Codex rollouts, hook events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

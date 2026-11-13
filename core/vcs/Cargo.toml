@@ -1,0 +1,16 @@
+[package]
+name = "opw-vcs"
+description = "git: list branches, create local branches, working-tree checks, commit/push guard for AI processes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

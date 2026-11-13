@@ -1,0 +1,57 @@
+name: release
+
+# Push a tag vX.Y.Z (matching tauri.conf.json) to build the Windows installer and open a
+# DRAFT release; review it on GitHub before publishing. Notes come from docs/releases/<tag>.md.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match the app version
+        shell: bash
+        run: |
+          want="v$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "tag $GITHUB_REF_NAME does not match app version $want"; exit 1
+          fi
+          test -f "docs/releases/$GITHUB_REF_NAME.md" || { echo "missing docs/releases/$GITHUB_REF_NAME.md"; exit 1; }
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build installer (NSIS, unsigned)
+        run: pnpm tauri build --bundles nsis
+
+      - name: Checksums and release notes
+        shell: bash
+        run: |
+          cd target/release/bundle/nsis
+          sha256sum *.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          cd "$GITHUB_WORKSPACE"
+          sed "s#{{REPO_URL}}#${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}#g" "docs/releases/$GITHUB_REF_NAME.md" > release-notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: op-workflow ${{ github.ref_name }}
+          draft: true
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          body_path: release-notes.md
+          files: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/nsis/SHA256SUMS.txt

@@ -1,0 +1,174 @@
+//! git operations the app is allowed to perform, and the guard for AI processes.
+//!
+//! Hard rule (PLAN.md principle 5): the app never commits or pushes, and new branches stay
+//! local. There is deliberately no `push` or `commit` function in this crate.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+mod guard;
+
+pub use guard::{GuardEnv, guard_env, install_guard_hooks};
+
+#[derive(Debug, thiserror::Error)]
+pub enum VcsError {
+    #[error("cannot run git: {0}")]
+    Spawn(std::io::Error),
+    #[error("git {args} failed: {stderr}")]
+    Git { args: String, stderr: String },
+    #[error("working tree has {0} uncommitted change(s)")]
+    Dirty(usize),
+}
+
+pub type VcsResult<T> = Result<T, VcsError>;
+
+/// `git for-each-ref` format used for the base-branch picker.
+pub const BRANCH_FORMAT: &str = "%(refname)|%(refname:short)|%(committerdate:iso-strict)|%(upstream:track)";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchRef {
+    /// Short name as git shows it, e.g. `development` or `origin/development`.
+    pub name: String,
+    pub remote: bool,
+    pub committed_at: String,
+    /// e.g. `[ahead 2]`, empty when in sync or no upstream.
+    pub track: String,
+}
+
+/// Parse `git for-each-ref --format=BRANCH_FORMAT` output; drops `origin/HEAD`.
+pub fn parse_branches(output: &str) -> Vec<BranchRef> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(4, '|');
+            let full = parts.next()?.trim();
+            let short = parts.next()?.trim();
+            let date = parts.next().unwrap_or_default().trim();
+            let track = parts.next().unwrap_or_default().trim();
+            if short.is_empty() || full.ends_with("/HEAD") {
+                return None;
+            }
+            Some(BranchRef {
+                name: short.to_owned(),
+                remote: full.starts_with("refs/remotes/"),
+                committed_at: date.to_owned(),
+                track: track.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Runs git with an argument array (never through a shell) in one repository.
+#[derive(Debug, Clone)]
+pub struct Git {
+    repo: PathBuf,
+    env: Vec<(String, String)>,
+}
+
+impl Git {
+    pub fn new(repo: impl Into<PathBuf>) -> Self {
+        Self {
+            repo: repo.into(),
+            env: Vec::new(),
+        }
+    }
+
+    pub fn repo(&self) -> &Path {
+        &self.repo
+    }
+
+    /// Extra environment for every git call (used by tests to apply the guard).
+    pub fn with_env(mut self, env: &[(String, String)]) -> Self {
+        self.env.extend_from_slice(env);
+        self
+    }
+
+    pub fn run(&self, args: &[&str]) -> VcsResult<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(args)
+            .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .output()
+            .map_err(VcsError::Spawn)?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            Err(VcsError::Git {
+                args: args.join(" "),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            })
+        }
+    }
+
+    /// `fetch --prune origin`. Reading from the remote is allowed; writing is not.
+    pub fn fetch(&self) -> VcsResult<()> {
+        self.run(&["fetch", "--prune", "origin"]).map(drop)
+    }
+
+    /// Local and `origin/*` branches, newest commit first.
+    pub fn branches(&self) -> VcsResult<Vec<BranchRef>> {
+        let format = format!("--format={BRANCH_FORMAT}");
+        let out = self.run(&[
+            "for-each-ref",
+            "--sort=-committerdate",
+            &format,
+            "refs/heads",
+            "refs/remotes/origin",
+        ])?;
+        Ok(parse_branches(&out))
+    }
+
+    pub fn current_branch(&self) -> VcsResult<String> {
+        Ok(self.run(&["branch", "--show-current"])?.trim().to_owned())
+    }
+
+    pub fn head(&self) -> VcsResult<String> {
+        Ok(self.run(&["rev-parse", "HEAD"])?.trim().to_owned())
+    }
+
+    /// Uncommitted entries (`git status --porcelain`).
+    pub fn dirty_entries(&self) -> VcsResult<Vec<String>> {
+        Ok(self
+            .run(&["status", "--porcelain"])?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// Create `name` from `base` locally and switch to it; if it already exists, just switch.
+    /// `--no-track` keeps `base` from becoming the upstream, so a later push can never land on it.
+    /// Refuses to run on a dirty working tree. Never pushes.
+    pub fn start_branch(&self, name: &str, base: &str) -> VcsResult<()> {
+        let dirty = self.dirty_entries()?;
+        if !dirty.is_empty() {
+            return Err(VcsError::Dirty(dirty.len()));
+        }
+        let exists = self
+            .run(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")])
+            .is_ok();
+        if exists {
+            self.run(&["switch", name]).map(drop)
+        } else {
+            self.run(&["switch", "-c", name, "--no-track", base]).map(drop)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_branch_listing() {
+        let out = "refs/heads/feature/187641|feature/187641|2026-11-12T10:00:00+07:00|[ahead 2]\n\
+                   refs/remotes/origin/HEAD|origin|2026-11-12T09:00:00+07:00|\n\
+                   refs/remotes/origin/development|origin/development|2026-11-13T08:00:00+07:00|\n";
+        let b = parse_branches(out);
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].track, "[ahead 2]");
+        assert!(!b[0].remote);
+        assert!(b[1].remote);
+        assert_eq!(b[1].name, "origin/development");
+    }
+}

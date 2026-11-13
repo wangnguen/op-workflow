@@ -1,0 +1,26 @@
+# Rust
+/target/
+**/target/
+
+# Node / pnpm
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
+
+# Tauri
+apps/desktop/src-tauri/gen/schemas/
+
+# Local secrets and scratch (never commit)
+.env
+.env.*
+*.token
+*-token.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+*.log
+
+PLAN.md

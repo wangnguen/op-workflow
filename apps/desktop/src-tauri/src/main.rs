@@ -1,0 +1,43 @@
+//! Thin shell. Business logic lives in `core/`; this crate only exposes it over IPC.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// MinGW's gcc always links its own default-manifest.o next to the manifest tauri-build embeds,
+// so ld prints ".rsrc merge failure: multiple non-default manifests" on every link. The
+// Tauri manifest still ends up in the exe; the message is noise, so silence it for GNU only.
+#![cfg_attr(all(windows, target_env = "gnu"), allow(linker_messages))]
+
+mod app_api;
+mod settings_api;
+
+fn main() {
+    // PTY spike from inside the app binary (PLAN.md §12): `op-workflow-desktop --pty-selftest`.
+    if std::env::args().any(|a| a == "--pty-selftest") {
+        let report = opw_orchestrator::selftest::run_pty();
+        println!("{report}");
+        if let Some(path) = opw_orchestrator::selftest::save(&report) {
+            println!("saved: {}", path.display());
+        }
+        return;
+    }
+    // Live data check without opening a window: `op-workflow-desktop --live-check`.
+    if std::env::args().any(|a| a == "--live-check") {
+        println!(
+            "{}",
+            opw_orchestrator::selftest::run_live(std::time::Duration::from_secs(120))
+        );
+        return;
+    }
+
+    tauri::Builder::default()
+        .manage(opw_orchestrator::AppService::start())
+        .invoke_handler(tauri::generate_handler![
+            app_api::app_info,
+            app_api::board_snapshot,
+            app_api::orbit_snapshot,
+            settings_api::settings_status,
+            settings_api::save_nx_token,
+            settings_api::clear_nx_token,
+            settings_api::refresh_now
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running op-workflow");
+}

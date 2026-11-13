@@ -1,0 +1,19 @@
+{
+  "name": "op-workflow",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop app that runs Claude Code and Codex through the OpenProject task workflow",
+  "packageManager": "pnpm@12.15.0",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri",
+    "ui:dev": "pnpm --filter @opw/ui dev",
+    "ui:build": "pnpm --filter @opw/ui build",
+    "ui:typecheck": "pnpm --filter @opw/ui typecheck",
+    "check": "pnpm ui:typecheck && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4"
+  }
+}

@@ -1,0 +1,31 @@
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.settings-section:first-of-type {
+  border-top: none;
+}
+.settings-section h3 {
+  margin: 6px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.settings-section p {
+  margin: 0;
+  font-size: 12px;
+}
+.settings-ok {
+  color: var(--st-done);
+}
+.settings-error {
+  color: var(--st-failed);
+  word-break: break-word;
+}
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}

@@ -1,0 +1,121 @@
+.quota {
+  position: relative;
+}
+
+.quota-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+.quota-trigger:hover {
+  border-color: var(--border-strong);
+  background: var(--panel-2);
+}
+
+.gauge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.gauge-track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.09);
+  stroke-width: 3;
+}
+.gauge-fill {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.6s ease;
+}
+.gauge--claude .gauge-fill {
+  stroke: var(--claude);
+}
+.gauge--codex .gauge-fill {
+  stroke: var(--codex);
+}
+.gauge--warn .gauge-fill {
+  stroke: var(--st-waiting);
+}
+.gauge--danger .gauge-fill {
+  stroke: var(--st-failed);
+}
+.gauge-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.05;
+  text-align: left;
+}
+.gauge-name {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.gauge-value {
+  font-size: 12px;
+  font-weight: 700;
+}
+.gauge--warn .gauge-value {
+  color: var(--st-waiting);
+}
+.gauge--danger .gauge-value {
+  color: var(--st-failed);
+}
+
+.quota-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  width: 320px;
+  padding: 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: rgba(14, 16, 27, 0.98);
+  box-shadow: var(--shadow);
+}
+.quota-pop header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.quota-pop h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.qp-provider {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.qp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.qp-window {
+  margin-bottom: 10px;
+}
+.qp-line {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  font-size: 12.5px;
+}
+.qp-low {
+  color: var(--st-failed);
+}
+.qp-meta,
+.qp-source {
+  margin-top: 3px;
+  font-size: 11.5px;
+}
+.qp-note {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+}

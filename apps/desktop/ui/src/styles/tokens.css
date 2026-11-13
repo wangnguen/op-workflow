@@ -1,0 +1,52 @@
+/* Design tokens: dark galaxy theme. Components use only these variables. */
+:root {
+  color-scheme: dark;
+
+  --bg: #06070c;
+  --bg-elev: #0b0d15;
+  --panel: #10121b;
+  --panel-2: #151826;
+  --panel-3: #1b1f30;
+  --border: #22263a;
+  --border-strong: #353b58;
+  --text: #e9ebf3;
+  --text-dim: #a0a6bd;
+  --text-faint: #666d88;
+
+  /* agents */
+  --claude: #f39257;
+  --claude-soft: rgba(243, 146, 87, 0.16);
+  --codex: #a98bff;
+  --codex-soft: rgba(169, 139, 255, 0.16);
+  --shell: #34d3bf;
+  --shell-soft: rgba(52, 211, 191, 0.16);
+
+  /* session / step status */
+  --st-running: #ff9e45;
+  --st-waiting: #ffd54f;
+  --st-idle: #5c627a;
+  --st-done: #7fdcae;
+  --st-failed: #ff5d6e;
+
+  /* finding severity */
+  --sev-critical: #ff4f61;
+  --sev-high: #ff8b3e;
+  --sev-medium: #ffc845;
+  --sev-low: #5eabff;
+  --sev-muted: #575d74;
+
+  /* space scene */
+  --space-0: #04050a;
+  --space-1: #0a0d1c;
+  --orbit-line: rgba(160, 170, 220, 0.13);
+  --orbit-line-hot: rgba(255, 190, 120, 0.38);
+  --star-core: #fff6dc;
+  --star-mid: #ffc56b;
+  --star-wait: #ffe066;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
