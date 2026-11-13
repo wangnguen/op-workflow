@@ -299,10 +299,42 @@ export function fuelArcs(quota: QuotaSnapshot[], now: number): FuelArc[] {
 
 // ---------- nebulae, distant stars, starfield ----------
 
-export function nebulaPositions(n: number): Point[] {
-  return Array.from({ length: n }, (_, i) => polar(150 + (i % 2) * 46, -90 + (i * 360) / Math.max(n, 1) + 25));
+export interface Placement extends Point {
+  /** 1 = full size; smaller when many items share the map */
+  scale: number;
 }
 
+// First ring clears the empty centre (protostar + hint pill).
+const NEBULA_FIRST_RING = 210;
+const NEBULA_RING_GAP = 135;
+/** Arc length one nebula needs at full size (cloud + two label lines + breathing room). */
+const NEBULA_SLOT = 175;
+const NEBULA_MIN_SCALE = 0.55;
+/** Up to this many tasks keep full size. */
+const NEBULA_FULL_SIZE = 6;
+
+/**
+ * Inbox tasks as nebulae on as many rings as needed: each ring takes as many as fit its
+ * circumference, rings are staggered, and everything shrinks a little per extra task so a
+ * long inbox stays readable instead of piling up on one circle.
+ */
+export function nebulaLayout(n: number): Placement[] {
+  const scale =
+    n <= NEBULA_FULL_SIZE ? 1 : round2(Math.max(NEBULA_MIN_SCALE, 1 - (n - NEBULA_FULL_SIZE) * 0.03));
+  const slot = NEBULA_SLOT * scale;
+  const out: Placement[] = [];
+  for (let ring = 0, left = n; left > 0; ring++) {
+    const r = NEBULA_FIRST_RING + ring * NEBULA_RING_GAP * scale;
+    const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / slot));
+    const count = Math.min(capacity, left);
+    const start = -65 + ring * (180 / capacity);
+    for (let k = 0; k < count; k++) out.push({ ...polar(r, start + (k * 360) / count), scale });
+    left -= count;
+  }
+  return out;
+}
+
+/** Hand-placed corners for the usual few outside sessions. */
 const DISTANT_SLOTS: Point[] = [
   { x: -418, y: -330 },
   { x: 414, y: -334 },
@@ -311,9 +343,34 @@ const DISTANT_SLOTS: Point[] = [
   { x: 440, y: 40 },
   { x: 0, y: 384 },
 ];
+// More sessions go on a U along the sides and bottom; the top half belongs to the fuel gauge
+// and its labels, so only its two far corners are used.
+const DISTANT_SIDE_X = 440;
+const DISTANT_SIDE_TOP_Y = -120;
+const DISTANT_BOTTOM_Y = 348;
 
+function alongU(d: number): Point {
+  const side = DISTANT_BOTTOM_Y - DISTANT_SIDE_TOP_Y;
+  const bottom = 2 * DISTANT_SIDE_X;
+  if (d <= side) return { x: -DISTANT_SIDE_X, y: DISTANT_SIDE_TOP_Y + d };
+  if (d <= side + bottom) return { x: -DISTANT_SIDE_X + (d - side), y: DISTANT_BOTTOM_Y };
+  return { x: DISTANT_SIDE_X, y: DISTANT_BOTTOM_Y - (d - side - bottom) };
+}
+
+/**
+ * Outside sessions at the edge of the map: hand-placed spots for a few, otherwise the two top
+ * corners plus an even spread along the sides and bottom, so every session gets a star.
+ */
 export function distantPositions(n: number): Point[] {
-  return DISTANT_SLOTS.slice(0, n);
+  if (n <= DISTANT_SLOTS.length) return DISTANT_SLOTS.slice(0, n);
+  const corners = DISTANT_SLOTS.slice(0, 2);
+  const rest = n - corners.length;
+  const length = 2 * (DISTANT_BOTTOM_Y - DISTANT_SIDE_TOP_Y) + 2 * DISTANT_SIDE_X;
+  const spread = Array.from({ length: rest }, (_, i) => {
+    const p = alongU(rest === 1 ? length / 2 : (i * length) / (rest - 1));
+    return { x: round2(p.x), y: round2(p.y) };
+  });
+  return [...corners, ...spread];
 }
 
 export interface Dot {
@@ -332,7 +389,8 @@ export function starfield(count: number, seed = 7): Dot[] {
     x: Math.round(-spreadX / 2 + rnd() * spreadX),
     y: Math.round(-spreadY / 2 + rnd() * spreadY),
     r: round2(0.35 + rnd() * 1.1),
-    twinkle: rnd() < 0.18,
+    // few twinklers: every animated dot repaints the whole map each frame
+    twinkle: rnd() < 0.07,
   }));
 }
 

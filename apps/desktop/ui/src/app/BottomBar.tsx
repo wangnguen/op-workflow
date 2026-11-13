@@ -11,12 +11,14 @@ interface Props {
 }
 
 export function BottomBar({ board, orbit, version, error }: Props) {
-  const active = board?.tasks.find((t) => t.id === board.activeTaskId);
+  const ids = board?.activeTaskIds ?? [];
+  const active = board?.tasks.find((t) => t.id === ids[0]);
   const gate = orbit?.active?.gate;
   let status: string = vi.bottom.noTask;
   if (active?.step) {
     const step = `${active.step.index}/${STEP_COUNT} ${stepLabel[active.step.kind]}`;
     status = vi.bottom.activeTask(active.id, gate ? `${step} · ${gateLabel[gate.kind]}` : step);
+    if (ids.length > 1) status += vi.bottom.activeMore(ids.length - 1);
   }
   return (
     <footer className="bottombar">

@@ -21,8 +21,8 @@ function flatten(agents: AgentView[]): AgentView[] {
 /** Group every known session (app agents + outside sessions) by status. */
 export function groupSessions(s: OrbitSnapshot): SessionGroups {
   const groups: SessionGroups = { waiting: [], running: [], idle: [] };
-  const a = s.active;
-  if (a) {
+  for (const a of [s.active, ...(s.others ?? [])]) {
+    if (!a) continue;
     for (const agent of flatten(a.agents)) {
       const status: SessionStatus = a.gate && agent === a.agents[0] ? "waiting" : agent.status;
       groups[status].push({

@@ -1,9 +1,10 @@
+import { memo } from "react";
 import { starfield } from "../geometry";
 
 const DOTS = starfield(300);
 
 /** Static background stars; a few twinkle. Lives outside the zoom group. */
-export function Starfield() {
+export const Starfield = memo(function Starfield() {
   return (
     <g aria-hidden="true">
       {DOTS.map((d, i) => (
@@ -18,4 +19,4 @@ export function Starfield() {
       ))}
     </g>
   );
-}
+});

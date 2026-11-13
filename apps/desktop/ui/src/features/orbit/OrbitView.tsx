@@ -1,14 +1,18 @@
-import { useRef, useState } from "react";
-import { agentLabel, gateLabel, sessionStatusLabel, stepLabel, vi } from "../../i18n/vi";
+import { useMemo, useRef, useState } from "react";
+import { agentLabel, gateLabel, sessionStatusLabel, stepLabel, stepStateLabel, vi } from "../../i18n/vi";
 import type { OrbitSnapshot } from "../../ipc/types";
 import { useDismiss } from "../../shared/hooks";
 import { STEP_COUNT } from "../../shared/steps";
+import { SegmentedControl } from "../../shared/ui/SegmentedControl";
+import { StatusIcon } from "../../shared/ui/StatusIcon";
 import { DetailPanel } from "./DetailPanel";
 import { Legend } from "./Legend";
 import { HOME_VIEW, OrbitScene, type ViewState } from "./OrbitScene";
+import { focusSystem, systemsOf } from "./focus";
 import { clampZoom } from "./geometry";
 import { resolveSelection, type Selection } from "./selection";
 import { useCompactionMarkers } from "./useCompactionMarkers";
+import { useLayout } from "./useLayout";
 import "./orbit.css";
 
 interface Props {
@@ -22,6 +26,10 @@ function statusLine(s: OrbitSnapshot): string {
   const live = a.steps.find((x) => x.state === "running" || x.state === "waitingUser");
   const parts = [a.taskId];
   if (live) parts.push(`${live.index}/${STEP_COUNT} ${stepLabel[live.kind]}${live.round && live.round > 1 ? ` ${vi.orbit.round(live.round)}` : ""}`);
+  else {
+    const last = [...a.steps].reverse().find((x) => x.state === "done");
+    if (last) parts.push(`${last.index}/${STEP_COUNT} ${stepLabel[last.kind]} · ${stepStateLabel.done}`);
+  }
   if (a.gate) parts.push(gateLabel[a.gate.kind]);
   const agent = a.agents[0];
   const child = agent?.children.find((c) => c.status === "running");
@@ -31,19 +39,24 @@ function statusLine(s: OrbitSnapshot): string {
   return parts.join(" · ");
 }
 
-export function OrbitView({ snapshot, now }: Props) {
+export function OrbitView({ snapshot: live, now }: Props) {
   const [picked, setPicked] = useState<Selection | null>(null);
+  // several tasks can be in progress; the picked one sits in the centre
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const snapshot = useMemo(() => focusSystem(live, focusId), [live, focusId]);
+  const systems = systemsOf(live);
   const [view, setView] = useState<ViewState>(HOME_VIEW);
   const [still, setStill] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
   const legendRef = useRef<HTMLDivElement>(null);
   useDismiss(legendRef, legendOpen, () => setLegendOpen(false));
   const markers = useCompactionMarkers(snapshot.active);
+  const layout = useLayout();
   const selection = resolveSelection(picked, snapshot);
 
   return (
     <div className={`orbit-view${still ? " is-still" : ""}`}>
-      <div className="orbit-stage">
+      <div className="orbit-stage space-dark">
         <OrbitScene
           snapshot={snapshot}
           selection={selection}
@@ -52,12 +65,44 @@ export function OrbitView({ snapshot, now }: Props) {
           onView={setView}
           markers={markers}
           now={now}
+          layout={layout.overrides}
+          onMoveItem={layout.move}
         />
 
-        <div className={`orbit-status${snapshot.active?.gate ? " is-waiting" : snapshot.active ? "" : " is-idle"}`}>
+        <div
+          className={`orbit-status${snapshot.active?.gate ? " is-waiting" : snapshot.active ? "" : " is-idle"}`}
+          title={statusLine(snapshot)}
+        >
           <span className="orbit-status-dot" />
           {statusLine(snapshot)}
         </div>
+
+        {systems.length > 1 && snapshot.active && (
+          <div className="orbit-systems">
+            <span className="orbit-systems-label">{vi.orbit.systems}</span>
+            <SegmentedControl
+              label={vi.orbit.systems}
+              value={snapshot.active.taskId}
+              onChange={(id) => {
+                setFocusId(id);
+                setPicked(null);
+              }}
+              options={systems.map((s) => {
+                const step = s.steps.find((x) => x.state === "running" || x.state === "waitingUser");
+                const last = [...s.steps].reverse().find((x) => x.state === "done");
+                const shown = step ?? last;
+                return {
+                  value: s.taskId,
+                  label: s.taskId,
+                  icon: <StatusIcon state={s.gate ? "waitingUser" : (step?.state ?? "done")} size={12} />,
+                  title: `${s.taskId} · ${s.title}${shown ? `
+${shown.index}/${STEP_COUNT} ${stepLabel[shown.kind]}` : ""}
+${vi.orbit.systemPick}`,
+                };
+              })}
+            />
+          </div>
+        )}
 
         <div className="orbit-legend" ref={legendRef}>
           <button className="btn btn--sm" aria-expanded={legendOpen} onClick={() => setLegendOpen((v) => !v)}>
@@ -79,6 +124,12 @@ export function OrbitView({ snapshot, now }: Props) {
             onClick={() => setView(HOME_VIEW)}>
             ◎
           </button>
+          {layout.customized && (
+            <button className="btn btn--icon" title={vi.orbit.resetLayout} aria-label={vi.orbit.resetLayout}
+              onClick={layout.reset}>
+              ⟲
+            </button>
+          )}
           <button className={`btn btn--icon${still ? " is-on" : ""}`} aria-pressed={still}
             title={still ? vi.orbit.motionOff : vi.orbit.motionOn} aria-label={still ? vi.orbit.motionOff : vi.orbit.motionOn}
             onClick={() => setStill((v) => !v)}>

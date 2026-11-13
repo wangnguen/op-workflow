@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import type { PointerEvent, WheelEvent } from "react";
 import type { OrbitSnapshot } from "../../ipc/types";
-import { VIEW, clampZoom, stepIndex } from "./geometry";
+import { VIEW, clampZoom, stepIndex, type Point } from "./geometry";
 import { Asteroids } from "./scene/Asteroids";
 import { DistantStars } from "./scene/DistantStars";
 import { FuelRing } from "./scene/FuelRing";
@@ -15,6 +15,7 @@ import { Ship } from "./scene/Ship";
 import { Star } from "./scene/Star";
 import { Starfield } from "./scene/Starfield";
 import type { Selection } from "./selection";
+import type { LayoutOverrides } from "./useLayout";
 
 export interface ViewState {
   zoom: number;
@@ -32,21 +33,68 @@ interface Props {
   onView: (v: ViewState) => void;
   markers: CompactionMarker[];
   now: number;
+  /** positions the user dragged items to */
+  layout: LayoutOverrides;
+  /** `persist` is true once, when the drag ends */
+  onMoveItem: (key: string, p: Point, persist: boolean) => void;
 }
+
+/** Starts dragging one map item (nebula, far star) from where it is drawn now. */
+export type ItemDragStart = (key: string, from: Point) => (e: PointerEvent<SVGGElement>) => void;
 
 const DRAG_THRESHOLD_PX = 4;
 
-export function OrbitScene({ snapshot, selection, onSelect, view, onView, markers, now }: Props) {
+export function OrbitScene({ snapshot, selection, onSelect, view, onView, markers, now, layout, onMoveItem }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<{ px: number; py: number; vx: number; vy: number; moved: boolean } | null>(null);
   const justDragged = useRef(false);
   const [dragging, setDragging] = useState(false);
+  const [itemDragging, setItemDragging] = useState(false);
   const active = snapshot.active;
 
   const unitsPerPx = () => {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0 || rect.height === 0) return 1;
     return Math.max(VIEW.w / rect.width, VIEW.h / rect.height);
+  };
+
+  const suppressNextClick = () => {
+    justDragged.current = true;
+    window.setTimeout(() => (justDragged.current = false), 0);
+  };
+
+  const startItemDrag: ItemDragStart = (key, from) => (e) => {
+    if (e.button !== 0) return;
+    // the map itself must not pan while an item moves
+    e.stopPropagation();
+    const start = { x: e.clientX, y: e.clientY };
+    const k = unitsPerPx() / view.zoom;
+    let moved = false;
+    let last = from;
+    const onMove = (ev: globalThis.PointerEvent) => {
+      const dx = ev.clientX - start.x;
+      const dy = ev.clientY - start.y;
+      if (!moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+      if (!moved) {
+        moved = true;
+        setItemDragging(true);
+      }
+      last = { x: from.x + dx * k, y: from.y + dy * k };
+      onMoveItem(key, last, false);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      setItemDragging(false);
+      if (moved) {
+        onMoveItem(key, last, true);
+        suppressNextClick();
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   };
 
   const onPointerDown = (e: PointerEvent<SVGSVGElement>) => {
@@ -68,11 +116,8 @@ export function OrbitScene({ snapshot, selection, onSelect, view, onView, marker
     onView({ ...view, x: d.vx + dx * k, y: d.vy + dy * k });
   };
   const endDrag = () => {
-    if (drag.current?.moved) {
-      // the click that follows this pointerup must not select anything
-      justDragged.current = true;
-      window.setTimeout(() => (justDragged.current = false), 0);
-    }
+    // the click that follows this pointerup must not select anything
+    if (drag.current?.moved) suppressNextClick();
     drag.current = null;
     setDragging(false);
   };
@@ -89,7 +134,7 @@ export function OrbitScene({ snapshot, selection, onSelect, view, onView, marker
   return (
     <svg
       ref={svgRef}
-      className={`orbit-svg${dragging ? " is-dragging" : ""}`}
+      className={`orbit-svg${dragging || itemDragging ? " is-dragging" : ""}`}
       viewBox={`${VIEW.x} ${VIEW.y} ${VIEW.w} ${VIEW.h}`}
       preserveAspectRatio="xMidYMid meet"
       onPointerDown={onPointerDown}
@@ -104,7 +149,7 @@ export function OrbitScene({ snapshot, selection, onSelect, view, onView, marker
       <SceneDefs />
       <Starfield />
       <g
-        className={`orbit-world${dragging ? "" : " is-smooth"}`}
+        className={`orbit-world${dragging || itemDragging ? "" : " is-smooth"}`}
         style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}
       >
         <FuelRing quota={snapshot.quota} now={now} />
@@ -144,14 +189,19 @@ export function OrbitScene({ snapshot, selection, onSelect, view, onView, marker
         ) : (
           <Nebulae
             inbox={snapshot.inbox}
+            notice={snapshot.notice}
             selectedTaskId={selection?.kind === "nebula" ? selection.taskId : undefined}
             onSelect={(taskId) => onSelect({ kind: "nebula", taskId })}
+            layout={layout}
+            onDragStart={startItemDrag}
           />
         )}
         <DistantStars
           sessions={snapshot.distant}
           selectedId={selection?.kind === "distant" ? selection.id : undefined}
           onSelect={(id) => onSelect({ kind: "distant", id })}
+          layout={layout}
+          onDragStart={startItemDrag}
         />
       </g>
     </svg>

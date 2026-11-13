@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+/** JSON of the last value, to skip re-rendering when a poll returns the same data. */
+function sameJson(a: unknown, b: unknown): boolean {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
 export interface Polled<T> {
   data: T | undefined;
   error: string | undefined;
@@ -11,12 +20,17 @@ export function usePolling<T>(fetcher: () => Promise<T>, intervalMs: number): Po
   const [data, setData] = useState<T>();
   const [error, setError] = useState<string>();
   const alive = useRef(true);
+  const last = useRef<T | undefined>(undefined);
 
   const run = useCallback(async () => {
     try {
       const value = await fetcher();
       if (!alive.current) return;
-      setData(value);
+      // unchanged data keeps the same object, so nothing below re-renders
+      if (!sameJson(last.current, value)) {
+        last.current = value;
+        setData(value);
+      }
       setError(undefined);
     } catch (e) {
       if (alive.current) setError(errorMessage(e));

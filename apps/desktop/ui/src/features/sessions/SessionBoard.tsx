@@ -25,30 +25,34 @@ export function SessionBoard({ snapshot }: Props) {
             {col.title} <span className="faint">{groups[col.key].length}</span>
           </h2>
           {groups[col.key].length === 0 && <div className="column-empty">{vi.sessions.none}</div>}
-          {groups[col.key].map((s) => (
-            <article key={s.id} className={`s-card s-card--${s.status} s-card--${s.agent}`}>
-              <header>
-                <span className={`s-avatar s-avatar--${s.agent}`}>{AVATAR[s.agent]}</span>
-                <span className="s-titles">
-                  <b>{s.title}</b>
-                  <span className="faint">
-                    {agentLabel[s.agent]} · {s.detail}
+          <div className="s-cards">
+            {groups[col.key].map((s) => (
+              <article key={s.id} className={`s-card s-card--${s.status} s-card--${s.agent}`}>
+                <header>
+                  <span className={`s-avatar s-avatar--${s.agent}`}>{AVATAR[s.agent]}</span>
+                  <span className="s-titles">
+                    <b title={s.title}>{s.title}</b>
+                    <span className="faint" title={`${agentLabel[s.agent]} · ${s.detail}`}>
+                      {agentLabel[s.agent]} · {s.detail}
+                    </span>
                   </span>
-                </span>
-              </header>
-              {s.contextPct !== undefined && (
-                <div className="s-ctx">
-                  <div className={`bar${s.agent === "codex" ? " bar--codex" : ""}${s.contextPct >= 90 ? " bar--hot" : ""}`}>
-                    <span style={{ width: `${Math.min(100, s.contextPct)}%` }} />
+                  <button className="btn btn--sm" disabled title={vi.sessions.openPaneLater}>
+                    {vi.sessions.openPane}
+                  </button>
+                </header>
+                {s.contextPct !== undefined && (
+                  <div className="s-ctx">
+                    <div
+                      className={`bar${s.agent === "codex" ? " bar--codex" : ""}${s.contextPct >= 90 ? " bar--hot" : ""}`}
+                    >
+                      <span style={{ width: `${Math.min(100, s.contextPct)}%` }} />
+                    </div>
+                    <span className="faint">context {Math.round(s.contextPct)}%</span>
                   </div>
-                  <span className="faint">context {Math.round(s.contextPct)}%</span>
-                </div>
-              )}
-              <button className="btn btn--sm" disabled title={vi.sessions.openPaneLater}>
-                {vi.sessions.openPane}
-              </button>
-            </article>
-          ))}
+                )}
+              </article>
+            ))}
+          </div>
         </section>
       ))}
     </div>

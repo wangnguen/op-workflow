@@ -13,6 +13,7 @@ import type { AgentView, OrbitSnapshot, StepView } from "../../ipc/types";
 import { formatClock, formatDuration, formatRelative, formatTokens, formatUsd } from "../../shared/format";
 import { STEP_COUNT } from "../../shared/steps";
 import { findAgent, type Selection } from "./selection";
+import { StatusChip } from "../../shared/ui/StatusChip";
 
 interface Props {
   snapshot: OrbitSnapshot;
@@ -124,7 +125,7 @@ export function DetailPanel({ snapshot, selection, onSelect, now }: Props) {
       <>
         <header className="dp-head">
           <span className="chip">{a.taskId}</span>
-          <span className="chip">{a.nxStatus}</span>
+          <StatusChip name={a.nxStatus} color={a.nxStatusColor} />
         </header>
         <h3 className="dp-title">{a.title}</h3>
         <Row label={t.repo}>{a.repo}</Row>
@@ -191,7 +192,7 @@ export function DetailPanel({ snapshot, selection, onSelect, now }: Props) {
         </header>
         <h3 className="dp-title">{gateLabel[a.gate.kind]}</h3>
         <p>{a.gate.message}</p>
-        <button className="btn btn--primary" disabled title={vi.start.demoNote}>
+        <button className="btn btn--primary" disabled title={t.gateLater}>
           {t.openGate}
         </button>
       </div>
@@ -207,7 +208,7 @@ export function DetailPanel({ snapshot, selection, onSelect, now }: Props) {
           <h3 className="dp-title">{item.title}</h3>
           <Row label="Task">{item.taskId}</Row>
           <Row label={t.project}>{item.project}</Row>
-          <button className="btn btn--primary" disabled title={vi.start.demoNote}>
+          <button className="btn btn--primary" disabled title={t.startFromBoard}>
             {vi.board.start}
           </button>
         </>

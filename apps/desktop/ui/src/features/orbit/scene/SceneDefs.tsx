@@ -1,5 +1,6 @@
+import { memo } from "react";
 /** Shared gradients and filters for the orbit scene. */
-export function SceneDefs() {
+export const SceneDefs = memo(function SceneDefs() {
   return (
     <defs>
       <radialGradient id="g-star">
@@ -60,15 +61,12 @@ export function SceneDefs() {
       </radialGradient>
 
       <filter id="f-glow" x="-80%" y="-80%" width="260%" height="260%">
-        <feGaussianBlur stdDeviation="3" result="blur" />
+        <feGaussianBlur stdDeviation="1.6" result="blur" />
         <feMerge>
           <feMergeNode in="blur" />
           <feMergeNode in="SourceGraphic" />
         </feMerge>
       </filter>
-      <filter id="f-soft" x="-100%" y="-100%" width="300%" height="300%">
-        <feGaussianBlur stdDeviation="10" />
-      </filter>
     </defs>
   );
-}
+});

@@ -7,9 +7,11 @@ import {
   atmosphereRadius,
   beltRadius,
   clampZoom,
+  distantPositions,
   fuelArcs,
   handoffRingRadius,
   hashString,
+  nebulaLayout,
   orbitRadius,
   planetPosition,
   polar,
@@ -80,6 +82,44 @@ describe("orbit geometry", () => {
     expect(arcs).toHaveLength(4);
     expect(arcs[0]?.fill).toBeNull();
     expect(arcs[0]?.remainingPct).toBe(0);
+  });
+
+  it("spreads any number of inbox nebulae without piling them up", () => {
+    for (const n of [1, 3, 6, 7, 12, 25, 40]) {
+      const spots = nebulaLayout(n);
+      expect(spots).toHaveLength(n);
+      const scale = spots[0]?.scale ?? 1;
+      expect(scale).toBeGreaterThanOrEqual(0.55);
+      if (n <= 6) expect(scale).toBe(1);
+      // the empty centre (protostar + hint) stays clear
+      for (const p of spots) expect(Math.hypot(p.x, p.y)).toBeGreaterThanOrEqual(200);
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const a = spots[i];
+          const b = spots[j];
+          if (!a || !b) continue;
+          expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThan(110 * scale);
+        }
+      }
+    }
+  });
+
+  it("shows every outside session, away from the fuel gauge", () => {
+    expect(distantPositions(4)).toHaveLength(4);
+    for (const n of [7, 14, 30]) {
+      const spots = distantPositions(n);
+      expect(spots).toHaveLength(n);
+      for (const p of spots) {
+        // the gauge and its labels fill the top half
+        if (p.y < -130) expect(Math.hypot(p.x, p.y)).toBeGreaterThan(FUEL_R + 100);
+        // outside the outermost orbit, inside the map
+        expect(Math.hypot(p.x, p.y)).toBeGreaterThan(orbitRadius(STEP_COUNT) + 15);
+        expect(Math.abs(p.x)).toBeLessThanOrEqual(VIEW.w / 2);
+        expect(Math.abs(p.y)).toBeLessThanOrEqual(VIEW.h / 2);
+      }
+      const keys = new Set(spots.map((p) => `${p.x},${p.y}`));
+      expect(keys.size).toBe(n);
+    }
   });
 
   it("clamps zoom", () => {
