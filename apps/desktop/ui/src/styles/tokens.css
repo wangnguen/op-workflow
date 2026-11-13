@@ -1,5 +1,7 @@
-/* Design tokens: dark galaxy theme. Components use only these variables. */
-:root {
+/* Design tokens: dark galaxy theme. Components use only these variables. In light mode the
+   space map (.space-dark) keeps these dark values: it is a night sky in every theme. */
+:root,
+:root[data-mode="light"] .space-dark {
   color-scheme: dark;
 
   --bg: #06070c;
@@ -44,9 +46,49 @@
   --star-mid: #ffc56b;
   --star-wait: #ffe066;
 
+  /* control kit (layered like macOS controls: fill + hairline ring, no borders) */
+  --accent: #f2994a;
+  --accent-ink: #ffb37a;
+  --accent-soft: rgba(242, 153, 74, 0.16);
+  --on-accent: #1a0f06;
+  --focus: #ffb37a;
+  --control: #1a1d2b;
+  --fill: rgba(118, 118, 140, 0.16);
+  --fill-strong: rgba(118, 118, 140, 0.28);
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.13);
+  --scrim: rgba(2, 3, 6, 0.62);
+  --shadow-control: 0 0 0 0.5px rgba(255, 255, 255, 0.1), 0 1px 1.5px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 0 0 0.5px rgba(255, 255, 255, 0.12), 0 18px 48px rgba(0, 0, 0, 0.55);
+  --st-running-soft: rgba(255, 158, 69, 0.14);
+  --st-waiting-soft: rgba(255, 213, 79, 0.14);
+  --st-done-soft: rgba(127, 220, 174, 0.13);
+  --st-failed-soft: rgba(255, 93, 110, 0.14);
+
+  /* surfaces that sit over other content (themes override these) */
+  --chrome: rgba(8, 9, 15, 0.92);
+  --column: rgba(13, 15, 24, 0.72);
+  --overlay: rgba(12, 14, 24, 0.95);
+  --glow-a: rgba(80, 60, 160, 0.16);
+  --glow-b: rgba(240, 130, 70, 0.08);
+
+  /* motion */
+  --dur-press: 100ms;
+  --dur-fast: 150ms;
+  --dur-base: 220ms;
+  --dur-slow: 300ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.32, 0.64, 1);
+
   --radius: 10px;
   --radius-sm: 6px;
+  --radius-xs: 4px;
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
-  --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  /* Bundled (OFL-1.1), with Vietnamese subsets; system fonts are only a fallback. */
+  --font: "Inter Variable", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono Variable", "Cascadia Code", Consolas, monospace;
+}
+
+.space-dark {
+  color: var(--text);
 }
