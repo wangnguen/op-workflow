@@ -1,0 +1,17 @@
+[package]
+name = "opw-browser"
+description = "Reads GitHub issues through the user's own running Chrome (DevTools protocol), read-only"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+tungstenite.workspace = true
+
+[lints]
+workspace = true

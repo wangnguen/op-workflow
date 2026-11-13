@@ -17,10 +17,14 @@ opw-agents.workspace = true
 opw-monitor.workspace = true
 opw-pty.workspace = true
 opw-context.workspace = true
+opw-update.workspace = true
+opw-browser.workspace = true
 serde_json.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

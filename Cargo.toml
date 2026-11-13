@@ -20,6 +20,8 @@ opw-agents = { path = "core/agents" }
 opw-monitor = { path = "core/monitor" }
 opw-pty = { path = "core/pty" }
 opw-context = { path = "core/context" }
+opw-update = { path = "core/update" }
+opw-browser = { path = "core/browser" }
 opw-orchestrator = { path = "core/orchestrator" }
 
 # third party
@@ -35,6 +37,8 @@ portable-pty = "0.9.0"
 # HTTP for OpenProject: native-tls = SChannel on Windows (system certificate store, no C build)
 ureq = { version = "3.5.2", default-features = false, features = ["native-tls-no-default"] }
 keyring = { version = "3.6.3", features = ["windows-native"] }
+# websocket to the user's own Chrome (DevTools protocol on 127.0.0.1, no TLS)
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 tauri = { version = "2.12.5", features = [] }
 tauri-build = { version = "2.7.4", features = [] }
 
