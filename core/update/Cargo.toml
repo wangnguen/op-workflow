@@ -1,0 +1,15 @@
+[package]
+name = "opw-update"
+description = "New-version check against the app's public GitHub Releases (read-only GET)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

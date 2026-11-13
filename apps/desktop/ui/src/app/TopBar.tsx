@@ -1,5 +1,5 @@
 import { vi } from "../i18n/vi";
-import type { QuotaSnapshot } from "../ipc/types";
+import type { ProviderLink, QuotaSnapshot, UpdateView } from "../ipc/types";
 import { QuotaGauges } from "../features/quota/QuotaGauges";
 
 export type Tab = "task" | "workspace" | "sessions";
@@ -8,11 +8,14 @@ interface Props {
   tab: Tab;
   onTab: (t: Tab) => void;
   quota: QuotaSnapshot[];
+  links: ProviderLink[];
   now: number;
   demo: boolean;
   needsYou: boolean;
+  update: UpdateView | undefined;
   onRefresh: () => void;
   onSettings: () => void;
+  onOpenRelease: () => void;
 }
 
 const TABS: { key: Tab; label: string }[] = [
@@ -21,7 +24,33 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "sessions", label: vi.tabs.sessions },
 ];
 
-export function TopBar({ tab, onTab, quota, now, demo, needsYou, onRefresh, onSettings }: Props) {
+/** Outline of an 8-tooth cog in a 24×24 box (drawn here, no icon font). */
+const GEAR_PATH = (() => {
+  const teeth = 8;
+  const step = (2 * Math.PI) / teeth;
+  const at = (angle: number, r: number) =>
+    `${(12 + r * Math.cos(angle)).toFixed(2)} ${(12 + r * Math.sin(angle)).toFixed(2)}`;
+  const points: string[] = [];
+  for (let i = 0; i < teeth; i++) {
+    const a = i * step;
+    points.push(at(a - step * 0.3, 7.2), at(a - step * 0.16, 9.8), at(a + step * 0.16, 9.8), at(a + step * 0.3, 7.2));
+  }
+  return `M${points.join(" L")} Z`;
+})();
+
+export function TopBar({
+  tab,
+  onTab,
+  quota,
+  links,
+  now,
+  demo,
+  needsYou,
+  update,
+  onRefresh,
+  onSettings,
+  onOpenRelease,
+}: Props) {
   return (
     <header className="topbar">
       <div className="brand">
@@ -50,12 +79,20 @@ export function TopBar({ tab, onTab, quota, now, demo, needsYou, onRefresh, onSe
 
       <div className="topbar-spacer" />
 
+      {update?.available && update.latest && (
+        <button className="chip chip--update" title={vi.topbar.updateHint} onClick={onOpenRelease}>
+          <svg viewBox="0 0 24 24" width={12} height={12} aria-hidden="true">
+            <path d="M12 4v11M7 10l5 5 5-5M5 20h14" className="icon-stroke" />
+          </svg>
+          {vi.topbar.update(update.latest)}
+        </button>
+      )}
       {demo && (
         <span className="chip chip--demo" title={vi.app.demoHint}>
           {vi.app.demo}
         </span>
       )}
-      <QuotaGauges quota={quota} now={now} onRefresh={onRefresh} />
+      <QuotaGauges quota={quota} links={links} now={now} onChanged={onRefresh} />
       <span className="kbd-hint" title={vi.topbar.searchHint}>
         <kbd>{vi.topbar.search}</kbd>
       </span>
@@ -72,12 +109,10 @@ export function TopBar({ tab, onTab, quota, now, demo, needsYou, onRefresh, onSe
         onClick={onSettings}
       >
         <svg viewBox="0 0 24 24" width={16} height={16} aria-hidden="true">
+          <path d={GEAR_PATH} className="icon-stroke" />
           <circle cx={12} cy={12} r={3} className="icon-stroke" />
-          <path
-            d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"
-            className="icon-stroke"
-          />
         </svg>
+        {update?.available && <span className="bell-dot bell-dot--update" />}
       </button>
     </header>
   );
