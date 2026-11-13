@@ -208,6 +208,26 @@ pub fn extract_issue_links(text: &str) -> Vec<IssueLink> {
     out
 }
 
+/// `GET /api/v3/statuses` → (status name, `#rrggbb` colour) as set by the OpenProject admin.
+/// Statuses without a colour are left out.
+pub fn parse_status_colors(v: &Value) -> Vec<(String, String)> {
+    v.pointer("/_embedded/elements")
+        .and_then(Value::as_array)
+        .map(|els| {
+            els.iter()
+                .filter_map(|e| {
+                    let name = e.get("name")?.as_str()?;
+                    let color = e.get("color")?.as_str()?;
+                    let ok = color.len() == 7
+                        && color.starts_with('#')
+                        && color[1..].chars().all(|c| c.is_ascii_hexdigit());
+                    ok.then(|| (name.to_owned(), color.to_ascii_lowercase()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Network side (read-only). [`HttpTracker`] implements it; the token comes from Windows
 /// Credential Manager.
 pub trait TrackerApi {
@@ -220,6 +240,24 @@ pub trait TrackerApi {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn status_colors_keep_valid_hex_only() {
+        let v = json!({"_embedded": {"elements": [
+            {"name": "New", "color": "#1A67A3"},
+            {"name": "In progress", "color": "#ff922b"},
+            {"name": "Closed"},
+            {"name": "Odd", "color": "red"}
+        ]}});
+        assert_eq!(
+            parse_status_colors(&v),
+            vec![
+                ("New".to_owned(), "#1a67a3".to_owned()),
+                ("In progress".to_owned(), "#ff922b".to_owned())
+            ]
+        );
+        assert!(parse_status_colors(&json!({})).is_empty());
+    }
 
     #[test]
     fn extracts_github_and_gitlab_links_deduped_in_order() {

@@ -113,6 +113,11 @@ impl HttpTracker {
         serde_json::from_str(&body).map_err(|e| TrackerError::Shape(e.to_string()))
     }
 
+    /// Status colours set by the OpenProject admin (`GET /api/v3/statuses`).
+    pub fn status_colors(&self) -> TrackerResult<Vec<(String, String)>> {
+        Ok(crate::parse_status_colors(&self.get_json("/api/v3/statuses")?))
+    }
+
     /// Display name of the token owner (`GET /api/v3/users/me`); used to check a new token.
     pub fn me(&self) -> TrackerResult<String> {
         let v = self.get_json("/api/v3/users/me")?;
