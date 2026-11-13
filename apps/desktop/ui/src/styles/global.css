@@ -106,7 +106,8 @@ button:disabled {
 .btn--primary:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 88%, white);
 }
-.btn--primary:active:not(:disabled) {
+.btn--primary:active:not(:disabled),
+.btn--primary[aria-expanded="true"] {
   background: color-mix(in srgb, var(--accent) 86%, black);
 }
 /* borderless toolbar button: no chrome until hovered */
