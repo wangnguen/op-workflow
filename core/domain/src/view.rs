@@ -100,6 +100,31 @@ pub struct QuotaSnapshot {
     pub plan: Option<String>,
 }
 
+/// Connection to one AI provider's quota source (Codex app-server, Claude probe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LinkStatus {
+    Connecting,
+    Ok,
+    Error,
+    /// The CLI is not on PATH.
+    Missing,
+    /// The CLI says nobody is signed in (or the sign-in expired).
+    SignedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderLink {
+    pub provider: Provider,
+    pub status: LinkStatus,
+    /// What went wrong and what the app does next (Vietnamese, shown as is).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// When the status last changed.
+    pub since: String,
+}
+
 // ---------- board ----------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +148,9 @@ pub struct TaskCard {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     pub nx_status: String,
+    /// `#rrggbb` the OpenProject admin gave this status; absent when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nx_status_color: Option<String>,
     pub column: TaskColumn,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<StepRef>,
@@ -146,15 +174,22 @@ pub struct TodayStats {
 #[serde(rename_all = "camelCase")]
 pub struct BoardSnapshot {
     pub tasks: Vec<TaskCard>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_task_id: Option<String>,
+    /// Tasks in "Đang làm", most recent first. Several can run at once.
+    pub active_task_ids: Vec<String>,
     pub quota: Vec<QuotaSnapshot>,
+    /// Quota connections per provider; empty in demo data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<ProviderLink>,
     pub today: TodayStats,
     /// `demo` until an OpenProject token is saved, then `live`.
     pub mode: DataMode,
     /// Problem to show above the board (e.g. OpenProject unreachable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// Briefs still live in the hidden data folder and the user has not chosen: offer this
+    /// folder (on the Desktop) once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tasks_dir_offer: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +221,183 @@ pub struct SettingsView {
     pub codex_quota_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_error: Option<String>,
+    /// Folders scanned for repos (`workspaces` in config).
+    pub workspaces: Vec<String>,
+    /// What "Bắt đầu làm việc" remembered per OpenProject project.
+    pub projects: Vec<ProjectMemory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
+    /// Browser that allows remote debugging right now ("Chrome", "Edge"); `None` = not enabled
+    /// (or the browser is closed). Needed for "Lấy issue".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_debug: Option<String>,
+    /// Folder of the task folders (`<task id>/brief.md`) in use now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tasks_dir: Option<String>,
+    /// `false` until the user picked a folder (or kept the default) once.
+    pub tasks_dir_chosen: bool,
+    /// The Desktop folder the app suggests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tasks_dir_suggested: Option<String>,
+}
+
+/// Result of moving the briefs to another folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TasksDirChange {
+    pub path: String,
+    /// Task folders moved from the old place.
+    pub moved: u32,
+    /// Folders that stayed behind, and why.
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMemory {
+    pub name: String,
+    pub repos: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+// ---------- start work ----------
+
+/// A git repo the user can pick in the "Bắt đầu làm việc" dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoOption {
+    /// Absolute path; also the key sent back in [`StartRequest`].
+    pub path: String,
+    /// Folder name, e.g. `acme-web`.
+    pub name: String,
+    /// Remote `origin`, shown to tell same-named folders apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// Remote matches an issue link in the task description.
+    pub suggested: bool,
+    /// Already used for this project before.
+    pub remembered: bool,
+}
+
+/// Everything the dialog needs before a repo is picked. Built without network calls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartOptions {
+    pub wp_id: u64,
+    pub task_id: String,
+    pub title: String,
+    pub project: String,
+    pub nx_status: String,
+    /// Suggested first, then remembered, then the rest by name.
+    pub repos: Vec<RepoOption>,
+    /// Repo to pre-select (used before for this task, issue match, or remembered).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// Branch name to pre-fill.
+    pub branch: String,
+    /// Where `branch` came from: `saved` (this task was started before), `project` (template
+    /// remembered for the project) or `default`. Only `default` may be replaced by the
+    /// convention guessed from the picked repo.
+    pub branch_source: String,
+    /// Issue links found in the task description.
+    pub issue_links: Vec<String>,
+    /// Folders scanned for repos.
+    pub workspaces: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchOption {
+    /// As git shows it: `development` or `origin/development`.
+    pub name: String,
+    pub remote: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub committed_at: Option<String>,
+    /// e.g. `ahead 2`, `behind 14`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track: Option<String>,
+}
+
+/// Branches and working-tree state of one repo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoState {
+    pub path: String,
+    pub name: String,
+    /// Newest commit first.
+    pub branches: Vec<BranchOption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// `git status --porcelain` lines (capped).
+    pub dirty: Vec<String>,
+    pub dirty_count: usize,
+    /// Base picked last time in this repo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_base: Option<String>,
+    /// Branch name from the repo's own convention (guessed from its branches), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartRequest {
+    pub wp_id: u64,
+    pub repo: String,
+    pub base: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartResult {
+    pub task_id: String,
+    pub branch: String,
+    /// `false` when the branch already existed and the app only switched to it.
+    pub created: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief_path: Option<String>,
+    /// Non-fatal problems (brief built without comments, config not saved, …); the branch is
+    /// ready anyway.
+    pub warnings: Vec<String>,
+    /// GitHub issue links found in the task; the UI then runs "Lấy issue" by itself.
+    #[serde(default)]
+    pub issue_links: u32,
+}
+
+/// "Lấy issue": issues read through the user's Chrome into the brief's `## Từ issue`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueFetch {
+    pub read: u32,
+    /// Issues that could not be read (the others are in the brief).
+    pub warnings: Vec<String>,
+}
+
+// ---------- update check ----------
+
+/// New-version check against GitHub Releases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateView {
+    pub current: String,
+    pub enabled: bool,
+    /// Newest release found, e.g. `0.2.0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
+    /// `latest` is newer than `current`.
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ---------- orbit ----------
@@ -266,6 +478,8 @@ pub struct TaskSystem {
     pub repo: String,
     pub branch: String,
     pub nx_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nx_status_color: Option<String>,
     pub started_at: String,
     pub steps: Vec<StepView>,
     pub agents: Vec<AgentView>,
@@ -295,11 +509,18 @@ pub struct DistantSession {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrbitSnapshot {
+    /// The most recent task in "Đang làm"; the map draws it in the centre by default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active: Option<TaskSystem>,
+    /// The other tasks in "Đang làm", most recent first; the UI can swap one into the centre.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others: Vec<TaskSystem>,
     pub inbox: Vec<InboxItem>,
     pub distant: Vec<DistantSession>,
     pub quota: Vec<QuotaSnapshot>,
+    /// Why the inbox may be empty (loading, OpenProject error, URL missing), as on the board.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 #[cfg(test)]
@@ -318,6 +539,7 @@ mod tests {
             repo: None,
             branch: Some("feature/187716".into()),
             nx_status: "In progress".into(),
+            nx_status_color: Some("#cc5de8".into()),
             column: TaskColumn::AwaitingPush,
             step: Some(StepRef {
                 kind: StepKind::CrossReview,
@@ -335,10 +557,55 @@ mod tests {
             v,
             json!({
                 "id": "WP-187716", "wpId": 187716, "title": "t", "project": "Web Platform",
-                "branch": "feature/187716", "nxStatus": "In progress", "column": "awaitingPush",
+                "branch": "feature/187716", "nxStatus": "In progress", "nxStatusColor": "#cc5de8", "column": "awaitingPush",
                 "step": {"kind": "crossReview", "index": 6, "state": "waitingUser", "since": "2026-11-13T08:00:00Z"},
                 "agent": "codex", "contextPct": 24.0, "newComments": 2
             })
+        );
+    }
+
+    #[test]
+    fn provider_link_serializes_for_ts() {
+        let link = ProviderLink {
+            provider: Provider::Codex,
+            status: LinkStatus::SignedOut,
+            message: None,
+            since: "2026-11-13T08:00:00Z".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&link).unwrap(),
+            json!({"provider": "codex", "status": "signedOut", "since": "2026-11-13T08:00:00Z"})
+        );
+    }
+
+    #[test]
+    fn start_types_match_ts() {
+        let req: StartRequest = serde_json::from_value(json!({
+            "wpId": 188001, "repo": "C:/code/acme-web", "base": "origin/development", "branch": "f/WP-188001"
+        }))
+        .unwrap();
+        assert_eq!(req.wp_id, 188001);
+        let state = RepoState {
+            path: "C:/code/acme-web".into(),
+            name: "acme-web".into(),
+            branches: vec![BranchOption {
+                name: "origin/development".into(),
+                remote: true,
+                committed_at: None,
+                track: None,
+            }],
+            current: Some("development".into()),
+            dirty: vec![],
+            dirty_count: 0,
+            last_base: None,
+            suggested_branch: Some("f/WP-188001".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            json!({"path": "C:/code/acme-web", "name": "acme-web",
+                   "branches": [{"name": "origin/development", "remote": true}],
+                   "current": "development", "dirty": [], "dirtyCount": 0,
+                   "suggestedBranch": "f/WP-188001"})
         );
     }
 

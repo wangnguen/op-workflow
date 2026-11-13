@@ -7,6 +7,7 @@
 
 mod app_api;
 mod settings_api;
+mod start_api;
 
 fn main() {
     // PTY spike from inside the app binary (PLAN.md §12): `op-workflow-desktop --pty-selftest`.
@@ -33,10 +34,26 @@ fn main() {
             app_api::app_info,
             app_api::board_snapshot,
             app_api::orbit_snapshot,
+            app_api::update_status,
+            app_api::check_update,
+            app_api::open_release_page,
+            app_api::reconnect_quota,
+            app_api::open_login,
+            start_api::start_options,
+            start_api::repo_state,
+            start_api::fetch_repo,
+            start_api::start_task,
+            start_api::pause_task,
+            start_api::open_brief,
+            start_api::fetch_issues,
+            start_api::open_browser_debug,
             settings_api::settings_status,
             settings_api::save_nx_token,
             settings_api::clear_nx_token,
-            settings_api::refresh_now
+            settings_api::refresh_now,
+            settings_api::open_config,
+            settings_api::reveal_path,
+            settings_api::set_tasks_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running op-workflow");

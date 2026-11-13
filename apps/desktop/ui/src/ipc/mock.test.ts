@@ -10,15 +10,17 @@ describe("demo timeline", () => {
       const orbit = orbitForFrame(i, NOW);
       const board = boardForFrame(i, NOW);
       const activeCards = board.tasks.filter((t) => t.column === "active");
-      expect(activeCards.length).toBeLessThanOrEqual(1);
+      expect(activeCards.map((t) => t.id).sort()).toEqual([...board.activeTaskIds].sort());
+      const systems = [orbit.active, ...(orbit.others ?? [])].flatMap((x) => (x ? [x.taskId] : []));
+      expect(systems).toEqual(board.activeTaskIds);
       if (orbit.active) {
-        expect(board.activeTaskId).toBe(orbit.active.taskId);
+        expect(board.activeTaskIds[0]).toBe(orbit.active.taskId);
         expect(orbit.active.steps).toHaveLength(STEP_COUNT);
         const live = orbit.active.steps.filter((s) => s.state === "running" || s.state === "waitingUser");
         expect(live).toHaveLength(1);
         orbit.active.steps.forEach((s, idx) => expect(s.index).toBe(idx + 1));
       } else {
-        expect(board.activeTaskId).toBeUndefined();
+        expect(board.activeTaskIds).toEqual([]);
         expect(orbit.inbox.length).toBeGreaterThan(0);
       }
       for (const q of orbit.quota) {

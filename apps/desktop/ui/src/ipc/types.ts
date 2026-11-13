@@ -34,8 +34,21 @@ export interface QuotaWindow {
   resetsAt?: string;
 }
 
+export type Provider = "claude" | "codex";
+
+/** Connection to one provider's quota source (Codex app-server, Claude probe). */
+export type LinkStatus = "connecting" | "ok" | "error" | "missing" | "signedOut";
+
+export interface ProviderLink {
+  provider: Provider;
+  status: LinkStatus;
+  /** what went wrong and what the app does next (Vietnamese) */
+  message?: string;
+  since: string;
+}
+
 export interface QuotaSnapshot {
-  provider: "claude" | "codex";
+  provider: Provider;
   windows: QuotaWindow[];
   /** e.g. "rate_limit_event", "app-server", "statusline", "rollout" */
   source: string;
@@ -64,6 +77,8 @@ export interface TaskCard {
   branch?: string;
   /** OpenProject status name, e.g. "Open", "In progress" */
   nxStatus: string;
+  /** `#rrggbb` the OpenProject admin gave this status */
+  nxStatusColor?: string;
   column: TaskColumn;
   step?: StepRef;
   agent?: AgentKind;
@@ -82,13 +97,18 @@ export type DataMode = "demo" | "live";
 
 export interface BoardSnapshot {
   tasks: TaskCard[];
-  activeTaskId?: string;
+  /** tasks in "Đang làm", most recent first; several can run at once */
+  activeTaskIds: string[];
   quota: QuotaSnapshot[];
+  /** quota connections per provider; absent in demo data */
+  links?: ProviderLink[];
   today: TodayStats;
   /** "demo" until an OpenProject token is saved, then "live" */
   mode: DataMode;
   /** problem to show above the board, e.g. OpenProject unreachable */
   notice?: string;
+  /** briefs are still in the hidden data folder: offer this Desktop folder once */
+  tasksDirOffer?: string;
 }
 
 // ---------- settings ----------
@@ -104,12 +124,136 @@ export interface SettingsView {
   claudeQuotaAt?: string;
   codexQuotaAt?: string;
   quotaError?: string;
+  /** folders scanned for repos */
+  workspaces: string[];
+  /** what "Bắt đầu làm việc" remembered per OpenProject project */
+  projects: ProjectMemory[];
+  configPath?: string;
+  dataDir?: string;
+  /** browser that allows "Lấy issue" to connect right now ("Chrome"); absent = not enabled */
+  browserDebug?: string;
+  /** folder of the task folders (`<task id>/brief.md`) in use now */
+  tasksDir?: string;
+  /** false until the user picked a folder (or kept the default) once */
+  tasksDirChosen: boolean;
+  /** the Desktop folder the app suggests */
+  tasksDirSuggested?: string;
+}
+
+/** Result of moving the briefs to another folder. */
+export interface TasksDirChange {
+  path: string;
+  /** task folders moved from the old place */
+  moved: number;
+  /** folders that stayed behind, and why */
+  warnings: string[];
+}
+
+export interface ProjectMemory {
+  name: string;
+  repos: string[];
+  branch?: string;
 }
 
 /** Error shape of failing commands (`{code, message}`). */
 export interface ApiError {
   code: string;
   message: string;
+}
+
+// ---------- start work ----------
+
+/** A git repo found in the workspace folders (or remembered for the project). */
+export interface RepoOption {
+  /** absolute path; sent back in `StartRequest.repo` */
+  path: string;
+  name: string;
+  remote?: string;
+  /** remote matches an issue link in the task description */
+  suggested: boolean;
+  /** used for this project before */
+  remembered: boolean;
+}
+
+export type BranchSource = "saved" | "project" | "default";
+
+export interface StartOptions {
+  wpId: number;
+  taskId: string;
+  title: string;
+  project: string;
+  nxStatus: string;
+  repos: RepoOption[];
+  /** repo to pre-select */
+  repo?: string;
+  /** branch name to pre-fill */
+  branch: string;
+  /** only "default" may be replaced by the convention guessed from the picked repo */
+  branchSource: BranchSource;
+  issueLinks: string[];
+  workspaces: string[];
+}
+
+export interface BranchOption {
+  /** "development" or "origin/development" */
+  name: string;
+  remote: boolean;
+  committedAt?: string;
+  /** "ahead 2", "behind 14" */
+  track?: string;
+}
+
+export interface RepoState {
+  path: string;
+  name: string;
+  /** newest commit first */
+  branches: BranchOption[];
+  current?: string;
+  /** `git status --porcelain` lines (capped) */
+  dirty: string[];
+  dirtyCount: number;
+  lastBase?: string;
+  /** branch name following the repo's own convention */
+  suggestedBranch?: string;
+}
+
+export interface StartRequest {
+  wpId: number;
+  repo: string;
+  base: string;
+  branch: string;
+}
+
+export interface StartResult {
+  taskId: string;
+  branch: string;
+  /** false when the branch existed and the app only switched to it */
+  created: boolean;
+  briefPath?: string;
+  warnings: string[];
+  /** GitHub issue links in the task; the board then runs "Lấy issue" by itself */
+  issueLinks?: number;
+}
+
+/** "Lấy issue": issues read through the user's Chrome into the brief. */
+export interface IssueFetch {
+  read: number;
+  /** issues that could not be read (the others are in the brief) */
+  warnings: string[];
+}
+
+// ---------- update check ----------
+
+export interface UpdateView {
+  current: string;
+  enabled: boolean;
+  latest?: string;
+  /** latest is newer than current */
+  available: boolean;
+  url?: string;
+  publishedAt?: string;
+  checkedAt?: string;
+  error?: string;
 }
 
 // ---------- orbit ----------
@@ -175,6 +319,7 @@ export interface TaskSystem {
   repo: string;
   branch: string;
   nxStatus: string;
+  nxStatusColor?: string;
   startedAt: string;
   steps: StepView[];
   agents: AgentView[];
@@ -197,10 +342,15 @@ export interface DistantSession {
 }
 
 export interface OrbitSnapshot {
+  /** most recent task in "Đang làm", drawn in the centre by default */
   active?: TaskSystem;
+  /** the other tasks in "Đang làm", most recent first */
+  others?: TaskSystem[];
   inbox: InboxItem[];
   distant: DistantSession[];
   quota: QuotaSnapshot[];
+  /** why the inbox may be empty: loading, OpenProject error, URL missing */
+  notice?: string;
 }
 
 // ---------- commands ----------
@@ -214,8 +364,35 @@ export interface Commands {
   save_nx_token: SettingsView;
   clear_nx_token: SettingsView;
   refresh_now: null;
+  open_config: null;
+  start_options: StartOptions;
+  repo_state: RepoState;
+  fetch_repo: RepoState;
+  start_task: StartResult;
+  pause_task: null;
+  open_brief: null;
+  update_status: UpdateView;
+  check_update: UpdateView;
+  open_release_page: null;
+  reconnect_quota: null;
+  open_login: null;
+  reveal_path: null;
+  fetch_issues: IssueFetch;
+  open_browser_debug: null;
+  set_tasks_dir: TasksDirChange;
 }
 
 export interface CommandArgs {
   save_nx_token: { baseUrl: string; token: string };
+  start_options: { wpId: number };
+  repo_state: { repo: string; wpId?: number };
+  fetch_repo: { repo: string; wpId?: number };
+  start_task: { request: StartRequest };
+  pause_task: { wpId: number };
+  open_brief: { wpId: number };
+  reconnect_quota: { provider?: Provider };
+  open_login: { provider: Provider };
+  reveal_path: { path: string };
+  fetch_issues: { wpId: number };
+  set_tasks_dir: { dir?: string };
 }

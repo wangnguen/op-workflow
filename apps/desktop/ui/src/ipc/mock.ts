@@ -10,16 +10,26 @@ import type {
   FindingView,
   GateKind,
   InboxItem,
+  IssueFetch,
+  LinkStatus,
   OrbitSnapshot,
+  Provider,
+  ProviderLink,
   QuotaSnapshot,
+  RepoState,
   SettingsView,
   SessionStatus,
+  StartOptions,
+  StartRequest,
+  StartResult,
   StepKind,
   StepState,
   StepView,
   SubagentView,
   TaskCard,
   TaskSystem,
+  TasksDirChange,
+  UpdateView,
 } from "./types";
 import { STEP_COUNT, STEP_ORDER } from "../shared/steps";
 
@@ -188,11 +198,88 @@ const INBOX: InboxItem[] = [
   { taskId: "WP-188002", title: "Thêm bộ lọc ngày cho báo cáo chia sẻ", project: "Mobile App" },
 ];
 
-const DISTANT: DistantSession[] = [
+const BASE_DISTANT: DistantSession[] = [
   { id: "ext-1", agent: "claude", label: "acme-desktop", status: "idle" },
   { id: "ext-2", agent: "codex", label: "misfile-buster", status: "running" },
   { id: "ext-3", agent: "claude", label: "study-workspace", status: "waiting" },
 ];
+
+/** `?inbox=N&distant=N` in the browser URL fills the map with N items (layout reviews). */
+function urlCount(key: string): number | undefined {
+  if (typeof window === "undefined") return undefined;
+  const raw = new URLSearchParams(window.location.search).get(key);
+  const n = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n >= 0 && n <= 60 ? n : undefined;
+}
+
+const STATUSES: SessionStatus[] = ["idle", "running", "waiting"];
+
+const INBOX_VIEW: InboxItem[] = (() => {
+  const n = urlCount("inbox");
+  if (n === undefined) return INBOX;
+  return Array.from({ length: n }, (_, i) =>
+    INBOX[i] ?? { taskId: `WP-${188100 + i}`, title: `Task demo số ${i + 1}: sửa lỗi hiển thị danh sách`, project: "Web Platform" },
+  );
+})();
+
+const DISTANT: DistantSession[] = (() => {
+  const n = urlCount("distant");
+  if (n === undefined) return BASE_DISTANT;
+  return Array.from({ length: n }, (_, i) => ({
+    id: `ext-${i + 1}`,
+    agent: i % 3 === 1 ? "codex" : "claude",
+    label: BASE_DISTANT[i]?.label ?? `repo-${i + 1}`,
+    status: STATUSES[i % 3] ?? "idle",
+  }));
+})();
+
+// ---------- quota connections ----------
+
+/** `?link=claude-signedOut,codex-error` shows those problems in the browser preview. */
+const mockLinkState: Record<Provider, { status: LinkStatus; okAt?: number }> = (() => {
+  const out: Record<Provider, { status: LinkStatus; okAt?: number }> = {
+    claude: { status: "ok" },
+    codex: { status: "ok" },
+  };
+  if (typeof window === "undefined") return out;
+  for (const part of (new URLSearchParams(window.location.search).get("link") ?? "").split(",")) {
+    const [p, status] = part.split("-");
+    if ((p === "claude" || p === "codex") && (status === "error" || status === "missing" || status === "signedOut")) {
+      out[p] = { status };
+    }
+  }
+  return out;
+})();
+
+const MOCK_LINK_MESSAGE: Partial<Record<LinkStatus, (p: Provider) => string>> = {
+  error: (p) =>
+    p === "codex"
+      ? "codex app-server lỗi: exited. App tự thử lại sau 1 phút, hoặc bấm Kết nối lại."
+      : "Probe Claude lỗi: timeout. App thử lại sau 30 phút, hoặc bấm Kết nối lại.",
+  missing: (p) => `Không thấy lệnh ${p} trên PATH. Cài ${p === "codex" ? "Codex CLI" : "Claude Code"} rồi bấm Kết nối lại.`,
+  signedOut: (p) =>
+    `${p === "codex" ? "Codex" : "Claude"} chưa đăng nhập hoặc phiên đăng nhập đã hết hạn. Bấm Đăng nhập để mở cửa sổ đăng nhập.`,
+};
+
+export function mockLinks(now: number): ProviderLink[] {
+  return (["claude", "codex"] as const).map((provider) => {
+    const s = mockLinkState[provider];
+    if (s.okAt !== undefined && now >= s.okAt) mockLinkState[provider] = { status: "ok" };
+    const { status } = mockLinkState[provider];
+    const message = MOCK_LINK_MESSAGE[status]?.(provider);
+    const link: ProviderLink = { provider, status, since: iso(now - 4 * 60_000) };
+    if (message) link.message = message;
+    return link;
+  });
+}
+
+/** Browser preview: "Kết nối lại" or a finished sign-in turns the link green after a moment. */
+export function mockReconnect(provider?: Provider): null {
+  for (const p of ["claude", "codex"] as const) {
+    if (!provider || provider === p) mockLinkState[p] = { status: "connecting", okAt: Date.now() + 1500 };
+  }
+  return null;
+}
 
 export function mockAppInfo(): AppInfo {
   return { version: "0.1.0-demo", core: "mock" };
@@ -293,16 +380,48 @@ function buildFindings(f: Frame): FindingView[] {
   });
 }
 
+/** A second task in "Đang làm" that only went through intake (several tasks can run at once). */
+const SECOND = {
+  id: "WP-188003",
+  wpId: 188003,
+  title: "Tối ưu truy vấn danh sách thư mục dùng chung",
+  project: "Web Platform",
+  repo: "acme-api",
+  branch: "f/WP-188003",
+};
+
+function secondSystem(now: number): TaskSystem {
+  const started = iso(now - 25 * 60_000);
+  return {
+    taskId: SECOND.id,
+    title: SECOND.title,
+    repo: SECOND.repo,
+    branch: SECOND.branch,
+    nxStatus: "In progress",
+    nxStatusColor: "#cc5de8",
+    startedAt: started,
+    steps: STEP_ORDER.map((kind, i) =>
+      i === 0
+        ? { kind, index: 1, state: "done", startedAt: started, endedAt: started }
+        : { kind, index: i + 1, state: "pending" },
+    ),
+    agents: [],
+    findings: [],
+    newComments: 0,
+  };
+}
+
 export function orbitForFrame(frameIndex: number, now: number): OrbitSnapshot {
   const f = frameAt(frameIndex);
   const quota = mockQuota(frameIndex, now);
-  if (!f.active) return { inbox: INBOX, distant: DISTANT, quota };
+  if (!f.active) return { inbox: INBOX_VIEW, distant: DISTANT, quota };
   const active: TaskSystem = {
     taskId: ACTIVE_ID,
     title: "Không tải được danh sách file khi user chưa có org",
     repo: "acme-web",
     branch: "feature/187716",
     nxStatus: "In progress",
+    nxStatusColor: "#cc5de8",
     startedAt: iso(now - frameIndex * FRAME_TIME_MS),
     steps: buildSteps(f, frameIndex, now),
     agents: buildAgents(f, now),
@@ -310,7 +429,7 @@ export function orbitForFrame(frameIndex: number, now: number): OrbitSnapshot {
     newComments: f.newComments,
   };
   if (f.gate) active.gate = { kind: f.gate.kind, since: iso(now - 40_000), message: f.gate.message };
-  return { active, inbox: INBOX, distant: DISTANT, quota };
+  return { active, others: [secondSystem(now)], inbox: INBOX_VIEW, distant: DISTANT, quota };
 }
 
 export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
@@ -324,6 +443,7 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
     repo: "acme-web",
     branch: "feature/187716",
     nxStatus: "In progress",
+    nxStatusColor: "#cc5de8",
     column: f.active ? "active" : "awaitingPush",
     step: {
       kind: STEP_ORDER[f.step] ?? "intake",
@@ -338,8 +458,8 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
   if (f.agent) activeCard.contextPct = f.agent.ctxPct;
 
   const tasks: TaskCard[] = [
-    { id: "WP-188001", wpId: 188001, title: INBOX[0]?.title ?? "", project: "Web Platform", nxStatus: "Open", column: "inbox", newComments: 2 },
-    { id: "WP-188002", wpId: 188002, title: INBOX[1]?.title ?? "", project: "Mobile App", nxStatus: "Reopened", column: "inbox", newComments: 0 },
+    { id: "WP-188001", wpId: 188001, title: INBOX[0]?.title ?? "", project: "Web Platform", nxStatus: "Open", nxStatusColor: "#1a67a3", column: "inbox", newComments: 2 },
+    { id: "WP-188002", wpId: 188002, title: INBOX[1]?.title ?? "", project: "Mobile App", nxStatus: "Reopened", nxStatusColor: "#ff3300", column: "inbox", newComments: 0 },
     activeCard,
     {
       id: "WP-186196",
@@ -349,6 +469,7 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
       repo: "acme-api",
       branch: "feature/186196",
       nxStatus: "In progress",
+    nxStatusColor: "#cc5de8",
       column: "awaitingPush",
       step: { kind: "pushSummary", index: STEP_COUNT, state: "done", since: iso(now - 50 * 60_000) },
       agent: "claude",
@@ -356,13 +477,30 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
       newComments: 0,
     },
   ];
+  if (f.active) {
+    tasks.push({
+      id: SECOND.id,
+      wpId: SECOND.wpId,
+      title: SECOND.title,
+      project: SECOND.project,
+      repo: SECOND.repo,
+      branch: SECOND.branch,
+      nxStatus: "In progress",
+    nxStatusColor: "#cc5de8",
+      column: "active",
+      step: { kind: "intake", index: 1, state: "done", since: iso(now - 25 * 60_000) },
+      newComments: 0,
+    });
+  }
   const board: BoardSnapshot = {
     tasks,
+    activeTaskIds: f.active ? [ACTIVE_ID, SECOND.id] : [],
     quota: mockQuota(frameIndex, now),
+    links: mockLinks(now),
     today: { tokens: 1_240_000 + frameIndex * 18_000, costUsd: 0.84 + f.cost },
     mode: "demo",
+    tasksDirOffer: mockTasksDirOffer(),
   };
-  if (f.active) board.activeTaskId = ACTIVE_ID;
   return board;
 }
 
@@ -374,7 +512,41 @@ let mockTokenSet = false;
 let mockBaseUrl = "";
 
 export function mockSettings(): SettingsView {
-  return { nxBaseUrl: mockBaseUrl, nxTokenSet: mockTokenSet };
+  return {
+    nxBaseUrl: mockBaseUrl,
+    nxTokenSet: mockTokenSet,
+    workspaces: ["~/Desktop"],
+    projects: [
+      { name: "Web Platform", repos: ["~/Desktop/acme-web", "~/Desktop/acme-api"], branch: "f/WP-{taskId}" },
+      { name: "Mobile App", repos: ["~/Desktop/acme-mobile"] },
+    ],
+    configPath: "C:/Users/me/.op-workflow-dev/config.json",
+    dataDir: "C:/Users/me/.op-workflow-dev",
+    browserDebug: "Chrome",
+    tasksDir: mockTasksDir ?? "C:/Users/me/.op-workflow-dev/tasks",
+    tasksDirChosen: mockTasksDir !== undefined,
+    tasksDirSuggested: MOCK_DESKTOP_TASKS,
+  };
+}
+
+const MOCK_DESKTOP_TASKS = "C:/Users/me/Desktop/op-workflow-tasks";
+let mockTasksDir: string | undefined;
+
+/** Browser preview: remembers the choice in memory only. */
+export function mockSetTasksDir(dir?: string): TasksDirChange {
+  mockTasksDir = dir ?? "C:/Users/me/.op-workflow-dev/tasks";
+  return { path: mockTasksDir, moved: dir ? 2 : 0, warnings: [] };
+}
+
+/** `?offer` in the preview URL shows the one-time "save briefs on the Desktop" question. */
+export const mockTasksDirOffer = (): string | undefined =>
+  mockTasksDir === undefined && typeof location !== "undefined" && new URLSearchParams(location.search).has("offer")
+    ? MOCK_DESKTOP_TASKS
+    : undefined;
+
+export function mockFetchIssues(wpId: number): IssueFetch {
+  void wpId;
+  return { read: 1, warnings: [] };
 }
 
 export function mockSaveToken(baseUrl: string, token: string): SettingsView {
@@ -388,5 +560,118 @@ export function mockSaveToken(baseUrl: string, token: string): SettingsView {
 export function mockClearToken(): SettingsView {
   mockTokenSet = false;
   return mockSettings();
+}
+
+// ---------- start work (browser preview only; no git runs) ----------
+
+interface MockRepo {
+  name: string;
+  remote: string;
+  dirty: string[];
+  /** [name, minutes since last commit, track] */
+  branches: [string, number, string?][];
+  lastBase?: string;
+}
+
+const MOCK_REPOS: MockRepo[] = [
+  {
+    name: "acme-web",
+    remote: "git@github.com:acme/web.git",
+    dirty: [],
+    lastBase: "origin/development",
+    branches: [
+      ["origin/development", 120],
+      ["origin/production", 3 * 24 * 60],
+      ["f/WP-187641", 26 * 60, "ahead 2"],
+      ["f/WP-187716", 40],
+      ["origin/f/WP-186196", 2 * 24 * 60],
+      ["development", 5 * 24 * 60, "behind 14"],
+    ],
+  },
+  {
+    name: "acme-api",
+    remote: "https://gitlab.example.com/acme/api.git",
+    dirty: [" M src/routes/files.ts", "?? notes.txt"],
+    branches: [
+      ["origin/development", 300],
+      ["origin/production", 6 * 24 * 60],
+      ["feature/186196", 50],
+    ],
+  },
+  { name: "acme-tools", remote: "git@github.com:acme/tools.git", dirty: [], branches: [["origin/main", 9 * 24 * 60]] },
+];
+
+const mockPath = (name: string) => `C:\\code\\${name}`;
+
+export function mockStartOptions(wpId: number): StartOptions {
+  const card = mockBoard(Date.now()).tasks.find((t) => t.wpId === wpId);
+  return {
+    wpId,
+    taskId: card?.id ?? `WP-${wpId}`,
+    title: card?.title ?? "Task demo",
+    project: card?.project ?? "Web Platform",
+    nxStatus: card?.nxStatus ?? "Open",
+    repos: MOCK_REPOS.map((r, i) => ({
+      path: mockPath(r.name),
+      name: r.name,
+      remote: r.remote,
+      suggested: i === 0,
+      remembered: i === 1,
+    })),
+    repo: mockPath("acme-web"),
+    branch: `feature/${wpId}`,
+    branchSource: "default",
+    issueLinks: ["https://github.com/acme/web/issues/456"],
+    workspaces: ["~/Desktop"],
+  };
+}
+
+export function mockRepoState(path: string, wpId?: number): RepoState {
+  const repo = MOCK_REPOS.find((r) => mockPath(r.name) === path);
+  if (!repo) throw { code: "repo.notGit", message: `${path} không phải repo git` };
+  const now = Date.now();
+  return {
+    path,
+    name: repo.name,
+    branches: repo.branches.map(([name, ageMin, track]) => ({
+      name,
+      remote: name.startsWith("origin/"),
+      committedAt: new Date(now - ageMin * 60_000).toISOString(),
+      track,
+    })),
+    current: repo.branches.find(([n]) => !n.startsWith("origin/"))?.[0],
+    dirty: repo.dirty,
+    dirtyCount: repo.dirty.length,
+    lastBase: repo.lastBase,
+    suggestedBranch: wpId !== undefined && repo.name === "acme-web" ? `f/WP-${wpId}` : undefined,
+  };
+}
+
+export const mockFetchRepo = (path: string, wpId?: number): RepoState => mockRepoState(path, wpId);
+
+export function mockStartTask(req: StartRequest): StartResult {
+  const repo = MOCK_REPOS.find((r) => mockPath(r.name) === req.repo);
+  if (repo && repo.dirty.length > 0) {
+    throw { code: "repo.dirty", message: `Working tree có ${repo.dirty.length} file chưa commit.` };
+  }
+  return {
+    taskId: `WP-${req.wpId}`,
+    branch: req.branch,
+    created: !repo?.branches.some(([n]) => n === req.branch),
+    warnings: ["Bản demo trong trình duyệt: không tạo branch thật."],
+    issueLinks: 0,
+  };
+}
+
+export function mockUpdate(): UpdateView {
+  return {
+    current: "0.1.0",
+    enabled: true,
+    latest: "0.2.0",
+    available: true,
+    url: "https://github.com/wangnguen/op-workflow/releases",
+    publishedAt: new Date(Date.now() - 2 * 86_400_000).toISOString(),
+    checkedAt: new Date().toISOString(),
+  };
 }
 export const mockBoard = (now: number): BoardSnapshot => boardForFrame(demoFrameIndex(now), now);

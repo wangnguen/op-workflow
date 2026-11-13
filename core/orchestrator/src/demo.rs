@@ -258,6 +258,7 @@ fn active_system(frame: u64) -> Option<TaskSystem> {
         repo: "acme-web".into(),
         branch: "feature/187716".into(),
         nx_status: "In progress".into(),
+        nx_status_color: Some("#cc5de8".into()),
         started_at: DEMO_TIME.into(),
         steps,
         agents: step
@@ -273,6 +274,7 @@ pub fn orbit(tick: u64) -> OrbitSnapshot {
     let frame = tick % frames();
     OrbitSnapshot {
         active: active_system(frame),
+        others: Vec::new(),
         inbox: vec![
             InboxItem {
                 task_id: "WP-188001".into(),
@@ -292,6 +294,7 @@ pub fn orbit(tick: u64) -> OrbitSnapshot {
             status: SessionStatus::Idle,
         }],
         quota: quota(),
+        notice: None,
     }
 }
 
@@ -306,6 +309,7 @@ pub fn board(tick: u64) -> BoardSnapshot {
         repo: None,
         branch: None,
         nx_status: "Open".into(),
+        nx_status_color: Some("#1a67a3".into()),
         column: TaskColumn::Inbox,
         step: None,
         agent: None,
@@ -324,6 +328,7 @@ pub fn board(tick: u64) -> BoardSnapshot {
             repo: Some("acme-api".into()),
             branch: Some("feature/186196".into()),
             nx_status: "In progress".into(),
+            nx_status_color: Some("#cc5de8".into()),
             column: TaskColumn::AwaitingPush,
             step: Some(StepRef {
                 kind: StepKind::PushSummary,
@@ -351,6 +356,7 @@ pub fn board(tick: u64) -> BoardSnapshot {
             repo: Some(sys.repo.clone()),
             branch: Some(sys.branch.clone()),
             nx_status: sys.nx_status.clone(),
+            nx_status_color: sys.nx_status_color.clone(),
             column: if current.is_some() {
                 TaskColumn::Active
             } else {
@@ -371,11 +377,15 @@ pub fn board(tick: u64) -> BoardSnapshot {
     BoardSnapshot {
         mode: opw_domain::view::DataMode::Demo,
         notice: None,
-        active_task_id: system
+        tasks_dir_offer: None,
+        active_task_ids: system
             .filter(|s| s.gate.is_some() || !s.agents.is_empty())
-            .map(|s| s.task_id),
+            .map(|s| s.task_id)
+            .into_iter()
+            .collect(),
         tasks,
         quota: quota(),
+        links: Vec::new(),
         today: TodayStats {
             tokens: 1_200_000 + tick % 1000 * 1_000,
             cost_usd: 0.84,
@@ -416,7 +426,7 @@ mod tests {
     fn last_frame_is_awaiting_push_with_no_active_card() {
         let last = frames() - 1;
         let board = board(last);
-        assert!(board.active_task_id.is_none());
+        assert!(board.active_task_ids.is_empty());
         assert!(board.tasks.iter().all(|t| t.column != TaskColumn::Active));
     }
 }
