@@ -12,19 +12,21 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use opw_agents::cli;
 use opw_agents::env::{Account, is_stripped};
-use opw_domain::view::QuotaSnapshot;
+use opw_domain::view::{LinkStatus, Provider, ProviderLink, QuotaSnapshot};
 use opw_tracker::{HttpTracker, TrackerApi, WorkPackage};
 use serde_json::{Value, json};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(20);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 const RESTART_BACKOFF: Duration = Duration::from_secs(60);
+/// How often a healthy app-server connection checks for a "Kết nối lại" request.
+const WAKE_CHECK: Duration = Duration::from_secs(1);
 
 /// Cached live state. The token stays inside the process and is never serialized.
 #[derive(Clone, Default)]
@@ -37,9 +39,53 @@ pub struct LiveState {
     pub tasks: Option<Vec<WorkPackage>>,
     pub last_sync: Option<String>,
     pub tasks_error: Option<String>,
+    /// OpenProject status name → `#rrggbb`, refreshed with the inbox.
+    pub status_colors: Vec<(String, String)>,
     pub claude: Option<QuotaSnapshot>,
     pub codex: Option<QuotaSnapshot>,
-    pub quota_error: Option<String>,
+    /// `None` until the quota threads start.
+    pub claude_link: Option<ProviderLink>,
+    pub codex_link: Option<ProviderLink>,
+}
+
+impl LiveState {
+    pub fn status_color(&self, status: &str) -> Option<String> {
+        self.status_colors
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(status))
+            .map(|(_, c)| c.clone())
+    }
+
+    pub fn links(&self) -> Vec<ProviderLink> {
+        self.claude_link
+            .iter()
+            .chain(self.codex_link.iter())
+            .cloned()
+            .collect()
+    }
+
+    /// Problems only, one line each (Settings shows them under Hạn mức).
+    pub fn quota_error(&self) -> Option<String> {
+        let errors: Vec<&str> = [&self.claude_link, &self.codex_link]
+            .into_iter()
+            .flatten()
+            .filter(|l| {
+                matches!(
+                    l.status,
+                    LinkStatus::Error | LinkStatus::Missing | LinkStatus::SignedOut
+                )
+            })
+            .filter_map(|l| l.message.as_deref())
+            .collect();
+        (!errors.is_empty()).then(|| errors.join("\n"))
+    }
+
+    fn link_mut(&mut self, provider: Provider) -> &mut Option<ProviderLink> {
+        match provider {
+            Provider::Claude => &mut self.claude_link,
+            Provider::Codex => &mut self.codex_link,
+        }
+    }
 }
 
 impl std::fmt::Debug for LiveState {
@@ -66,7 +112,32 @@ pub struct LiveSettings {
 pub struct Live {
     state: Arc<Mutex<LiveState>>,
     wake_tasks: Sender<()>,
+    waker: Waker,
     pub settings: LiveSettings,
+}
+
+/// Wakes the quota threads for "Kết nối lại"; cheap to clone into a waiting thread.
+#[derive(Debug, Clone)]
+struct Waker {
+    state: Arc<Mutex<LiveState>>,
+    claude: Sender<()>,
+    codex: Sender<()>,
+}
+
+impl Waker {
+    fn reconnect(&self, provider: Option<Provider>) {
+        for p in [Provider::Claude, Provider::Codex] {
+            if provider.is_some_and(|x| x != p) {
+                continue;
+            }
+            set_link(&self.state, p, LinkStatus::Connecting, None);
+            let wake = match p {
+                Provider::Claude => &self.claude,
+                Provider::Codex => &self.codex,
+            };
+            let _ = wake.send(());
+        }
+    }
 }
 
 fn now() -> String {
@@ -79,6 +150,8 @@ impl Live {
         let state = Arc::new(Mutex::new(LiveState {
             base_url,
             token,
+            claude_link: Some(link(Provider::Claude, LinkStatus::Connecting, None)),
+            codex_link: Some(link(Provider::Codex, LinkStatus::Connecting, None)),
             ..LiveState::default()
         }));
         let (wake_tasks, wake_rx) = mpsc::channel();
@@ -86,17 +159,25 @@ impl Live {
             let (state, s) = (state.clone(), settings.clone());
             move || tasks_loop(&state, &s, &wake_rx)
         });
+        let (wake_codex, codex_rx) = mpsc::channel();
         spawn_named("opw-codex-quota", {
             let (state, every) = (state.clone(), settings.codex_poll);
-            move || codex_loop(&state, every)
+            move || codex_loop(&state, every, &codex_rx)
         });
+        let (wake_claude, claude_rx) = mpsc::channel();
         spawn_named("opw-claude-quota", {
             let (state, s) = (state.clone(), settings.clone());
-            move || claude_loop(&state, &s)
+            move || claude_loop(&state, &s, &claude_rx)
         });
+        let waker = Waker {
+            state: state.clone(),
+            claude: wake_claude,
+            codex: wake_codex,
+        };
         Self {
             state,
             wake_tasks,
+            waker,
             settings,
         }
     }
@@ -131,6 +212,145 @@ impl Live {
     pub fn refresh(&self) {
         let _ = self.wake_tasks.send(());
     }
+
+    /// "Kết nối lại": restart a dead Codex app-server or read it again now; run the Claude
+    /// probe now. `None` means both.
+    pub fn reconnect(&self, provider: Option<Provider>) {
+        self.waker.reconnect(provider);
+    }
+
+    /// Open the CLI's own sign-in (`claude auth login`, `codex login`) in a console window;
+    /// reconnect once that window closes.
+    pub fn open_login(&self, provider: Provider) -> Result<(), String> {
+        let (exe, args) = match provider {
+            Provider::Claude => (cli::find_claude(), "auth login"),
+            Provider::Codex => (cli::find_codex(), "login"),
+        };
+        let exe = exe.ok_or_else(|| missing_message(provider))?;
+        let mut child = login_console(&exe, args).spawn().map_err(|e| e.to_string())?;
+        let waker = self.waker.clone();
+        spawn_named("opw-login-wait", move || {
+            let _ = child.wait();
+            waker.reconnect(Some(provider));
+        });
+        Ok(())
+    }
+}
+
+fn missing_message(provider: Provider) -> String {
+    match provider {
+        Provider::Claude => "Không thấy lệnh claude trên PATH. Cài Claude Code rồi bấm Kết nối lại.",
+        Provider::Codex => "Không thấy lệnh codex trên PATH. Cài Codex CLI rồi bấm Kết nối lại.",
+    }
+    .to_owned()
+}
+
+fn signed_out_message(provider: Provider) -> String {
+    let name = match provider {
+        Provider::Claude => "Claude",
+        Provider::Codex => "Codex",
+    };
+    format!("{name} chưa đăng nhập hoặc phiên đăng nhập đã hết hạn. Bấm Đăng nhập để mở cửa sổ đăng nhập.")
+}
+
+/// Drop the API-key variables, so the CLI uses the subscription like the extensions do.
+fn strip_env(cmd: &mut Command) -> &mut Command {
+    for (k, _) in std::env::vars() {
+        if is_stripped(&k, Account::Subscription) {
+            cmd.env_remove(k);
+        }
+    }
+    cmd
+}
+
+/// A visible console running `<exe> <args>`, kept open with `pause` so the result stays readable.
+#[cfg(windows)]
+fn login_console(exe: &Path, args: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    let mut cmd = Command::new("cmd.exe");
+    // cmd /c strips the outer quotes and runs: "<exe>" <args> & echo. & pause
+    cmd.raw_arg(format!("/c \"\"{}\" {args} & echo. & pause\"", exe.display()))
+        .creation_flags(CREATE_NEW_CONSOLE);
+    strip_env(&mut cmd);
+    cmd
+}
+
+#[cfg(not(windows))]
+fn login_console(exe: &Path, args: &str) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.args(args.split(' '));
+    strip_env(&mut cmd);
+    cmd
+}
+
+/// `Some(false)` when `claude auth status` says nobody is signed in; `None` when unsure.
+fn claude_signed_in(exe: &Path) -> Option<bool> {
+    let out = hidden(
+        Command::new(exe)
+            .args(["auth", "status", "--json"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .output()
+    .ok()?;
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    v.get("loggedIn").and_then(Value::as_bool)
+}
+
+/// `Some(false)` when `codex login status` says nobody is signed in; `None` when unsure.
+fn codex_signed_in(exe: &Path) -> Option<bool> {
+    let out = hidden(Command::new(exe).args(["login", "status"]).stdin(Stdio::null()))
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .to_lowercase();
+    if text.contains("not logged in") {
+        Some(false)
+    } else if out.status.success() && text.contains("logged in") {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn link(provider: Provider, status: LinkStatus, message: Option<String>) -> ProviderLink {
+    ProviderLink {
+        provider,
+        status,
+        message,
+        since: now(),
+    }
+}
+
+/// Keep `since` when nothing changed, so the UI can say how long a problem has lasted.
+fn set_link(state: &Mutex<LiveState>, provider: Provider, status: LinkStatus, message: Option<String>) {
+    update(state, |s| {
+        let slot = s.link_mut(provider);
+        if slot
+            .as_ref()
+            .is_some_and(|l| l.status == status && l.message == message)
+        {
+            return;
+        }
+        *slot = Some(link(provider, status, message));
+    });
+}
+
+/// Wait for a reconnect request or the timeout; `false` when the app is shutting down.
+fn wait_wake(wake: &Receiver<()>, timeout: Duration) -> bool {
+    match wake.recv_timeout(timeout) {
+        Ok(()) => {
+            while wake.try_recv().is_ok() {}
+            true
+        }
+        Err(RecvTimeoutError::Timeout) => true,
+        Err(RecvTimeoutError::Disconnected) => false,
+    }
 }
 
 fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
@@ -155,6 +375,7 @@ fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver
             let tracker = HttpTracker::new(&base_url, &token);
             let user = need_user.then(|| tracker.me().ok()).flatten();
             let result = tracker.inbox();
+            let colors = tracker.status_colors().ok().filter(|c| !c.is_empty());
             update(state, |s| {
                 // the token may have been cleared or replaced while we were fetching
                 if s.token.as_deref() != Some(token.as_str()) {
@@ -162,6 +383,9 @@ fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver
                 }
                 if user.is_some() {
                     s.nx_user = user;
+                }
+                if let Some(colors) = colors {
+                    s.status_colors = colors;
                 }
                 match result {
                     Ok(tasks) => {
@@ -189,12 +413,7 @@ fn hidden(cmd: &mut Command) -> &mut Command {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    for (k, _) in std::env::vars() {
-        if is_stripped(&k, Account::Subscription) {
-            cmd.env_remove(k);
-        }
-    }
-    cmd
+    strip_env(cmd)
 }
 
 /// Lines from a child's stdout, read on their own thread so callers can time out.
@@ -218,17 +437,36 @@ fn line_reader(child: &mut Child) -> Option<Receiver<String>> {
 
 // ---------- codex quota ----------
 
-fn codex_loop(state: &Mutex<LiveState>, every: Duration) {
+fn codex_loop(state: &Mutex<LiveState>, every: Duration, wake: &Receiver<()>) {
     loop {
         match cli::find_codex() {
-            Some(exe) => {
-                if let Err(e) = run_app_server(&exe, state, every) {
-                    update(state, |s| s.quota_error = Some(format!("codex app-server: {e}")));
-                }
-            }
-            None => update(state, |s| s.quota_error = Some("codex not found on PATH".into())),
+            Some(exe) => match run_app_server(&exe, state, every, wake) {
+                Ok(()) => return,
+                Err(_) if codex_signed_in(&exe) == Some(false) => set_link(
+                    state,
+                    Provider::Codex,
+                    LinkStatus::SignedOut,
+                    Some(signed_out_message(Provider::Codex)),
+                ),
+                Err(e) => set_link(
+                    state,
+                    Provider::Codex,
+                    LinkStatus::Error,
+                    Some(format!(
+                        "codex app-server lỗi: {e}. App tự thử lại sau 1 phút, hoặc bấm Kết nối lại."
+                    )),
+                ),
+            },
+            None => set_link(
+                state,
+                Provider::Codex,
+                LinkStatus::Missing,
+                Some(missing_message(Provider::Codex)),
+            ),
         }
-        std::thread::sleep(RESTART_BACKOFF);
+        if !wait_wake(wake, RESTART_BACKOFF) {
+            return;
+        }
     }
 }
 
@@ -263,18 +501,23 @@ fn rpc_wait(rx: &Receiver<String>, id: u64, state: &Mutex<LiveState>) -> Result<
     }
 }
 
-fn store_codex(state: &Mutex<LiveState>, result: &Value) {
-    if let Some(snap) = opw_quota::from_codex_app_server(result, &now()) {
-        update(state, |s| {
-            s.codex = Some(snap);
-            if s.quota_error.as_deref().is_some_and(|e| e.starts_with("codex")) {
-                s.quota_error = None;
-            }
-        });
-    }
+/// `false` when the answer holds no rate limits (e.g. signed out).
+fn store_codex(state: &Mutex<LiveState>, result: &Value) -> bool {
+    let Some(snap) = opw_quota::from_codex_app_server(result, &now()) else {
+        return false;
+    };
+    update(state, |s| s.codex = Some(snap));
+    set_link(state, Provider::Codex, LinkStatus::Ok, None);
+    true
 }
 
-fn run_app_server(exe: &Path, state: &Mutex<LiveState>, every: Duration) -> Result<(), String> {
+/// `Ok(())` only when the app is shutting down; any other end is an error to retry.
+fn run_app_server(
+    exe: &Path,
+    state: &Mutex<LiveState>,
+    every: Duration,
+    wake: &Receiver<()>,
+) -> Result<(), String> {
     let mut child = hidden(
         Command::new(exe)
             .arg("app-server")
@@ -301,12 +544,22 @@ fn run_app_server(exe: &Path, state: &Mutex<LiveState>, every: Duration) -> Resu
             )
             .map_err(|e| e.to_string())?;
             let result = rpc_wait(&rx, id, state)?;
-            store_codex(state, &result);
+            if !store_codex(state, &result) && id == 2 {
+                return Err("không đọc được số hạn mức".to_owned());
+            }
             id += 1;
-            // Keep reading notifications until the next poll.
+            // Keep reading notifications until the next poll or a "Kết nối lại" request.
             let next = Instant::now() + every;
             while let Some(left) = next.checked_duration_since(Instant::now()) {
-                match rx.recv_timeout(left) {
+                match wake.try_recv() {
+                    Ok(()) => {
+                        while wake.try_recv().is_ok() {}
+                        break;
+                    }
+                    Err(TryRecvError::Disconnected) => return Ok(()),
+                    Err(TryRecvError::Empty) => {}
+                }
+                match rx.recv_timeout(left.min(WAKE_CHECK)) {
                     Ok(line) => {
                         if let Ok(v) = serde_json::from_str::<Value>(&line) {
                             if v.get("method").and_then(Value::as_str) == Some("account/rateLimits/updated") {
@@ -327,24 +580,48 @@ fn run_app_server(exe: &Path, state: &Mutex<LiveState>, every: Duration) -> Resu
 
 // ---------- claude quota ----------
 
-fn claude_loop(state: &Mutex<LiveState>, settings: &LiveSettings) {
+fn claude_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver<()>) {
+    let mins = settings.claude_probe.as_secs().div_ceil(60);
     loop {
         match cli::find_claude() {
             Some(exe) => match probe_claude(&exe, settings) {
-                Ok(Some(snap)) => update(state, |s| {
-                    s.claude = Some(snap);
-                    if s.quota_error.as_deref().is_some_and(|e| e.starts_with("claude")) {
-                        s.quota_error = None;
-                    }
-                }),
-                Ok(None) => update(state, |s| {
-                    s.quota_error = Some("claude probe: no rate_limit_event".into())
-                }),
-                Err(e) => update(state, |s| s.quota_error = Some(format!("claude probe: {e}"))),
+                Ok(Some(snap)) => {
+                    update(state, |s| s.claude = Some(snap));
+                    set_link(state, Provider::Claude, LinkStatus::Ok, None);
+                }
+                Ok(_) | Err(_) if claude_signed_in(&exe) == Some(false) => set_link(
+                    state,
+                    Provider::Claude,
+                    LinkStatus::SignedOut,
+                    Some(signed_out_message(Provider::Claude)),
+                ),
+                Ok(None) => set_link(
+                    state,
+                    Provider::Claude,
+                    LinkStatus::Error,
+                    Some(format!(
+                        "Probe Claude chạy xong nhưng không có số hạn mức (rate_limit_event). Kiểm tra claude đã đăng nhập chưa; app thử lại sau {mins} phút."
+                    )),
+                ),
+                Err(e) => set_link(
+                    state,
+                    Provider::Claude,
+                    LinkStatus::Error,
+                    Some(format!(
+                        "Probe Claude lỗi: {e}. App thử lại sau {mins} phút, hoặc bấm Kết nối lại."
+                    )),
+                ),
             },
-            None => update(state, |s| s.quota_error = Some("claude not found on PATH".into())),
+            None => set_link(
+                state,
+                Provider::Claude,
+                LinkStatus::Missing,
+                Some(missing_message(Provider::Claude)),
+            ),
         }
-        std::thread::sleep(settings.claude_probe);
+        if !wait_wake(wake, settings.claude_probe) {
+            return;
+        }
     }
 }
 
@@ -383,4 +660,40 @@ fn probe_claude(exe: &Path, settings: &LiveSettings) -> Result<Option<QuotaSnaps
     }
     let _ = child.wait();
     Ok(latest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_error_lists_only_problems() {
+        let mut s = LiveState::default();
+        assert!(s.links().is_empty() && s.quota_error().is_none());
+        s.claude_link = Some(link(Provider::Claude, LinkStatus::Ok, None));
+        s.codex_link = Some(link(
+            Provider::Codex,
+            LinkStatus::SignedOut,
+            Some(signed_out_message(Provider::Codex)),
+        ));
+        assert_eq!(s.links().len(), 2);
+        let err = s.quota_error().unwrap();
+        assert!(err.starts_with("Codex chưa đăng nhập"), "{err}");
+        // one problem, one line
+        assert!(!err.contains('\n'));
+    }
+
+    #[test]
+    fn set_link_keeps_since_when_unchanged() {
+        let state = Mutex::new(LiveState::default());
+        set_link(&state, Provider::Claude, LinkStatus::Error, Some("x".into()));
+        let first = state.lock().unwrap().claude_link.clone().unwrap();
+        set_link(&state, Provider::Claude, LinkStatus::Error, Some("x".into()));
+        assert_eq!(state.lock().unwrap().claude_link.clone().unwrap(), first);
+        set_link(&state, Provider::Claude, LinkStatus::Ok, None);
+        assert_eq!(
+            state.lock().unwrap().claude_link.as_ref().unwrap().status,
+            LinkStatus::Ok
+        );
+    }
 }
