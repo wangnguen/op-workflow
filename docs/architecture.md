@@ -17,6 +17,7 @@
 |  tracker      : OpenProject API v3                       |
 |  vcs          : git (branches, diff), optional gh        |
 |  context      : brief, redact, handoff                   |
+|  update       : new-version check (GitHub Releases)      |
 |  storage      : SQLite (WAL, user_version)               |
 +----------------------------------------------------------+
      |          |            |             |           |
@@ -35,6 +36,10 @@
 ## Luồng dữ liệu của bản base
 
 UI hỏi `board_snapshot` / `orbit_snapshot` mỗi 1–2 giây → `AppService` → `demo` (chạy máy trạng thái thật của `domain::workflow` theo thời gian). Phase 1 thay `demo` bằng dữ liệu từ OpenProject, git, agent và quota.
+
+## Gọi mạng
+
+Chỉ các đích sau, đều do code trong `core/` gọi: OpenProject (`tracker`, chỉ GET), API của Anthropic/OpenAI qua CLI `claude`/`codex`, remote git của repo khi bạn bấm *Lấy nhánh mới* (`git fetch`, chỉ đọc), và `api.github.com/repos/<repo>/releases` để kiểm tra bản mới (`update`, tắt được bằng `update.check`).
 
 ## Bảo vệ
 

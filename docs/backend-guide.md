@@ -4,10 +4,16 @@
 |---|---|---|
 | Thứ tự bước, cổng duyệt, số vòng review | `core/domain/src/workflow.rs` | Có test cho từng nhánh; thêm test khi đổi luật |
 | Mức lỗi nào chặn / hỏi / chỉ hiện | `core/domain/src/finding.rs` (`GatePolicy`), config `gate` | |
-| Mẫu tên branch | `core/domain/src/task.rs`, config `projects.*.branch` | App không đổi trạng thái OpenProject; bạn tự đổi |
+| Mẫu tên branch | `core/domain/src/task.rs`, config `projects.*.branch` | App không đổi trạng thái OpenProject; bạn tự đổi. `infer_branch_template` đoán mẫu từ nhánh có sẵn |
+| Hộp "Bắt đầu làm việc" (tìm repo, nhánh, tạo branch, brief) | `core/orchestrator/src/start.rs`, `core/vcs/src/discover.rs`, `apps/desktop/ui/src/features/board/StartWorkDialog.tsx` | Test dùng repo git tạm; không push |
+| Mẫu `brief.md` | `core/context/src/brief.rs` | Luôn đi qua `redact` |
+| Kiểm tra bản mới | `core/update/src/lib.rs`, `core/orchestrator/src/updater.rs`, config `update` | Chỉ GET GitHub Releases; không tự tải, không tự cài |
 | Field gửi qua IPC | `core/domain/src/view.rs` **và** `apps/desktop/ui/src/ipc/types.ts` | Sửa cả hai; test `view::tests` khoá JSON |
 | Lệnh IPC mới | `apps/desktop/src-tauri/src/*_api.rs` + đăng ký trong `main.rs` + `Commands` trong `types.ts` | |
 | Nguồn quota mới | `core/quota/src/lib.rs` | Trả về `QuotaSnapshot`; thêm fixture thật đã xoá thông tin cá nhân |
+| Kết nối quota, Kết nối lại, Đăng nhập Claude/Codex | `core/orchestrator/src/live.rs` (`ProviderLink`, `reconnect`, `open_login`) | Đăng nhập chỉ mở lệnh login của CLI trong cửa sổ console; app không đọc hay lưu thông tin đăng nhập |
+| Đọc issue GitHub qua Chrome ("Lấy issue") | `core/browser/src/github.rs` (script đọc trang, `strip_mentions`), `core/browser/src/cdp.rs`, `core/orchestrator/src/issues.rs` | Chỉ mở `github.com/<org>/<repo>/issues/<n>`; không lấy tên người; thử thật bằng test `live_read_issues` (cần bấm Allow) |
+| Thư mục brief (`tasksDir`) | `core/orchestrator/src/folders.rs`, `AppService::set_tasks_dir` | Ghi thử trước khi chuyển; không ghi đè thư mục trùng tên |
 | Cách gọi `claude` / `codex` | `core/agents/src/claude.rs` | Tham số dạng mảng, prompt qua stdin, luôn kèm `DISALLOWED_GIT` cho bước sửa code |
 | Chặn commit/push | `core/vcs/src/guard.rs` | Test `guard_blocks_commit_and_push_but_not_fetch` phải luôn xanh |
 | Nội dung AI được đọc, redact | `core/context/src/lib.rs` | |
