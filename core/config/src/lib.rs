@@ -123,15 +123,42 @@ pub struct RepoConfig {
     pub post_edit: Vec<String>,
 }
 
+/// New-version check against the public GitHub Releases of the app (read-only GET).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpdateConfig {
+    pub check: bool,
+    /// `owner/repo` on GitHub.
+    pub repo: String,
+    /// Count pre-releases as updates (every release so far is a pre-release).
+    pub include_prerelease: bool,
+    pub every_hours: u32,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            check: true,
+            repo: "wangnguen/op-workflow".into(),
+            include_prerelease: true,
+            every_hours: 6,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Config {
     pub tracker: TrackerConfig,
     pub quota: QuotaConfig,
     pub handoff: HandoffConfig,
+    pub update: UpdateConfig,
     pub gate: GatePolicy,
     pub workspaces: Vec<String>,
     pub projects: BTreeMap<String, ProjectConfig>,
     pub repos: BTreeMap<String, RepoConfig>,
+    /// Folder holding `<task id>/brief.md` (`tasksDir`, `~` allowed). `None` = the user has not
+    /// chosen yet: briefs go to `<data dir>/tasks` and the app offers the Desktop once.
+    pub tasks_dir: Option<String>,
     /// Sections that were invalid and replaced by defaults (shown as a warning in the UI).
     pub warnings: Vec<String>,
 }
@@ -144,10 +171,13 @@ impl Config {
             tracker: section(root, "tracker", &mut warnings),
             quota: section(root, "quota", &mut warnings),
             handoff: section(root, "handoff", &mut warnings),
+            update: section(root, "update", &mut warnings),
             gate: section(root, "gate", &mut warnings),
             workspaces: section(root, "workspaces", &mut warnings),
             projects: section(root, "projects", &mut warnings),
             repos: section(root, "repos", &mut warnings),
+            tasks_dir: section::<Option<String>>(root, "tasksDir", &mut warnings)
+                .filter(|d| !d.trim().is_empty()),
             warnings: Vec::new(),
         };
         if cfg.workspaces.is_empty() {
@@ -189,6 +219,101 @@ fn section<T: DeserializeOwned + Default>(root: &Value, key: &str, warnings: &mu
 
 /// Write `tracker.baseUrl` into the config file, keeping every other key as it is.
 pub fn save_tracker_base_url(path: &Path, base_url: &str) -> ConfigResult<()> {
+    edit_file(path, |root| {
+        object_at(root, "tracker").insert("baseUrl".into(), Value::String(base_url.to_owned()));
+    })
+}
+
+/// Write `tasksDir` (where briefs live), keeping every other key as it is.
+pub fn save_tasks_dir(path: &Path, dir: &str) -> ConfigResult<()> {
+    edit_file(path, |root| {
+        root.insert("tasksDir".into(), Value::String(dir.to_owned()));
+    })
+}
+
+/// What "Bắt đầu làm việc" remembers for next time (PLAN.md §0 "app nhớ cho lần sau").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartMemory<'a> {
+    /// OpenProject project name.
+    pub project: &'a str,
+    /// Repo path as written in config (`~/Desktop/acme-web`).
+    pub repo: &'a str,
+    /// Branch template derived from the name the user confirmed, if it contains the task id.
+    pub branch_template: Option<&'a str>,
+    pub base: &'a str,
+}
+
+/// Remember the repo (first in `projects.<project>.repos`), the branch template of the project
+/// and the base of the repo. Other keys stay untouched.
+pub fn remember_start(path: &Path, m: &StartMemory<'_>) -> ConfigResult<()> {
+    edit_file(path, |root| {
+        let project = object_at(object_at(root, "projects"), m.project);
+        let mut repos: Vec<Value> = project
+            .get("repos")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        repos.retain(|r| r.as_str().is_none_or(|s| !same_path(s, m.repo)));
+        repos.insert(0, Value::String(m.repo.to_owned()));
+        project.insert("repos".into(), Value::Array(repos));
+        if let Some(t) = m.branch_template {
+            project.insert("branch".into(), Value::String(t.to_owned()));
+        }
+        let repos = object_at(root, "repos");
+        let key = repos
+            .keys()
+            .find(|k| same_path(k, m.repo))
+            .cloned()
+            .unwrap_or_else(|| m.repo.to_owned());
+        object_at(repos, &key).insert("lastBase".into(), Value::String(m.base.to_owned()));
+    })
+}
+
+/// Same repo path, whatever the `~`, slash direction or (on Windows) letter case.
+pub fn same_path(a: &str, b: &str) -> bool {
+    let norm = |p: &str| {
+        let s = expand_home(p).to_string_lossy().replace('\\', "/");
+        let s = s.trim_end_matches('/').to_owned();
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    };
+    norm(a) == norm(b)
+}
+
+/// `C:\Users\me\Desktop\web` → `~/Desktop/web`; paths outside home keep their form, with `/`.
+pub fn contract_home(path: &Path) -> String {
+    let as_slashes = |p: &Path| p.to_string_lossy().replace('\\', "/");
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            let rest = as_slashes(rest);
+            return if rest.is_empty() {
+                "~".into()
+            } else {
+                format!("~/{rest}")
+            };
+        }
+    }
+    as_slashes(path)
+}
+
+/// The object under `key`, created (or replacing a non-object) when needed.
+fn object_at<'a>(
+    obj: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+) -> &'a mut serde_json::Map<String, Value> {
+    let slot = obj
+        .entry(key.to_owned())
+        .or_insert_with(|| Value::Object(Default::default()));
+    if !slot.is_object() {
+        *slot = Value::Object(Default::default());
+    }
+    match slot {
+        Value::Object(map) => map,
+        _ => unreachable!("slot was just made an object"),
+    }
+}
+
+/// Read-modify-write of the config file; unknown keys survive, a missing file starts empty.
+fn edit_file(path: &Path, f: impl FnOnce(&mut serde_json::Map<String, Value>)) -> ConfigResult<()> {
     let mut root: Value = match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).map_err(|source| ConfigError::Parse {
             path: path.to_owned(),
@@ -205,16 +330,8 @@ pub fn save_tracker_base_url(path: &Path, base_url: &str) -> ConfigResult<()> {
     if !root.is_object() {
         root = Value::Object(Default::default());
     }
-    if let Some(obj) = root.as_object_mut() {
-        let tracker = obj
-            .entry("tracker")
-            .or_insert_with(|| Value::Object(Default::default()));
-        if !tracker.is_object() {
-            *tracker = Value::Object(Default::default());
-        }
-        if let Some(t) = tracker.as_object_mut() {
-            t.insert("baseUrl".into(), Value::String(base_url.to_owned()));
-        }
+    if let Value::Object(obj) = &mut root {
+        f(obj);
     }
     let write_err = |source| ConfigError::Write {
         path: path.to_owned(),
@@ -323,5 +440,68 @@ mod tests {
         assert_eq!(cfg.tracker.base_url, "https://new.example.com");
         assert_eq!(cfg.tracker.task_prefix, "XY");
         assert_eq!(cfg.workspaces, vec!["~/w"]);
+        assert_eq!(cfg.tasks_dir, None);
+
+        save_tasks_dir(&path, "~/Desktop/op-workflow-tasks").unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.tasks_dir.as_deref(), Some("~/Desktop/op-workflow-tasks"));
+        assert_eq!(cfg.tracker.task_prefix, "XY");
+    }
+
+    #[test]
+    fn remembering_a_start_moves_the_repo_first_and_keeps_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"tracker":{"taskPrefix":"XY"},
+                "projects":{"Web Platform":{"repos":["~/code/api","~/code/web"],"branch":"old/{taskId}"}},
+                "repos":{"~/code/web":{"denyPaths":[".env"]}}}"#,
+        )
+        .unwrap();
+        remember_start(
+            &path,
+            &StartMemory {
+                project: "Web Platform",
+                repo: "~\\code\\web\\",
+                branch_template: Some("f/XY-{taskId}"),
+                base: "origin/development",
+            },
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let p = &cfg.projects["Web Platform"];
+        assert_eq!(p.repos, vec!["~\\code\\web\\", "~/code/api"]);
+        assert_eq!(p.branch_template(), "f/XY-{taskId}");
+        // the existing repo key is reused, its other settings kept
+        assert_eq!(cfg.repos.len(), 1);
+        let web = &cfg.repos["~/code/web"];
+        assert_eq!(web.last_base.as_deref(), Some("origin/development"));
+        assert_eq!(web.deny_paths, vec![".env"]);
+        assert_eq!(cfg.tracker.task_prefix, "XY");
+
+        remember_start(
+            &path,
+            &StartMemory {
+                project: "Mobile App",
+                repo: "~/code/app",
+                branch_template: None,
+                base: "main",
+            },
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.projects["Mobile App"].branch, None);
+        assert_eq!(cfg.repos["~/code/app"].last_base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn paths_compare_across_home_and_slashes() {
+        assert!(same_path("~/code/web", "~\\code\\web\\"));
+        let home = dirs::home_dir().unwrap();
+        let abs = home.join("code").join("web");
+        assert!(same_path("~/code/web", &abs.to_string_lossy()));
+        assert_eq!(contract_home(&abs), "~/code/web");
+        assert!(!same_path("~/code/web", "~/code/web2"));
     }
 }

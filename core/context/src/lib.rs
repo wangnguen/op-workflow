@@ -1,6 +1,13 @@
 //! What the AI is allowed to read. Code builds it; nothing here calls an LLM.
 //!
-//! Base version: redaction. Brief and handoff templates come in Phase 1/3.
+//! Redaction and the task brief. Handoff templates come in Phase 3.
+
+pub mod brief;
+
+pub use brief::{
+    BriefComment, BriefInput, BriefIssue, BriefIssueComment, ISSUE_HEADING, render_brief,
+    render_issue_section, replace_issue_section,
+};
 
 use std::sync::LazyLock;
 

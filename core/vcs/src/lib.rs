@@ -6,8 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod discover;
 mod guard;
 
+pub use discover::{discover_repos, origin_url, remote_slug};
 pub use guard::{GuardEnv, guard_env, install_guard_hooks};
 
 #[derive(Debug, thiserror::Error)]
@@ -84,13 +86,21 @@ impl Git {
     }
 
     pub fn run(&self, args: &[&str]) -> VcsResult<String> {
-        let out = Command::new("git")
-            .arg("-C")
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
             .arg(&self.repo)
             .args(args)
-            .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .output()
-            .map_err(VcsError::Spawn)?;
+            // never wait for a username/password on a terminal nobody sees
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        #[cfg(windows)]
+        {
+            // the app has no console; without this every git call flashes a window
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let out = cmd.output().map_err(VcsError::Spawn)?;
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
@@ -119,6 +129,16 @@ impl Git {
         Ok(parse_branches(&out))
     }
 
+    /// Root of the working tree that contains `repo` (fails when it is not a git repo).
+    pub fn toplevel(&self) -> VcsResult<PathBuf> {
+        Ok(PathBuf::from(self.run(&["rev-parse", "--show-toplevel"])?.trim()))
+    }
+
+    pub fn has_local_branch(&self, name: &str) -> bool {
+        self.run(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")])
+            .is_ok()
+    }
+
     pub fn current_branch(&self) -> VcsResult<String> {
         Ok(self.run(&["branch", "--show-current"])?.trim().to_owned())
     }
@@ -138,19 +158,18 @@ impl Git {
 
     /// Create `name` from `base` locally and switch to it; if it already exists, just switch.
     /// `--no-track` keeps `base` from becoming the upstream, so a later push can never land on it.
-    /// Refuses to run on a dirty working tree. Never pushes.
-    pub fn start_branch(&self, name: &str, base: &str) -> VcsResult<()> {
+    /// Refuses to run on a dirty working tree. Never pushes. Returns `true` when it created the
+    /// branch, `false` when it only switched to an existing one.
+    pub fn start_branch(&self, name: &str, base: &str) -> VcsResult<bool> {
         let dirty = self.dirty_entries()?;
         if !dirty.is_empty() {
             return Err(VcsError::Dirty(dirty.len()));
         }
-        let exists = self
-            .run(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")])
-            .is_ok();
-        if exists {
-            self.run(&["switch", name]).map(drop)
+        if self.has_local_branch(name) {
+            self.run(&["switch", name]).map(|_| false)
         } else {
-            self.run(&["switch", "-c", name, "--no-track", base]).map(drop)
+            self.run(&["switch", "-c", name, "--no-track", base])
+                .map(|_| true)
         }
     }
 }
@@ -158,6 +177,60 @@ impl Git {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Repo with one commit on `development`, identity set locally.
+    fn temp_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git_ok(p, &["init", "-q", "-b", "development"]);
+        git_ok(p, &["config", "user.email", "test@example.invalid"]);
+        git_ok(p, &["config", "user.name", "test"]);
+        git_ok(p, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(p.join("a.txt"), "a").unwrap();
+        git_ok(p, &["add", "a.txt"]);
+        git_ok(p, &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn start_branch_creates_then_switches_and_refuses_dirty_trees() {
+        let dir = temp_repo();
+        let git = Git::new(dir.path());
+        assert!(git.start_branch("f/WP-1", "development").unwrap());
+        assert_eq!(git.current_branch().unwrap(), "f/WP-1");
+        git.run(&["switch", "development"]).unwrap();
+        assert!(!git.start_branch("f/WP-1", "development").unwrap());
+        assert_eq!(git.current_branch().unwrap(), "f/WP-1");
+        // no upstream: a later push can never land on the base by accident
+        assert!(
+            git.run(&["rev-parse", "--abbrev-ref", "f/WP-1@{upstream}"])
+                .is_err()
+        );
+
+        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+        assert!(matches!(
+            git.start_branch("f/WP-2", "development"),
+            Err(VcsError::Dirty(1))
+        ));
+        assert!(!git.has_local_branch("f/WP-2"));
+        let names: Vec<_> = git.branches().unwrap().into_iter().map(|b| b.name).collect();
+        assert!(names.contains(&"development".to_owned()));
+        assert!(names.contains(&"f/WP-1".to_owned()));
+    }
 
     #[test]
     fn parses_branch_listing() {

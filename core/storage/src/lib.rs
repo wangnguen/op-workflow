@@ -84,8 +84,30 @@ pub struct TaskRow {
     pub updated_at: String,
 }
 
+const TASK_COLUMNS: &str = "wp_id, display_id, title, project, repo, branch, base, column_name, updated_at";
+
+fn task_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
+    Ok(TaskRow {
+        wp_id: u64::try_from(r.get::<_, i64>(0)?).unwrap_or_default(),
+        display_id: r.get(1)?,
+        title: r.get(2)?,
+        project: r.get(3)?,
+        repo: r.get(4)?,
+        branch: r.get(5)?,
+        base: r.get(6)?,
+        column: r.get(7)?,
+        updated_at: r.get(8)?,
+    })
+}
+
 pub struct Store {
     conn: Connection,
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store").finish_non_exhaustive()
+    }
 }
 
 impl Store {
@@ -155,24 +177,31 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT wp_id, display_id, title, project, repo, branch, base, column_name, updated_at
-                 FROM task WHERE wp_id = ?1",
+                &format!("SELECT {TASK_COLUMNS} FROM task WHERE wp_id = ?1"),
                 [i64::try_from(wp_id).unwrap_or(i64::MAX)],
-                |r| {
-                    Ok(TaskRow {
-                        wp_id: u64::try_from(r.get::<_, i64>(0)?).unwrap_or_default(),
-                        display_id: r.get(1)?,
-                        title: r.get(2)?,
-                        project: r.get(3)?,
-                        repo: r.get(4)?,
-                        branch: r.get(5)?,
-                        base: r.get(6)?,
-                        column: r.get(7)?,
-                        updated_at: r.get(8)?,
-                    })
-                },
+                task_row,
             )
             .optional()?)
+    }
+
+    /// Tasks in the "Đang làm" column, most recently started or resumed first. Several can run
+    /// at once.
+    pub fn active_tasks(&self) -> StorageResult<Vec<TaskRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM task WHERE column_name = 'active'
+             ORDER BY updated_at DESC, wp_id"
+        ))?;
+        let rows = stmt.query_map([], task_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Move a task to another board column. Returns `false` when the task is unknown.
+    pub fn set_column(&self, wp_id: u64, column: &str, at: &str) -> StorageResult<bool> {
+        let n = self.conn.execute(
+            "UPDATE task SET column_name = ?2, updated_at = ?3 WHERE wp_id = ?1",
+            params![i64::try_from(wp_id).unwrap_or(i64::MAX), column, at],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn log_event(
@@ -216,6 +245,27 @@ mod tests {
         store.upsert_task(&row("awaitingPush")).unwrap();
         assert_eq!(store.task(187716).unwrap().unwrap().column, "awaitingPush");
         assert!(store.task(1).unwrap().is_none());
+        assert!(store.active_tasks().unwrap().is_empty());
+        assert!(
+            store
+                .set_column(187716, "active", "2026-11-13T09:00:00Z")
+                .unwrap()
+        );
+        let mut other = row("active");
+        other.wp_id = 187900;
+        other.display_id = "WP-187900".into();
+        other.updated_at = "2026-11-13T09:30:00Z".into();
+        store.upsert_task(&other).unwrap();
+        // several tasks can be in progress; newest first
+        let active = store.active_tasks().unwrap();
+        assert_eq!(
+            active.iter().map(|r| r.wp_id).collect::<Vec<_>>(),
+            [187900, 187716]
+        );
+        assert_eq!(active[1].updated_at, "2026-11-13T09:00:00Z");
+        assert!(store.set_column(187716, "inbox", "2026-11-13T10:00:00Z").unwrap());
+        assert_eq!(store.active_tasks().unwrap().len(), 1);
+        assert!(!store.set_column(1, "active", "2026-11-13T10:00:00Z").unwrap());
         store
             .log_event(
                 "2026-11-13T08:00:00Z",

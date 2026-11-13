@@ -1,134 +1,461 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { vi } from "../../i18n/vi";
-import type { TaskCard } from "../../ipc/types";
-import { MOCK_REPOS, ageLabel } from "./startWorkMock";
+import { errorCode, errorMessage, fetchRepo, getRepoState, getStartOptions, startTask } from "../../ipc/client";
+import type { BranchOption, RepoOption, RepoState, StartOptions, StartResult, TaskCard } from "../../ipc/types";
+import { formatRelative } from "../../shared/format";
+import { Icon } from "../../shared/ui/Icon";
+import { SegmentedControl } from "../../shared/ui/SegmentedControl";
+import { StatusChip } from "../../shared/ui/StatusChip";
+import { branchParts, pickDefaultBase, scopeOf, splitBranches, trackText, type BranchScope } from "./startWork";
 
 interface Props {
   task: TaskCard;
+  /** other tasks in "Đang làm", to warn when they use the same repo */
+  inProgress: TaskCard[];
   onClose: () => void;
+  onStarted: (result: StartResult) => void;
 }
 
 const t = vi.start;
 
-/** One dialog to pick repo, base branch and branch name before a task starts. Mock only. */
-export function StartWorkDialog({ task, onClose }: Props) {
-  const [repoName, setRepoName] = useState(MOCK_REPOS[0]?.name ?? "");
-  const repo = MOCK_REPOS.find((r) => r.name === repoName) ?? MOCK_REPOS[0];
+interface RowProps {
+  b: BranchOption;
+  picked: boolean;
+  current: boolean;
+  lastBase: boolean;
+  onPick: (name: string) => void;
+}
+
+function BranchRow({ b, picked, current, lastBase, onPick }: RowProps) {
+  const { prefix, leaf } = branchParts(b.name);
+  const track = trackText(b.track);
+  return (
+    <li>
+      <button
+        type="button"
+        role="option"
+        aria-selected={picked}
+        className={`branch${picked ? " is-picked" : ""}`}
+        onClick={() => onPick(b.name)}
+      >
+        <span className="branch-radio" />
+        <Icon name={b.remote ? "cloud" : "branch"} size={13} className="branch-icon" />
+        <span className="mono branch-name" title={b.name}>
+          {prefix && <span className="branch-prefix">{prefix}</span>}
+          {leaf}
+        </span>
+        {track && (
+          <span className="branch-track" title={b.track}>
+            {track}
+          </span>
+        )}
+        <span className="branch-tags">
+          {current && <span className="chip chip--accent">{t.current}</span>}
+          {lastBase && <span className="chip chip--shell">{t.lastUsed}</span>}
+        </span>
+        <span className="branch-age">{formatRelative(b.committedAt, Date.now())}</span>
+      </button>
+    </li>
+  );
+}
+
+/** Pick repo, base branch and branch name, then create the branch locally (never pushed). */
+export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props) {
+  const [opts, setOpts] = useState<StartOptions | null>(null);
+  const [optsError, setOptsError] = useState<string | null>(null);
+  const [extraRepos, setExtraRepos] = useState<RepoOption[]>([]);
+  const [repoPath, setRepoPath] = useState("");
+  const [otherPath, setOtherPath] = useState("");
+  const [repo, setRepo] = useState<RepoState | null>(null);
+  const [repoBusy, setRepoBusy] = useState<"load" | "fetch" | null>(null);
+  const [repoError, setRepoError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
-  const [base, setBase] = useState<string>(() => repo?.branches.find((b) => b.lastUsed)?.name ?? "");
-  const [branch, setBranch] = useState(`feature/${task.wpId}`);
+  const [scope, setScope] = useState<BranchScope>("local");
+  const [base, setBase] = useState("");
+  const [branch, setBranch] = useState("");
+  const [branchTouched, setBranchTouched] = useState(false);
+  const [showDirty, setShowDirty] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
   const filterRef = useRef<HTMLInputElement>(null);
+  const request = useRef(0);
+  const baseRef = useRef(base);
+  baseRef.current = base;
 
   useEffect(() => {
-    filterRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !starting) onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, starting]);
 
-  const branches = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    return (repo?.branches ?? []).filter((b) => b.name.toLowerCase().includes(q));
-  }, [repo, filter]);
+  useEffect(() => {
+    let alive = true;
+    getStartOptions(task.wpId)
+      .then((o) => {
+        if (!alive) return;
+        setOpts(o);
+        setBranch(o.branch);
+        setRepoPath(o.repo ?? "");
+      })
+      .catch((e: unknown) => alive && setOptsError(errorMessage(e)));
+    return () => {
+      alive = false;
+    };
+  }, [task.wpId]);
 
-  const exists = repo?.branches.some((b) => b.name === branch || b.name === `origin/${branch}`) ?? false;
-  const dirty = repo?.dirtyFiles ?? 0;
+  /** Apply a fresh repo state; `keepBase` after a fetch or re-check of the same repo. */
+  const applyRepo = useCallback(
+    (state: RepoState, keepBase: boolean) => {
+      setRepo(state);
+      setRepoError(null);
+      const suggested = opts?.branchSource === "default" ? state.suggestedBranch : undefined;
+      const nextBranch = branchTouched ? branch : (suggested ?? opts?.branch ?? branch);
+      if (!branchTouched) setBranch(nextBranch);
+      const prev = baseRef.current;
+      const kept = keepBase && state.branches.some((b) => b.name === prev);
+      if (kept) return;
+      const next = pickDefaultBase(state, nextBranch);
+      setBase(next);
+      // open the tab that holds the pre-selected base
+      const picked = state.branches.find((b) => b.name === next);
+      setScope(picked ? scopeOf(picked) : "local");
+    },
+    [opts, branch, branchTouched],
+  );
 
-  const pickRepo = (name: string) => {
-    setRepoName(name);
-    const next = MOCK_REPOS.find((r) => r.name === name);
-    setBase(next?.branches.find((b) => b.lastUsed)?.name ?? next?.branches[0]?.name ?? "");
+  const loadRepo = useCallback(
+    (path: string, mode: "load" | "fetch", keepBase: boolean) => {
+      const id = ++request.current;
+      setRepoBusy(mode);
+      setStartError(null);
+      if (mode === "load" && !keepBase) setRepo(null);
+      const call = mode === "fetch" ? fetchRepo : getRepoState;
+      call(path, task.wpId)
+        .then((s) => id === request.current && applyRepo(s, keepBase))
+        .catch((e: unknown) => {
+          if (id !== request.current) return;
+          setRepoError(errorMessage(e));
+          if (mode === "load") setRepo(null);
+        })
+        .finally(() => id === request.current && setRepoBusy(null));
+    },
+    [task.wpId, applyRepo],
+  );
+
+  // load branches whenever the picked repo changes (applyRepo is intentionally not a dependency)
+  const loadRef = useRef(loadRepo);
+  loadRef.current = loadRepo;
+  useEffect(() => {
+    if (!opts || !repoPath) {
+      setRepo(null);
+      return;
+    }
+    loadRef.current(repoPath, "load", false);
+    filterRef.current?.focus();
+  }, [opts, repoPath]);
+
+  const repos = useMemo(() => [...(opts?.repos ?? []), ...extraRepos], [opts, extraRepos]);
+  const picked = repos.find((r) => r.path === repoPath);
+  const sharing = picked ? inProgress.filter((c) => c.repo === picked.name) : [];
+
+  const split = useMemo(() => splitBranches(repo?.branches ?? [], filter), [repo, filter]);
+  const shown = split[scope];
+  const otherScope: BranchScope = scope === "local" ? "remote" : "local";
+  const scopeName = (s: BranchScope) => (s === "local" ? t.local : t.remote);
+
+  const name = branch.trim();
+  const localExists = repo?.branches.some((b) => !b.remote && b.name === name) ?? false;
+  const remoteName = `origin/${name}`;
+  const remoteExists = !localExists && (repo?.branches.some((b) => b.remote && b.name === remoteName) ?? false);
+  const dirty = repo?.dirtyCount ?? 0;
+  const canStart = !!repo && dirty === 0 && !!base && name !== "" && !starting && repoBusy === null;
+
+  const pickBase = (b: string) => {
+    setBase(b);
+    const found = repo?.branches.find((x) => x.name === b);
+    if (found) setScope(scopeOf(found));
+  };
+
+  const addOther = () => {
+    const path = otherPath.trim();
+    if (!path) return;
+    setRepoError(null);
+    getRepoState(path, task.wpId)
+      .then((s) => {
+        if (!repos.some((r) => r.path === s.path)) {
+          setExtraRepos((xs) => [...xs, { path: s.path, name: s.name, suggested: false, remembered: false }]);
+        }
+        setOtherPath("");
+        setRepoPath(s.path);
+      })
+      .catch((e: unknown) => setRepoError(errorMessage(e)));
+  };
+
+  const start = () => {
+    if (!repo || !canStart) return;
+    setStarting(true);
+    setStartError(null);
+    startTask({ wpId: task.wpId, repo: repo.path, base, branch: name })
+      .then(onStarted)
+      .catch((e: unknown) => {
+        setStartError(errorMessage(e));
+        if (errorCode(e) === "repo.dirty") loadRepo(repo.path, "load", true);
+      })
+      .finally(() => setStarting(false));
   };
 
   return (
-    <div className="dialog-backdrop" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="start-title">
-        <header className="dialog-head">
-          <h2 id="start-title">{t.title}</h2>
-          <span className="dim">
-            {task.id} · {task.title}
+    <div className="scrim" onPointerDown={(e) => e.target === e.currentTarget && !starting && onClose()}>
+      <div className="sheet start-sheet" role="dialog" aria-modal="true" aria-labelledby="start-title">
+        <header className="sheet-head">
+          <span className="sheet-glyph">
+            <Icon name="branch" size={16} />
           </span>
+          <div className="sheet-titles">
+            <h2 id="start-title">{t.title}</h2>
+            <p title={`${task.id} · ${task.title}`}>
+              <span className="mono">{task.id}</span> · {task.title}
+            </p>
+          </div>
+          <button
+            className="btn btn--ghost btn--icon"
+            disabled={starting}
+            aria-label={t.cancel}
+            title={t.cancel}
+            onClick={onClose}
+          >
+            <Icon name="close" size={15} />
+          </button>
         </header>
 
-        <div className="field">
-          <label htmlFor="sw-repo">{t.repo}</label>
-          <select id="sw-repo" value={repoName} onChange={(e) => pickRepo(e.target.value)}>
-            {MOCK_REPOS.map((r) => (
-              <option key={r.name} value={r.name}>
-                {r.name}
-              </option>
-            ))}
-          </select>
-          <small className="faint">{t.repoSuggested}</small>
-        </div>
+        <div className="sheet-body">
+          {!opts && !optsError && <p className="dim">{t.loading}</p>}
+          {optsError && <p className="dialog-error">{optsError}</p>}
 
-        <div className="field">
-          <label htmlFor="sw-filter">{t.base}</label>
-          <input
-            id="sw-filter"
-            ref={filterRef}
-            placeholder={t.baseFilter}
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          />
-          <ul className="branch-list" role="listbox" aria-label={t.base}>
-            {branches.length === 0 && <li className="faint branch-empty">{t.noBranches}</li>}
-            {branches.map((b) => (
-              <li key={b.name}>
-                <button
-                  role="option"
-                  aria-selected={base === b.name}
-                  className={`branch${base === b.name ? " is-picked" : ""}`}
-                  onClick={() => setBase(b.name)}
-                >
-                  <span className="branch-radio" />
-                  <span className="mono branch-name">{b.name}</span>
-                  <span className="faint">{ageLabel(b.ageMin)}</span>
-                  <span className="branch-tags">
-                    {b.aheadBehind && <span className="chip">{b.aheadBehind}</span>}
-                    {b.lastUsed && <span className="chip chip--shell">{t.lastUsed}</span>}
+          {opts && (
+            <>
+              <section className="field">
+                <label className="label" htmlFor="sw-repo">
+                  {t.repo}
+                </label>
+                {repos.length > 0 && (
+                  <select id="sw-repo" className="input" value={repoPath} onChange={(e) => setRepoPath(e.target.value)}>
+                    {!repoPath && <option value="">{t.repoPick}</option>}
+                    {repos.map((r) => (
+                      <option key={r.path} value={r.path}>
+                        {r.name}
+                        {r.suggested ? " ★" : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {repos.length === 0 && <small className="dim">{t.repoNone(opts.workspaces.join(", "))}</small>}
+                {picked && (
+                  <small className="repo-meta">
+                    <Icon name="folder" size={12} />
+                    <span className="mono" title={picked.path}>
+                      {picked.path}
+                    </span>
+                    {picked.suggested && <span className="chip chip--shell">{t.repoSuggested}</span>}
+                    {!picked.suggested && picked.remembered && <span className="chip">{t.repoRemembered}</span>}
+                  </small>
+                )}
+                {sharing.map((c) => (
+                  <p key={c.id} className="note note--warn">
+                    <Icon name="alert" size={13} />
+                    <span>{t.sharedRepo(c.id, c.branch ?? "?")}</span>
+                  </p>
+                ))}
+                <details className="repo-other" open={repos.length === 0}>
+                  <summary>{t.repoOther}</summary>
+                  <span className="repo-other-row">
+                    <input
+                      className="input mono"
+                      placeholder={t.repoOtherPlaceholder}
+                      value={otherPath}
+                      spellCheck={false}
+                      onChange={(e) => setOtherPath(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && addOther()}
+                    />
+                    <button className="btn" disabled={!otherPath.trim()} onClick={addOther}>
+                      {t.repoAdd}
+                    </button>
                   </span>
-                </button>
-              </li>
-            ))}
-          </ul>
+                </details>
+              </section>
+
+              {repoError && <p className="dialog-error">{repoError}</p>}
+
+              {repoPath && (
+                <section className="field">
+                  <div className="field-head">
+                    <span className="label" id="sw-base-label">
+                      {t.base}
+                    </span>
+                    <SegmentedControl
+                      label={t.scope}
+                      value={scope}
+                      onChange={setScope}
+                      options={[
+                        {
+                          value: "local",
+                          label: t.local,
+                          icon: <Icon name="laptop" size={13} />,
+                          count: repo ? split.local.length : undefined,
+                          title: t.localHint,
+                        },
+                        {
+                          value: "remote",
+                          label: t.remote,
+                          icon: <Icon name="cloud" size={13} />,
+                          count: repo ? split.remote.length : undefined,
+                          title: t.remoteHint,
+                        },
+                      ]}
+                    />
+                    <span className="field-head-spacer" />
+                    <button
+                      className="btn btn--sm btn--ghost"
+                      title={t.fetchHint}
+                      disabled={repoBusy !== null}
+                      onClick={() => loadRepo(repoPath, "fetch", true)}
+                    >
+                      <Icon name="refresh" size={13} className={repoBusy === "fetch" ? "is-spinning" : undefined} />
+                      {repoBusy === "fetch" ? t.fetching : t.fetch}
+                    </button>
+                  </div>
+                  <label className="input search">
+                    <Icon name="search" size={13} />
+                    <input
+                      ref={filterRef}
+                      placeholder={t.baseFilter}
+                      aria-label={t.baseFilter}
+                      value={filter}
+                      spellCheck={false}
+                      onChange={(e) => setFilter(e.target.value)}
+                    />
+                  </label>
+                  <ul className="branch-list" role="listbox" aria-labelledby="sw-base-label">
+                    {!repo && repoBusy && <li className="branch-empty">{t.baseLoading}</li>}
+                    {repo && shown.length === 0 && (
+                      <li className="branch-empty">
+                        <span>{t.noBranches}</span>
+                        {split[otherScope].length > 0 && (
+                          <button className="btn btn--sm" onClick={() => setScope(otherScope)}>
+                            {t.otherScope(split[otherScope].length, scopeName(otherScope))}
+                          </button>
+                        )}
+                      </li>
+                    )}
+                    {shown.map((b) => (
+                      <BranchRow
+                        key={b.name}
+                        b={b}
+                        picked={base === b.name}
+                        current={b.name === repo?.current}
+                        lastBase={b.name === repo?.lastBase}
+                        onPick={pickBase}
+                      />
+                    ))}
+                  </ul>
+                  <small className="picked-base">
+                    {t.picked}{" "}
+                    {base ? <span className="mono">{base}</span> : <span className="faint">{t.pickedNone}</span>}
+                  </small>
+                </section>
+              )}
+
+              <section className="field">
+                <label className="label" htmlFor="sw-branch">
+                  {t.branch}
+                </label>
+                <input
+                  id="sw-branch"
+                  className="input mono"
+                  value={branch}
+                  spellCheck={false}
+                  onChange={(e) => {
+                    setBranch(e.target.value);
+                    setBranchTouched(true);
+                  }}
+                  onKeyDown={(e) => e.key === "Enter" && start()}
+                />
+                {repo && name && (
+                  <small className="faint">
+                    {localExists && t.branchExists}
+                    {remoteExists && (
+                      <>
+                        {t.branchRemote(remoteName)}{" "}
+                        {base !== remoteName && (
+                          <button className="btn btn--sm" onClick={() => pickBase(remoteName)}>
+                            {t.useAsBase}
+                          </button>
+                        )}
+                      </>
+                    )}
+                    {!localExists && !remoteExists && t.branchNew}
+                    {!branchTouched && repo.suggestedBranch === name && opts.branchSource === "default" && (
+                      <> · {t.branchConvention}</>
+                    )}
+                  </small>
+                )}
+              </section>
+
+              <dl className="start-facts">
+                <dt>{t.status}</dt>
+                <dd className="start-status">
+                  <StatusChip name={task.nxStatus} color={task.nxStatusColor} />
+                  <span className="dim">{t.statusNoteShort}</span>
+                </dd>
+                {opts.issueLinks.length > 0 && (
+                  <>
+                    <dt>{t.issues}</dt>
+                    <dd className="dim mono issue-links">{opts.issueLinks.join("  ")}</dd>
+                  </>
+                )}
+              </dl>
+
+              {dirty > 0 && (
+                <div className="dialog-warn dialog-warn--stack">
+                  <span className="dialog-warn-row">
+                    <span>⚠ {t.dirty(dirty)}</span>
+                    <span className="dialog-warn-actions">
+                      <button className="btn btn--sm" onClick={() => setShowDirty((v) => !v)}>
+                        {showDirty ? t.hide : t.view}
+                      </button>
+                      <button
+                        className="btn btn--sm"
+                        disabled={repoBusy !== null}
+                        onClick={() => loadRepo(repoPath, "load", true)}
+                      >
+                        {t.recheck}
+                      </button>
+                    </span>
+                  </span>
+                  {showDirty && (
+                    <pre className="dirty-list mono">
+                      {repo?.dirty.join("\n")}
+                      {repo && repo.dirtyCount > repo.dirty.length && "\n…"}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {startError && <p className="dialog-error">{startError}</p>}
         </div>
 
-        <div className="field">
-          <label htmlFor="sw-branch">{t.branch}</label>
-          <input id="sw-branch" className="mono" value={branch} onChange={(e) => setBranch(e.target.value)} />
-          <small className="faint">{exists ? t.branchExists : t.branchNew}</small>
-        </div>
-
-        <div className="field field--row">
-          <span className="field-label">{t.status}</span>
-          <span className="dim">{t.statusNote(task.nxStatus)}</span>
-        </div>
-
-        {dirty > 0 && (
-          <div className="dialog-warn">
-            <span>⚠ {t.dirty(dirty)}</span>
-            <span className="dialog-warn-actions">
-              <button className="btn btn--sm" disabled title={t.demoNote}>
-                {t.stash}
-              </button>
-              <button className="btn btn--sm" disabled title={t.demoNote}>
-                {t.view}
-              </button>
-            </span>
-          </div>
-        )}
-
-        <footer className="dialog-foot">
-          <small className="faint">{t.demoNote}</small>
+        <footer className="sheet-foot">
+          <small className="faint">{t.footNote}</small>
           <span className="dialog-actions">
-            <button className="btn" onClick={onClose}>
+            <button className="btn" disabled={starting} onClick={onClose}>
               {t.cancel}
             </button>
-            <button className="btn btn--primary" disabled={dirty > 0 || !base || !branch.trim()} onClick={onClose}>
-              {t.confirm}
+            <button className="btn btn--primary" disabled={!canStart} onClick={start}>
+              {starting ? t.starting : t.confirm}
             </button>
           </span>
         </footer>
