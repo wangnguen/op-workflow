@@ -35,7 +35,7 @@ pub fn reveal(file: &Path) -> std::io::Result<()> {
         use std::os::windows::process::CommandExt;
         // explorer wants exactly /select,"<path>"; std's own quoting would wrap the comma too
         Command::new("explorer.exe")
-            .raw_arg(format!("/select,\"{}\"", file.display()))
+            .raw_arg(format!("/select,\"{}\"", explorer_path(file)))
             .spawn()
             .map(drop)
     }
@@ -61,10 +61,32 @@ pub fn open_folder(dir: &Path) -> std::io::Result<()> {
         ));
     }
     #[cfg(windows)]
-    let mut cmd = Command::new("explorer.exe");
+    return Command::new("explorer.exe")
+        .arg(explorer_path(dir))
+        .spawn()
+        .map(drop);
     #[cfg(target_os = "macos")]
-    let mut cmd = Command::new("open");
+    return Command::new("open").arg(dir).spawn().map(drop);
     #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = Command::new("xdg-open");
-    cmd.arg(dir).spawn().map(drop)
+    return Command::new("xdg-open").arg(dir).spawn().map(drop);
+}
+
+/// Explorer misreads a path with `/` in it (it opens Documents instead), so always hand it `\`.
+#[cfg(windows)]
+fn explorer_path(path: &Path) -> String {
+    path.to_string_lossy().replace('/', "\\")
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_gets_backslashes_only() {
+        let mixed = Path::new("C:\\Users\\me\\Desktop/op-workflow-tasks\\WP-1\\brief.md");
+        assert_eq!(
+            explorer_path(mixed),
+            "C:\\Users\\me\\Desktop\\op-workflow-tasks\\WP-1\\brief.md"
+        );
+    }
 }

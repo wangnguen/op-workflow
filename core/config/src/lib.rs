@@ -365,14 +365,27 @@ pub fn config_path() -> ConfigResult<PathBuf> {
     }
 }
 
-/// Expand a leading `~` the way config files write repo paths.
+/// Expand a leading `~` the way config files write repo paths, with the platform's own
+/// separators: config files use `/`, and on Windows a mixed path such as
+/// `C:\Users\me\Desktop/op-workflow-tasks\WP-1` works for file I/O but not for Explorer
+/// (`/select,` then opens Documents instead).
 pub fn expand_home(path: &str) -> PathBuf {
-    match (
-        path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")),
-        dirs::home_dir(),
-    ) {
-        (Some(rest), Some(home)) => home.join(rest),
-        _ => PathBuf::from(path),
+    let native = |p: &str| {
+        if cfg!(windows) {
+            p.replace('/', "\\")
+        } else {
+            p.to_owned()
+        }
+    };
+    let home = dirs::home_dir();
+    if path == "~" {
+        if let Some(home) = home {
+            return home;
+        }
+    }
+    match (path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")), home) {
+        (Some(rest), Some(home)) => home.join(native(rest)),
+        _ => PathBuf::from(native(path)),
     }
 }
 
@@ -503,5 +516,19 @@ mod tests {
         assert!(same_path("~/code/web", &abs.to_string_lossy()));
         assert_eq!(contract_home(&abs), "~/code/web");
         assert!(!same_path("~/code/web", "~/code/web2"));
+    }
+
+    /// Explorer's `/select,` needs one kind of separator (the "Xem brief" bug, 2026-11-14).
+    #[test]
+    fn expanded_paths_use_native_separators() {
+        let home = dirs::home_dir().unwrap();
+        let tasks = expand_home("~/Desktop/op-workflow-tasks");
+        assert_eq!(tasks, home.join("Desktop").join("op-workflow-tasks"));
+        assert_eq!(expand_home("~"), home);
+        if cfg!(windows) {
+            let brief = tasks.join("WP-1").join("brief.md");
+            assert!(!brief.to_string_lossy().contains('/'), "{}", brief.display());
+            assert_eq!(expand_home("C:/code/web"), PathBuf::from("C:\\code\\web"));
+        }
     }
 }
