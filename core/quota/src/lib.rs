@@ -106,6 +106,11 @@ pub fn effective_used_pct(w: &QuotaWindow, now: OffsetDateTime) -> f64 {
     if expired { 0.0 } else { w.used_pct }
 }
 
+/// Percent left right now (0..100), with a passed reset counting as full.
+pub fn remaining_pct_now(w: &QuotaWindow) -> f64 {
+    (100.0 - effective_used_pct(w, OffsetDateTime::now_utc())).clamp(0.0, 100.0)
+}
+
 pub fn unix_to_rfc3339(secs: f64) -> Option<String> {
     #[allow(clippy::cast_possible_truncation)]
     let dt = OffsetDateTime::from_unix_timestamp(secs as i64).ok()?;

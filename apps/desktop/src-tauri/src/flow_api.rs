@@ -2,7 +2,7 @@
 //! Names and payloads must match `apps/desktop/ui/src/ipc/types.ts` (`Commands`).
 //! A step runs on its own thread in the core; these commands only start, stop or read it.
 
-use opw_domain::view::{ApiError, FindingDecision, FlowAction, TaskDetail};
+use opw_domain::view::{ApiError, CommentsView, DiffView, FindingDecision, FlowAction, TaskDetail};
 use opw_orchestrator::AppService;
 use tauri::State;
 
@@ -35,6 +35,29 @@ pub fn decide_finding(
 #[tauri::command(async)]
 pub fn save_brief(wp_id: u64, text: String, service: State<'_, AppService>) -> Result<TaskDetail, ApiError> {
     service.save_brief(wp_id, &text)
+}
+
+/// The Comment tab: OpenProject comments (network) and the last issue read. `mark_seen` when the
+/// tab is open, so the "mới" marks and badges clear.
+#[tauri::command(async)]
+pub fn task_comments(
+    wp_id: u64,
+    mark_seen: bool,
+    service: State<'_, AppService>,
+) -> Result<CommentsView, ApiError> {
+    service.task_comments(wp_id, mark_seen)
+}
+
+/// Rewrite the brief's OpenProject comment section with the comments there now.
+#[tauri::command(async)]
+pub fn refresh_brief_comments(wp_id: u64, service: State<'_, AppService>) -> Result<CommentsView, ApiError> {
+    service.refresh_brief_comments(wp_id)
+}
+
+/// The Diff tab (git, read-only).
+#[tauri::command(async)]
+pub fn task_diff(wp_id: u64, mark_seen: bool, service: State<'_, AppService>) -> Result<DiffView, ApiError> {
+    service.task_diff(wp_id, mark_seen)
 }
 
 /// Show the task folder in Explorer.

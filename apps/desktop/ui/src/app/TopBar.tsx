@@ -1,6 +1,8 @@
 import { vi } from "../i18n/vi";
 import type { ProviderLink, QuotaSnapshot, UpdateView } from "../ipc/types";
 import { QuotaGauges } from "../features/quota/QuotaGauges";
+import { OPEN_QUOTA_EVENT } from "../features/quota/quota";
+import { AlertBell } from "./AlertBell";
 
 export type Tab = "task" | "workspace" | "sessions";
 
@@ -12,6 +14,9 @@ interface Props {
   now: number;
   demo: boolean;
   needsYou: boolean;
+  /** unread alerts in the bell */
+  unreadAlerts: number;
+  onOpenTask: (wpId: number, tab: string | undefined) => void;
   update: UpdateView | undefined;
   onRefresh: () => void;
   onSettings: () => void;
@@ -46,6 +51,8 @@ export function TopBar({
   now,
   demo,
   needsYou,
+  unreadAlerts,
+  onOpenTask,
   update,
   onRefresh,
   onSettings,
@@ -99,12 +106,14 @@ export function TopBar({
       <span className="kbd-hint" title={vi.topbar.searchHint}>
         <kbd>{vi.topbar.search}</kbd>
       </span>
-      <button className="btn btn--icon btn--ghost" aria-label={vi.topbar.notifications} title={vi.topbar.notifications}>
-        <svg viewBox="0 0 24 24" width={16} height={16} aria-hidden="true">
-          <path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0" className="icon-stroke" />
-        </svg>
-        {needsYou && <span className="bell-dot" />}
-      </button>
+      <AlertBell
+        unread={unreadAlerts}
+        needsYou={needsYou}
+        now={now}
+        onOpenTask={onOpenTask}
+        onOpenQuota={() => window.dispatchEvent(new Event(OPEN_QUOTA_EVENT))}
+        onChanged={onRefresh}
+      />
       <button
         className="btn btn--icon btn--ghost"
         aria-label={vi.topbar.settings}

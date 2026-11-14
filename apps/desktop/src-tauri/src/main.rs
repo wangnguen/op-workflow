@@ -5,10 +5,12 @@
 // Tauri manifest still ends up in the exe; the message is noise, so silence it for GNU only.
 #![cfg_attr(all(windows, target_env = "gnu"), allow(linker_messages))]
 
+mod alerts_api;
 mod app_api;
 mod flow_api;
 mod settings_api;
 mod start_api;
+mod tray;
 
 fn main() {
     // PTY spike from inside the app binary (PLAN.md §12): `op-workflow-desktop --pty-selftest`.
@@ -30,7 +32,16 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(opw_orchestrator::AppService::start())
+        .setup(|app| {
+            // no tray (e.g. a shell without one) must not keep the app from opening
+            if let Err(e) = tray::install(app) {
+                eprintln!("tray icon unavailable: {e}");
+            }
+            tray::spawn_watcher(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_api::app_info,
             app_api::board_snapshot,
@@ -61,6 +72,12 @@ fn main() {
             flow_api::decide_finding,
             flow_api::save_brief,
             flow_api::open_task_folder,
+            flow_api::task_comments,
+            flow_api::refresh_brief_comments,
+            flow_api::task_diff,
+            alerts_api::alerts,
+            alerts_api::mark_alerts_read,
+            alerts_api::set_notify,
         ])
         .run(tauri::generate_context!())
         .expect("error while running op-workflow");

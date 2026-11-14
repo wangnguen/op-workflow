@@ -25,7 +25,7 @@ use opw_config::{Config, RepoConfig, StepConfig};
 use opw_context::prompts::{self, FixItem};
 use opw_domain::finding::{GateAction, GatePolicy, Severity, fingerprint};
 use opw_domain::view::{
-    AgentKind, AgentView, ApiError, Decision, FindingDecision, FindingView, FlowAction, FlowError,
+    AgentKind, AgentView, AlertKind, ApiError, Decision, FindingDecision, FindingView, FlowAction, FlowError,
     FlowStatus, GateKind, GateView, LogLine, Provider, PushBlock, PushView, QuotaSnapshot, RunView,
     SessionStatus, StepRef, StepView, TaskColumn, TaskDetail, ToolEvent,
 };
@@ -501,6 +501,20 @@ fn git_surprise(step: StepKind, before: &GitSnap, after: &GitSnap) -> Option<Str
 /// Where Claude's `rate_limit_event`s go (the quota gauges).
 type QuotaSink = Arc<dyn Fn(QuotaSnapshot) + Send + Sync>;
 
+/// A step ended and the flow stopped: what to tell the user (bell + Windows notification).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowAlert {
+    pub wp_id: u64,
+    pub task_id: String,
+    pub kind: AlertKind,
+    pub title: String,
+    pub body: String,
+    /// Task window tab that shows it.
+    pub tab: &'static str,
+}
+
+type AlertSink = Arc<dyn Fn(FlowAlert) + Send + Sync>;
+
 struct Inner {
     tasks: Mutex<HashMap<u64, Entry>>,
     store: Arc<Mutex<Store>>,
@@ -508,6 +522,7 @@ struct Inner {
     /// `<data dir>/runs`: raw output of each run, for debugging.
     runs_dir: Option<PathBuf>,
     quota_sink: Mutex<Option<QuotaSink>>,
+    alert_sink: Mutex<Option<AlertSink>>,
 }
 
 /// The workflow engine shared by the Tauri commands.
@@ -617,7 +632,15 @@ impl Flow {
                 launcher,
                 runs_dir,
                 quota_sink: Mutex::new(None),
+                alert_sink: Mutex::new(None),
             }),
+        }
+    }
+
+    /// Where "a step ended and the task waits" goes (the bell and Windows notifications).
+    pub fn set_alert_sink(&self, sink: impl Fn(FlowAlert) + Send + Sync + 'static) {
+        if let Ok(mut s) = self.inner.alert_sink.lock() {
+            *s = Some(Arc::new(sink));
         }
     }
 
@@ -879,6 +902,8 @@ impl Flow {
             push,
             log: entry.log.iter().cloned().collect(),
             cost_usd: runs.iter().filter_map(|r| r.cost_usd).sum(),
+            // the facade fills this from OpenProject and the last issue read
+            new_comments: 0,
         }
     }
 
@@ -1091,6 +1116,74 @@ fn push_log(entry: &mut Entry, step: Option<StepKind>, kind: &str, text: &str) {
     while entry.log.len() > LOG_LINES {
         entry.log.pop_front();
     }
+}
+
+/// What to announce when the flow stops after `step`. Nothing when the user pressed Dừng.
+fn stop_alert(ctx: &TaskCtx, step: StepKind, entry: &Entry, text: &str) -> Option<FlowAlert> {
+    if entry
+        .saved
+        .error
+        .as_ref()
+        .is_some_and(|e| e.code == "step.stopped")
+    {
+        return None;
+    }
+    let task_id = ctx.row.display_id.clone();
+    let title_of = |what: &str| format!("{task_id} · {what}");
+    let (kind, title, body, tab) = match entry.saved.workflow.phase() {
+        Phase::Gate(GateKind::Error) => (
+            AlertKind::Error,
+            title_of(&format!("{} lỗi", step_label(step))),
+            entry
+                .saved
+                .error
+                .as_ref()
+                .map_or_else(|| text.to_owned(), |e| e.message.clone()),
+            "log",
+        ),
+        Phase::Gate(GateKind::PlanReview) => (
+            AlertKind::Gate,
+            title_of("plan chờ bạn duyệt"),
+            ctx.row.title.clone(),
+            "plan",
+        ),
+        Phase::Gate(GateKind::MediumTriage) => (
+            AlertKind::Gate,
+            title_of("lỗi medium chờ bạn quyết"),
+            ctx.row.title.clone(),
+            "findings",
+        ),
+        Phase::Gate(_) => (
+            AlertKind::Gate,
+            title_of("chờ bạn"),
+            ctx.row.title.clone(),
+            "brief",
+        ),
+        Phase::AwaitingPush => (
+            AlertKind::Gate,
+            title_of("sẵn sàng push"),
+            "Commit message và PR description đã có: copy rồi tự push.".to_owned(),
+            "push",
+        ),
+        Phase::Running(_) | Phase::Paused => {
+            let next = entry.saved.workflow.current_step()?;
+            (
+                AlertKind::StepDone,
+                title_of(&format!("{} xong", step_label(step))),
+                format!("Bước tiếp: {}. Bấm Chạy khi bạn sẵn sàng.", step_label(next)),
+                "log",
+            )
+        }
+        _ => return None,
+    };
+    Some(FlowAlert {
+        wp_id: ctx.row.wp_id,
+        task_id,
+        kind,
+        title,
+        body,
+        tab,
+    })
 }
 
 fn status_of(entry: &Entry) -> FlowStatus {
@@ -1424,7 +1517,14 @@ impl Inner {
         let go_on = kind == "ok"
             && ctx.auto(&entry.saved)
             && matches!(entry.saved.workflow.phase(), Phase::Running(_));
+        let alert = (!go_on).then(|| stop_alert(ctx, step, entry, &text)).flatten();
         drop(tasks);
+        if let Some(alert) = alert {
+            let sink = self.alert_sink.lock().ok().and_then(|s| s.clone());
+            if let Some(sink) = sink {
+                sink(alert);
+            }
+        }
         if let Ok(store) = self.store.lock() {
             let _ = store.log_event(&now(), Some(wp_id), &format!("flow.{kind}"), Some(&text));
         }

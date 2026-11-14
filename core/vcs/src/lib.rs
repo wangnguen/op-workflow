@@ -8,9 +8,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod diff;
 mod discover;
 mod guard;
 
+pub use diff::{DiffHunk, DiffLine, FileChange, FileDiff, LineKind};
 pub use discover::{discover_repos, origin_url, remote_slug};
 pub use guard::{GuardEnv, guard_env, install_guard_hooks};
 
@@ -225,6 +227,67 @@ impl Git {
             .map(drop)
     }
 
+    /// Where `tip` left `base` (`git merge-base`), as a full hash.
+    pub fn merge_base(&self, base: &str, tip: &str) -> VcsResult<String> {
+        Ok(self.run(&["merge-base", base, tip])?.trim().to_owned())
+    }
+
+    /// The task's change for the Diff tab, read-only: from the fork point of `base` to the
+    /// working tree (`tip = None`: committed, uncommitted and untracked files) or to a branch
+    /// (`Some`, committed only). User settings that would change the output (external diff
+    /// tools, no prefixes, relative paths) are overridden, and no index refresh is written.
+    pub fn task_diff(&self, base: &str, tip: Option<&str>) -> VcsResult<TaskDiff> {
+        let fork_point = self.merge_base(base, tip.unwrap_or("HEAD"))?;
+        let mut args = vec![
+            "--no-optional-locks",
+            "-c",
+            "core.quotepath=false",
+            "-c",
+            "diff.autoRefreshIndex=false",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-relative",
+            "--find-renames",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "-U3",
+            fork_point.as_str(),
+        ];
+        if let Some(tip) = tip {
+            args.push(tip);
+        }
+        args.push("--");
+        let mut files = diff::parse_unified(&self.run(&args)?);
+        if tip.is_none() {
+            let listed = self.run(&[
+                "--no-optional-locks",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ])?;
+            let mut names: Vec<&str> = listed.split('\0').filter(|n| !n.is_empty()).collect();
+            let cut = names.len().saturating_sub(MAX_UNTRACKED);
+            names.truncate(MAX_UNTRACKED);
+            for name in names {
+                let text = read_text(&self.repo.join(name));
+                files.push(diff::untracked_file(name, text.as_deref()));
+            }
+            if cut > 0 {
+                files.push(diff::untracked_file(&format!("(+{cut} file mới khác)"), None));
+            }
+        }
+        let truncated = cap_lines(&mut files);
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(TaskDiff {
+            fork_point,
+            files,
+            truncated,
+        })
+    }
+
     /// Create `name` from `base` locally and switch to it; if it already exists, just switch.
     /// `--no-track` keeps `base` from becoming the upstream, so a later push can never land on it.
     /// Refuses to run on a dirty working tree. Never pushes. Returns `true` when it created the
@@ -241,6 +304,54 @@ impl Git {
                 .map(|_| true)
         }
     }
+}
+
+/// Untracked files listed in one diff; more are summed up in one line.
+const MAX_UNTRACKED: usize = 200;
+/// Untracked files bigger than this show as "binary or too big".
+const MAX_UNTRACKED_BYTES: u64 = 256 * 1024;
+/// Lines over all files; files after that keep their counts but not their lines.
+pub const MAX_DIFF_LINES: usize = 30_000;
+
+/// What [`Git::task_diff`] returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDiff {
+    pub fork_point: String,
+    /// By path.
+    pub files: Vec<FileDiff>,
+    /// Some files lost their lines to [`MAX_DIFF_LINES`].
+    pub truncated: bool,
+}
+
+/// Text of a small untracked file; `None` when it is big or binary (a NUL byte).
+fn read_text(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_UNTRACKED_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.iter().take(8000).any(|&b| b == 0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Drop lines past [`MAX_DIFF_LINES`] (in path order); `true` when anything was dropped.
+fn cap_lines(files: &mut [FileDiff]) -> bool {
+    let mut used = 0usize;
+    let mut cut = false;
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    for f in files.iter_mut() {
+        let n: usize = f.hunks.iter().map(|h| h.lines.len()).sum();
+        if used + n > MAX_DIFF_LINES {
+            f.hunks.clear();
+            f.truncated = true;
+            cut = true;
+        } else {
+            used += n;
+        }
+    }
+    cut
 }
 
 #[cfg(test)]
@@ -273,6 +384,40 @@ mod tests {
         git_ok(p, &["add", "a.txt"]);
         git_ok(p, &["commit", "-q", "-m", "init"]);
         dir
+    }
+
+    #[test]
+    fn task_diff_covers_commits_uncommitted_and_untracked_files() {
+        let dir = temp_repo();
+        let p = dir.path();
+        let git = Git::new(p);
+        git.start_branch("f/WP-1", "development").unwrap();
+        std::fs::write(p.join("a.txt"), "a\nb\n").unwrap();
+        git_ok(p, &["commit", "-qam", "change a"]);
+        std::fs::write(p.join("a.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(p.join("new.txt"), "hello\n").unwrap();
+        std::fs::write(p.join("blob.bin"), [0u8, 1, 2]).unwrap();
+        let status_before = git.dirty_entries().unwrap();
+
+        let d = git.task_diff("development", None).unwrap();
+        let names: Vec<_> = d.files.iter().map(|f| (f.path.as_str(), f.untracked)).collect();
+        assert_eq!(
+            names,
+            vec![("a.txt", false), ("blob.bin", true), ("new.txt", true)]
+        );
+        let a = &d.files[0];
+        assert_eq!((a.added, a.removed), (3, 1));
+        assert!(d.files[1].binary);
+        assert_eq!(d.fork_point, git.merge_base("development", "HEAD").unwrap());
+        // reading the diff changes nothing
+        assert_eq!(git.dirty_entries().unwrap(), status_before);
+
+        // another branch checked out: the task's commits only
+        git_ok(p, &["stash", "-u", "-q"]);
+        git_ok(p, &["switch", "-q", "development"]);
+        let d = git.task_diff("development", Some("f/WP-1")).unwrap();
+        assert_eq!(d.files.len(), 1);
+        assert_eq!((d.files[0].added, d.files[0].removed), (2, 1));
     }
 
     #[test]

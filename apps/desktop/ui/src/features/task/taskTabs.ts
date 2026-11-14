@@ -1,7 +1,13 @@
 // Pure helpers of the task window (no React), so they are easy to test.
 import type { FindingView, GateKind, Severity, TaskDetail } from "../../ipc/types";
 
-export type TaskTab = "brief" | "plan" | "findings" | "push" | "log";
+export type TaskTab = "brief" | "comments" | "plan" | "findings" | "diff" | "push" | "log";
+
+const TABS: readonly TaskTab[] = ["brief", "comments", "plan", "findings", "diff", "push", "log"];
+
+/** A tab name from outside (an alert, the map), or `undefined` when it is not a tab. */
+export const asTab = (s: string | undefined): TaskTab | undefined =>
+  TABS.find((tab) => tab === s);
 
 /** The tab that shows what the task needs right now. */
 export function defaultTab(d: TaskDetail): TaskTab {

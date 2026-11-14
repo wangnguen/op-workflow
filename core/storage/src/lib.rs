@@ -77,6 +77,16 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE finding ADD COLUMN chosen INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE finding ADD COLUMN seen_at TEXT;
      CREATE INDEX step_run_started ON step_run(started_at);",
+    // 3: small per-task values: what the user has seen (comments, diff files), what the app has
+    // already announced, the last issue read. Inbox tasks have no `task` row, so no foreign key.
+    "CREATE TABLE task_kv (
+        wp_id       INTEGER NOT NULL,
+        kind        TEXT NOT NULL,
+        key         TEXT NOT NULL DEFAULT '',
+        value       TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        PRIMARY KEY (wp_id, kind, key)
+     );",
 ];
 
 /// Schema version this build understands.
@@ -383,6 +393,76 @@ impl Store {
         Ok(())
     }
 
+    // ---------- per-task values ----------
+
+    /// One value of `kind` (`key` = `""` for single values).
+    pub fn kv_get(&self, wp_id: u64, kind: &str, key: &str) -> StorageResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM task_kv WHERE wp_id = ?1 AND kind = ?2 AND key = ?3",
+                params![id_param(wp_id), kind, key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every `(key, value)` of `kind` for one task, by key.
+    pub fn kv_all(&self, wp_id: u64, kind: &str) -> StorageResult<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM task_kv WHERE wp_id = ?1 AND kind = ?2 ORDER BY key")?;
+        let rows = stmt.query_map(params![id_param(wp_id), kind], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every `(wp_id, key, value)` of `kind`, all tasks (badges for the whole board at once).
+    pub fn kv_kind(&self, kind: &str) -> StorageResult<Vec<(u64, String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT wp_id, key, value FROM task_kv WHERE kind = ?1")?;
+        let rows = stmt.query_map([kind], |r| {
+            Ok((
+                u64::try_from(r.get::<_, i64>(0)?).unwrap_or_default(),
+                r.get(1)?,
+                r.get(2)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn kv_set(&self, wp_id: u64, kind: &str, key: &str, value: &str, at: &str) -> StorageResult<()> {
+        self.conn.execute(
+            "INSERT INTO task_kv (wp_id, kind, key, value, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(wp_id, kind, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![id_param(wp_id), kind, key, value, at],
+        )?;
+        Ok(())
+    }
+
+    /// Replace every value of `kind` for one task with `entries`.
+    pub fn kv_replace(
+        &self,
+        wp_id: u64,
+        kind: &str,
+        entries: &[(String, String)],
+        at: &str,
+    ) -> StorageResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM task_kv WHERE wp_id = ?1 AND kind = ?2",
+            params![id_param(wp_id), kind],
+        )?;
+        for (key, value) in entries {
+            tx.execute(
+                "INSERT INTO task_kv (wp_id, kind, key, value, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id_param(wp_id), kind, key, value, at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// A step run starts; returns its id for [`Store::end_step_run`].
     pub fn begin_step_run(
         &self,
@@ -529,6 +609,39 @@ mod tests {
             column: column.into(),
             updated_at: "2026-11-13T08:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn per_task_values_set_replace_and_list() {
+        let store = Store::open_in_memory().unwrap();
+        let at = "2026-11-14T08:00:00Z";
+        assert!(store.kv_get(1, "comments.seen", "").unwrap().is_none());
+        // inbox tasks have no task row
+        store.kv_set(1, "comments.seen", "", "41", at).unwrap();
+        store.kv_set(1, "comments.seen", "", "42", at).unwrap();
+        assert_eq!(
+            store.kv_get(1, "comments.seen", "").unwrap().as_deref(),
+            Some("42")
+        );
+        store
+            .kv_replace(
+                2,
+                "diff.seen",
+                &[("b.ts".into(), "h2".into()), ("a.ts".into(), "h1".into())],
+                at,
+            )
+            .unwrap();
+        store
+            .kv_replace(2, "diff.seen", &[("a.ts".into(), "h3".into())], at)
+            .unwrap();
+        assert_eq!(
+            store.kv_all(2, "diff.seen").unwrap(),
+            vec![("a.ts".into(), "h3".into())]
+        );
+        assert_eq!(
+            store.kv_kind("comments.seen").unwrap(),
+            vec![(1, String::new(), "42".to_owned())]
+        );
     }
 
     #[test]

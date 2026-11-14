@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use opw_domain::finding::GatePolicy;
 use opw_domain::task::DEFAULT_BRANCH_TEMPLATE;
+use opw_domain::view::{NotifyKind, NotifySettings};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -184,6 +185,8 @@ pub struct Config {
     pub update: UpdateConfig,
     pub gate: GatePolicy,
     pub steps: StepsConfig,
+    /// Windows notifications by kind (`notify`); all on by default.
+    pub notify: NotifySettings,
     pub workspaces: Vec<String>,
     pub projects: BTreeMap<String, ProjectConfig>,
     pub repos: BTreeMap<String, RepoConfig>,
@@ -205,6 +208,7 @@ impl Config {
             update: section(root, "update", &mut warnings),
             gate: section(root, "gate", &mut warnings),
             steps: section(root, "steps", &mut warnings),
+            notify: section(root, "notify", &mut warnings),
             workspaces: section(root, "workspaces", &mut warnings),
             projects: section(root, "projects", &mut warnings),
             repos: section(root, "repos", &mut warnings),
@@ -253,6 +257,18 @@ fn section<T: DeserializeOwned + Default>(root: &Value, key: &str, warnings: &mu
 pub fn save_tracker_base_url(path: &Path, base_url: &str) -> ConfigResult<()> {
     edit_file(path, |root| {
         object_at(root, "tracker").insert("baseUrl".into(), Value::String(base_url.to_owned()));
+    })
+}
+
+/// Turn one kind of Windows notification on or off (`notify.<kind>`), keeping every other key.
+pub fn save_notify(path: &Path, kind: NotifyKind, on: bool) -> ConfigResult<()> {
+    let key = match kind {
+        NotifyKind::Comments => "comments",
+        NotifyKind::Steps => "steps",
+        NotifyKind::Quota => "quota",
+    };
+    edit_file(path, |root| {
+        object_at(root, "notify").insert(key.into(), Value::Bool(on));
     })
 }
 

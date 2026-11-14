@@ -58,6 +58,14 @@ export function formatCountdown(iso: string | undefined, now: number, passedText
   return ms <= 0 ? passedText : `còn ${formatDuration(ms)}`;
 }
 
+/** "14/11 09:32" in local time. */
+export function formatDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${two(d.getDate())}/${two(d.getMonth() + 1)} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
 export function formatClock(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";

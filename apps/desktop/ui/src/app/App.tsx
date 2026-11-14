@@ -4,6 +4,8 @@ import { TaskBoard } from "../features/board/TaskBoard";
 import { SessionsView } from "../features/sessions/SessionsView";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
 import { WorkspacePlaceholder } from "../features/workspace/WorkspacePlaceholder";
+import { TaskWindow } from "../features/task/TaskWindow";
+import { asTab, type TaskTab } from "../features/task/taskTabs";
 import { useNow, usePolling } from "../shared/hooks";
 import { BottomBar } from "./BottomBar";
 import { TopBar, type Tab } from "./TopBar";
@@ -16,6 +18,8 @@ const UPDATE_POLL_MS = 60_000;
 export function App() {
   const [tab, setTab] = useState<Tab>("task");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // a task opened from the bell
+  const [opened, setOpened] = useState<{ wpId: number; tab?: TaskTab }>();
   const board = usePolling(getBoard, POLL_MS);
   const orbit = usePolling(getOrbit, POLL_MS);
   const info = usePolling(getAppInfo, INFO_POLL_MS);
@@ -39,6 +43,13 @@ export function App() {
         now={now}
         demo={isMockMode() || board.data?.mode === "demo"}
         needsYou={[orbit.data?.active, ...(orbit.data?.others ?? [])].some((s) => s?.gate !== undefined)}
+        unreadAlerts={board.data?.unreadAlerts ?? 0}
+        onOpenTask={(wpId, tab) => {
+          const known = board.data?.tasks.find((c) => c.wpId === wpId);
+          // inbox tasks have no task window yet: show the board instead
+          if (known && known.column !== "inbox") setOpened({ wpId, tab: asTab(tab) });
+          else setTab("task");
+        }}
         update={update.data}
         onRefresh={refreshAll}
         onSettings={() => setSettingsOpen(true)}
@@ -56,6 +67,9 @@ export function App() {
           )}
         </div>
       </main>
+      {opened && (
+        <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={refreshAll} />
+      )}
       {settingsOpen && (
         <SettingsDialog
           now={now}

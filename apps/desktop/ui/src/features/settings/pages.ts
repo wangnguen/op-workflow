@@ -1,7 +1,7 @@
 // Settings pages and the search index over their rows (pure, easy to test).
 import { vi } from "../../i18n/vi";
 
-export const PAGES = ["connection", "repos", "quota", "appearance", "about"] as const;
+export const PAGES = ["connection", "repos", "quota", "notify", "appearance", "about"] as const;
 export type PageKey = (typeof PAGES)[number];
 
 export interface SettingEntry {
@@ -25,6 +25,10 @@ export const ENTRIES: SettingEntry[] = [
   { page: "repos", id: "config", label: t.editConfig, keywords: "config json cấu hình repo branch mẫu template" },
   { page: "quota", id: "claude", label: `${t.claudeQuota} · ${t.quotaSection}`, keywords: "quota hạn mức limit claude probe" },
   { page: "quota", id: "codex", label: `${t.codexQuota} · ${t.quotaSection}`, keywords: "quota hạn mức limit codex app-server" },
+  { page: "notify", id: "notifyComments", label: vi.notify.comments, keywords: "thông báo notification toast comment test failed reopened" },
+  { page: "notify", id: "notifySteps", label: vi.notify.steps, keywords: "thông báo notification toast bước step xong lỗi chờ" },
+  { page: "notify", id: "notifyQuota", label: vi.notify.quota, keywords: "thông báo notification toast hạn mức quota 80 95" },
+  { page: "notify", id: "tray", label: vi.notify.trayLabel, keywords: "khay tray icon taskbar hạn mức quota" },
   { page: "appearance", id: "theme", label: t.theme, keywords: "giao diện theme chủ đề màu color sáng tối light dark dracula tokyo catppuccin nord gruvbox" },
   { page: "about", id: "version", label: t.versionSection, keywords: "version phiên bản update cập nhật bản mới release github" },
   { page: "about", id: "tasksDir", label: t.tasksDir, keywords: "brief task thư mục folder desktop lưu chuyển" },

@@ -265,7 +265,15 @@ export function TaskCardView(props: Props) {
       )}
 
       <footer className="card-foot">
-        {card.newComments > 0 ? <span className="badge">{b.newComments(card.newComments)}</span> : <span />}
+        {card.newComments > 0 && card.column !== "inbox" ? (
+          <button className="badge" title={vi.flow.comments.openHint} onClick={() => props.onOpen(card, "comments")}>
+            {b.newComments(card.newComments)}
+          </button>
+        ) : card.newComments > 0 ? (
+          <span className="badge">{b.newComments(card.newComments)}</span>
+        ) : (
+          <span />
+        )}
         <span className="card-actions">{primaryAction(props)}</span>
       </footer>
     </article>

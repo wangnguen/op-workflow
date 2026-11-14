@@ -13,9 +13,10 @@ import {
   refreshNow,
   revealPath,
   saveNxToken,
+  setNotify,
   setTasksDir,
 } from "../../ipc/client";
-import type { Provider, ProviderLink, SettingsView, UpdateView } from "../../ipc/types";
+import type { NotifyKind, Provider, ProviderLink, SettingsView, UpdateView } from "../../ipc/types";
 import { LinkActions } from "../quota/QuotaPopover";
 import { linkProblem } from "../quota/quota";
 import { formatRelative } from "../../shared/format";
@@ -37,6 +38,12 @@ interface Props {
 
 const t = vi.settings;
 const FLASH_MS = 1400;
+
+const NOTIFY_ROWS: { kind: NotifyKind; id: string; label: string; hint: string }[] = [
+  { kind: "comments", id: "notifyComments", label: vi.notify.comments, hint: vi.notify.commentsHint },
+  { kind: "steps", id: "notifySteps", label: vi.notify.steps, hint: vi.notify.stepsHint },
+  { kind: "quota", id: "notifyQuota", label: vi.notify.quota, hint: vi.notify.quotaHint },
+];
 
 /** Small stroke icons for the page list (drawn here, no icon font). */
 const ICONS: Record<PageKey, ReactNode> = {
@@ -61,6 +68,7 @@ const ICONS: Record<PageKey, ReactNode> = {
     </>
   ),
   quota: <path d="M4 16a8 8 0 1 1 16 0M12 16l4-5M4 16h2M18 16h2" className="icon-stroke" />,
+  notify: <path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0" className="icon-stroke" />,
   about: (
     <>
       <circle cx={12} cy={12} r={9} className="icon-stroke" />
@@ -536,6 +544,29 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                           <span className="settings-error">{view.quotaError}</span>
                         </div>
                       )}
+                    </Group>
+                  </>
+                )}
+
+                {page === "notify" && (
+                  <>
+                    <p className="set-intro">{vi.notify.hint}</p>
+                    <Group title={vi.notify.title}>
+                      {NOTIFY_ROWS.map(({ kind, id, label, hint }) => (
+                        <Row key={kind} id={id} label={label} hint={hint}>
+                          <input
+                            type="checkbox"
+                            className="set-check"
+                            aria-label={label}
+                            checked={view?.notify?.[kind] ?? true}
+                            disabled={busy || !view}
+                            onChange={(e) => run(() => setNotify(kind, e.target.checked), false)}
+                          />
+                        </Row>
+                      ))}
+                    </Group>
+                    <Group title={vi.notify.trayLabel}>
+                      <Row id="tray" label={vi.notify.trayLabel} hint={vi.notify.tray} />
                     </Group>
                   </>
                 )}

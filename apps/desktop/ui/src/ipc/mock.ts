@@ -34,6 +34,7 @@ import type {
 } from "./types";
 import { STEP_COUNT, STEP_ORDER } from "../shared/steps";
 import { mockFlowCard, mockFlowSystem, mockRegisterFlow } from "./mockFlow";
+import { mockNewComments, mockNotify, mockUnreadAlerts } from "./mockTask";
 
 export const DEMO_FRAME_MS = 4000;
 /** One demo frame stands for this much "real" time in timestamps. */
@@ -503,7 +504,7 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
     nxStatusColor: "#cc5de8",
       column: "active",
       step: { kind: "intake", index: 1, state: "done", since: iso(now - 25 * 60_000) },
-      newComments: 0,
+      newComments: mockNewComments(SECOND.wpId),
       ...mockFlowCard(SECOND.wpId),
     });
   }
@@ -515,6 +516,7 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
     today: { tokens: 1_240_000 + frameIndex * 18_000, costUsd: 0.84 + f.cost },
     mode: "demo",
     tasksDirOffer: mockTasksDirOffer(),
+    unreadAlerts: mockUnreadAlerts(),
   };
   return board;
 }
@@ -541,6 +543,7 @@ export function mockSettings(): SettingsView {
     tasksDir: mockTasksDir ?? "C:/Users/me/.op-workflow-dev/tasks",
     tasksDirChosen: mockTasksDir !== undefined,
     tasksDirSuggested: MOCK_DESKTOP_TASKS,
+    notify: mockNotify(),
   };
 }
 

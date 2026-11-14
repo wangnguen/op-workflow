@@ -115,6 +115,8 @@ export interface BoardSnapshot {
   notice?: string;
   /** briefs are still in the hidden data folder: offer this Desktop folder once */
   tasksDirOffer?: string;
+  /** alerts in the bell the user has not opened yet */
+  unreadAlerts?: number;
 }
 
 // ---------- settings ----------
@@ -144,7 +146,21 @@ export interface SettingsView {
   tasksDirChosen: boolean;
   /** the Desktop folder the app suggests */
   tasksDirSuggested?: string;
+  /** which Windows notifications are on */
+  notify?: NotifySettings;
 }
+
+/** Windows notifications by kind; the bell lists every alert either way. */
+export interface NotifySettings {
+  /** new OpenProject comments, task moved to Test failed / Reopened */
+  comments: boolean;
+  /** a step finished, waits for you or failed */
+  steps: boolean;
+  /** a quota window passed 80% / 95% */
+  quota: boolean;
+}
+
+export type NotifyKind = keyof NotifySettings;
 
 /** Result of moving the briefs to another folder. */
 export interface TasksDirChange {
@@ -260,6 +276,113 @@ export interface IssueFetch {
   read: number;
   /** issues that could not be read (the others are in the brief) */
   warnings: string[];
+  /** comments newer than the previous read (0 on the first read) */
+  newComments?: number;
+}
+
+// ---------- comments ----------
+
+export interface CommentView {
+  /** OpenProject activity id, or `<issue url>#<n>` */
+  id: string;
+  createdAt: string;
+  /** OpenProject only; issue comments are read without names */
+  author?: string;
+  text: string;
+  /** arrived after the user last opened the Comment tab */
+  isNew: boolean;
+}
+
+export interface IssueThread {
+  url: string;
+  title: string;
+  /** newest first */
+  comments: CommentView[];
+  /** comments GitHub counts that the page did not give */
+  unread: number;
+}
+
+export interface CommentsView {
+  /** OpenProject comments, newest first */
+  comments: CommentView[];
+  /** why OpenProject comments could not be read */
+  error?: string;
+  taskUrl?: string;
+  /** issues of the last "Lấy issue" */
+  issues: IssueThread[];
+  issuesReadAt?: string;
+  /** OpenProject has comments newer than the brief's comment section */
+  briefStale: boolean;
+  fetchedAt: string;
+}
+
+// ---------- diff ----------
+
+export type DiffChange = "added" | "deleted" | "modified" | "renamed";
+export type DiffLineKind = "context" | "added" | "removed";
+
+export interface DiffLine {
+  kind: DiffLineKind;
+  /** line number on the base side */
+  old?: number;
+  /** line number in the working tree */
+  new?: number;
+  text: string;
+}
+
+export interface DiffHunk {
+  /** function or class git names after @@ */
+  section: string;
+  lines: DiffLine[];
+}
+
+export interface DiffFile {
+  /** repo-relative, with / */
+  path: string;
+  oldPath?: string;
+  change: DiffChange;
+  binary: boolean;
+  /** not added to git yet */
+  untracked: boolean;
+  added: number;
+  removed: number;
+  /** lines were left out (very long) */
+  truncated: boolean;
+  /** changed since the user last opened the Diff tab */
+  changed: boolean;
+  hunks: DiffHunk[];
+}
+
+export interface DiffView {
+  base: string;
+  /** short hash */
+  forkPoint: string;
+  files: DiffFile[];
+  added: number;
+  removed: number;
+  /** files changed since the last look (0 the first time) */
+  changedSinceSeen: number;
+  seenBefore: boolean;
+  /** e.g. the repo is on another branch */
+  note?: string;
+  truncated: boolean;
+}
+
+// ---------- alerts ----------
+
+export type AlertKind = "comment" | "status" | "gate" | "stepDone" | "error" | "quota";
+
+export interface AlertView {
+  id: number;
+  at: string;
+  kind: AlertKind;
+  wpId?: number;
+  taskId?: string;
+  title: string;
+  body: string;
+  /** task window tab that shows it */
+  tab?: string;
+  read: boolean;
 }
 
 // ---------- update check ----------
@@ -451,6 +574,8 @@ export interface TaskDetail {
   /** newest last */
   log: LogLine[];
   costUsd: number;
+  /** comments not seen in the Comment tab yet (OpenProject + last issue read) */
+  newComments?: number;
 }
 
 export type FlowAction =
@@ -508,6 +633,12 @@ export interface Commands {
   decide_finding: TaskDetail;
   save_brief: TaskDetail;
   open_task_folder: null;
+  task_comments: CommentsView;
+  refresh_brief_comments: CommentsView;
+  task_diff: DiffView;
+  alerts: AlertView[];
+  mark_alerts_read: null;
+  set_notify: SettingsView;
 }
 
 export interface CommandArgs {
@@ -529,4 +660,9 @@ export interface CommandArgs {
   decide_finding: { decision: FindingDecision };
   save_brief: { wpId: number; text: string };
   open_task_folder: { wpId: number };
+  task_comments: { wpId: number; markSeen: boolean };
+  refresh_brief_comments: { wpId: number };
+  task_diff: { wpId: number; markSeen: boolean };
+  mark_alerts_read: { ids: number[] };
+  set_notify: { kind: NotifyKind; on: boolean };
 }

@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./app/App";
+import { ErrorBoundary } from "./app/ErrorBoundary";
 import { applyTheme, loadPrefs, resolveTheme, systemMode } from "./shared/theme";
 import { ThemeProvider } from "./shared/useTheme";
 // Fonts ship with the app (CSP allows only 'self'); unicode-range loads just the subsets in use,
@@ -20,8 +21,10 @@ if (!root) throw new Error("Missing #root element");
 
 createRoot(root).render(
   <StrictMode>
-    <ThemeProvider>
-      <App />
-    </ThemeProvider>
+    <ErrorBoundary>
+      <ThemeProvider>
+        <App />
+      </ThemeProvider>
+    </ErrorBoundary>
   </StrictMode>,
 );

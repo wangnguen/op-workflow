@@ -201,6 +201,9 @@ pub struct BoardSnapshot {
     /// folder (on the Desktop) once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tasks_dir_offer: Option<String>,
+    /// Alerts (bell) the user has not opened yet.
+    #[serde(default)]
+    pub unread_alerts: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +255,39 @@ pub struct SettingsView {
     /// The Desktop folder the app suggests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks_dir_suggested: Option<String>,
+    /// Which Windows notifications are on (`notify` in config).
+    #[serde(default)]
+    pub notify: NotifySettings,
+}
+
+/// Windows notifications by kind; the bell lists every alert either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NotifySettings {
+    /// New comments on OpenProject, a task moved to Test failed / Reopened.
+    pub comments: bool,
+    /// A step finished, waits for you or failed.
+    pub steps: bool,
+    /// A quota window passed a warning level (`quota.warnAt`).
+    pub quota: bool,
+}
+
+impl Default for NotifySettings {
+    fn default() -> Self {
+        Self {
+            comments: true,
+            steps: true,
+            quota: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NotifyKind {
+    Comments,
+    Steps,
+    Quota,
 }
 
 /// Result of moving the briefs to another folder.
@@ -406,6 +442,173 @@ pub struct IssueFetch {
     pub read: u32,
     /// Issues that could not be read (the others are in the brief).
     pub warnings: Vec<String>,
+    /// Comments newer than the previous read (0 on the first read).
+    #[serde(default)]
+    pub new_comments: u32,
+}
+
+// ---------- comments ----------
+
+/// One comment in the Comment tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentView {
+    /// OpenProject activity id, or `<issue url>#<n>` for an issue comment.
+    pub id: String,
+    pub created_at: String,
+    /// Writer's name, OpenProject only (issue comments are read without names).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    pub text: String,
+    /// Arrived after the user last opened the Comment tab.
+    pub is_new: bool,
+}
+
+/// A GitHub issue as the last "Lấy issue" read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueThread {
+    pub url: String,
+    pub title: String,
+    /// Newest first.
+    pub comments: Vec<CommentView>,
+    /// Comments GitHub counts that the page did not give.
+    pub unread: u32,
+}
+
+/// The Comment tab: OpenProject comments (read now) and the issues of the last "Lấy issue".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentsView {
+    /// Newest first.
+    pub comments: Vec<CommentView>,
+    /// Why the OpenProject comments could not be read (no token, network, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
+    pub issues: Vec<IssueThread>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issues_read_at: Option<String>,
+    /// OpenProject has comments newer than the brief's comment section.
+    pub brief_stale: bool,
+    pub fetched_at: String,
+}
+
+// ---------- diff ----------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiffChange {
+    Added,
+    Deleted,
+    Modified,
+    Renamed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiffLineKind {
+    Context,
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffLineView {
+    pub kind: DiffLineKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new: Option<u32>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffHunkView {
+    /// The function or class git names after `@@` (may be empty).
+    pub section: String,
+    pub lines: Vec<DiffLineView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffFileView {
+    /// Repo-relative, with `/`.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub change: DiffChange,
+    pub binary: bool,
+    /// Not added to git yet.
+    pub untracked: bool,
+    pub added: u32,
+    pub removed: u32,
+    /// Lines were left out (very long file or diff).
+    pub truncated: bool,
+    /// Its change differs from when the user last opened the Diff tab.
+    pub changed: bool,
+    pub hunks: Vec<DiffHunkView>,
+}
+
+/// The Diff tab: the task's change since it left its base.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffView {
+    pub base: String,
+    /// Short hash of the fork point.
+    pub fork_point: String,
+    pub files: Vec<DiffFileView>,
+    pub added: u32,
+    pub removed: u32,
+    /// Files whose change differs from the last look (0 the first time).
+    pub changed_since_seen: u32,
+    /// The user opened the Diff tab before (otherwise nothing counts as changed).
+    pub seen_before: bool,
+    /// E.g. the repo is on another branch, so only the task's commits are shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub truncated: bool,
+}
+
+// ---------- alerts ----------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AlertKind {
+    /// New comments on OpenProject.
+    Comment,
+    /// The task moved to Test failed / Reopened.
+    Status,
+    /// A step finished and the task waits for the user.
+    Gate,
+    /// A step finished; the next one is ready.
+    StepDone,
+    /// A step failed.
+    Error,
+    /// A quota window passed a warning level.
+    Quota,
+}
+
+/// One line in the bell, also shown as a Windows notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertView {
+    pub id: u64,
+    pub at: String,
+    pub kind: AlertKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wp_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub title: String,
+    pub body: String,
+    /// Task window tab that shows it (`comments`, `plan`, `findings`, `push`, `log`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<String>,
+    pub read: bool,
 }
 
 // ---------- update check ----------
@@ -652,6 +855,9 @@ pub struct TaskDetail {
     /// Newest last.
     pub log: Vec<LogLine>,
     pub cost_usd: f64,
+    /// Comments the user has not seen in the Comment tab (OpenProject + last issue read).
+    #[serde(default)]
+    pub new_comments: u32,
 }
 
 /// A button in the task window or on the card.

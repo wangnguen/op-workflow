@@ -2,6 +2,7 @@
 //! threads so IPC calls only read a cache and never wait on the network.
 //!
 //! - Tasks: `HttpTracker::inbox` every `tracker.pollMin` minutes, or right away on `refresh`.
+//!   Comments of a task are read again only when its `updatedAt` moved (PLAN.md §8).
 //! - Codex quota: one long-lived `codex app-server` (JSON-RPC over stdio), polled every
 //!   `quota.codexPollSec` seconds; restarted if it dies.
 //! - Claude quota: a minimal `claude -p` probe (~735 Haiku tokens) in an empty folder every
@@ -9,6 +10,7 @@
 //!
 //! Nothing here writes to OpenProject.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -19,7 +21,7 @@ use std::time::{Duration, Instant};
 use opw_agents::cli;
 use opw_agents::env::{Account, is_stripped};
 use opw_domain::view::{LinkStatus, Provider, ProviderLink, QuotaSnapshot};
-use opw_tracker::{HttpTracker, TrackerApi, WorkPackage};
+use opw_tracker::{Comment, HttpTracker, TrackerApi, WorkPackage};
 use serde_json::{Value, json};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(20);
@@ -41,6 +43,8 @@ pub struct LiveState {
     pub tasks_error: Option<String>,
     /// OpenProject status name → `#rrggbb`, refreshed with the inbox.
     pub status_colors: Vec<(String, String)>,
+    /// Comments of the inbox tasks (work package id → comments, oldest first).
+    pub comments: HashMap<u64, Vec<Comment>>,
     pub claude: Option<QuotaSnapshot>,
     pub codex: Option<QuotaSnapshot>,
     /// `None` until the quota threads start.
@@ -194,6 +198,7 @@ impl Live {
             s.nx_user = Some(user);
             s.tasks = None;
             s.tasks_error = None;
+            s.comments.clear();
         }
         self.refresh();
     }
@@ -205,7 +210,15 @@ impl Live {
             s.tasks = None;
             s.tasks_error = None;
             s.last_sync = None;
+            s.comments.clear();
         }
+    }
+
+    /// Comments the Comment tab just read, so badges follow without waiting for the poll.
+    pub fn put_comments(&self, wp_id: u64, comments: Vec<Comment>) {
+        update(&self.state, |s| {
+            s.comments.insert(wp_id, comments);
+        });
     }
 
     /// Quota read from a workflow step's own `rate_limit_event` (every headless Claude run
@@ -373,6 +386,8 @@ fn update(state: &Mutex<LiveState>, f: impl FnOnce(&mut LiveState)) {
 // ---------- tasks ----------
 
 fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver<()>) {
+    // `updatedAt` of each task when its comments were last read
+    let mut read_at: HashMap<u64, String> = HashMap::new();
     loop {
         let (base_url, token, need_user) = state
             .lock()
@@ -383,6 +398,14 @@ fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver
             let user = need_user.then(|| tracker.me().ok()).flatten();
             let result = tracker.inbox();
             let colors = tracker.status_colors().ok().filter(|c| !c.is_empty());
+            let cached: Vec<u64> = state
+                .lock()
+                .map(|s| s.comments.keys().copied().collect())
+                .unwrap_or_default();
+            let fresh = match &result {
+                Ok(tasks) => fetch_changed_comments(&tracker, tasks, &cached, &mut read_at),
+                Err(_) => HashMap::new(),
+            };
             update(state, |s| {
                 // the token may have been cleared or replaced while we were fetching
                 if s.token.as_deref() != Some(token.as_str()) {
@@ -396,6 +419,8 @@ fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver
                 }
                 match result {
                     Ok(tasks) => {
+                        s.comments.retain(|id, _| tasks.iter().any(|t| t.id == *id));
+                        s.comments.extend(fresh);
                         s.tasks = Some(tasks);
                         s.last_sync = Some(now());
                         s.tasks_error = None;
@@ -409,6 +434,29 @@ fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
+}
+
+/// Comments of the tasks whose `updatedAt` moved since the last read (all of them the first
+/// time). A failed read is tried again on the next poll.
+fn fetch_changed_comments(
+    tracker: &HttpTracker,
+    tasks: &[WorkPackage],
+    cached: &[u64],
+    read_at: &mut HashMap<u64, String>,
+) -> HashMap<u64, Vec<Comment>> {
+    read_at.retain(|id, _| tasks.iter().any(|t| t.id == *id));
+    let mut out = HashMap::new();
+    for wp in tasks {
+        let same = read_at.get(&wp.id) == Some(&wp.updated_at) && !wp.updated_at.is_empty();
+        if same && cached.contains(&wp.id) {
+            continue;
+        }
+        if let Ok(comments) = tracker.comments(wp.id) {
+            read_at.insert(wp.id, wp.updated_at.clone());
+            out.insert(wp.id, comments);
+        }
+    }
+    out
 }
 
 // ---------- child processes ----------

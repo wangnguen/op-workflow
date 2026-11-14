@@ -31,9 +31,9 @@ fn label(url: &str) -> String {
         .map_or_else(|| "Issue".to_owned(), |n| format!("Issue #{n}"))
 }
 
-/// The new `## Từ issue` section, how many issues made it in, and what failed. All failed →
+/// The new `## Từ issue` section, the issues that made it in, and what failed. All failed →
 /// an error (the brief keeps its old section).
-pub fn section_from(reads: Vec<IssueRead>) -> Result<(String, u32, Vec<String>), ApiError> {
+pub fn section_from(reads: Vec<IssueRead>) -> Result<(String, Vec<BriefIssue>, Vec<String>), ApiError> {
     let mut issues = Vec::new();
     let mut warnings = Vec::new();
     let mut signed_out = false;
@@ -70,8 +70,7 @@ pub fn section_from(reads: Vec<IssueRead>) -> Result<(String, u32, Vec<String>),
         };
         return Err(ApiError::new(code, warnings.join("; ")));
     }
-    let read = u32::try_from(issues.len()).unwrap_or(u32::MAX);
-    Ok((render_issue_section(&issues, &[]), read, warnings))
+    Ok((render_issue_section(&issues, &[]), issues, warnings))
 }
 
 pub fn browser_error(e: BrowserError) -> ApiError {
@@ -127,7 +126,7 @@ mod tests {
             },
         ];
         let (section, read, warnings) = section_from(reads).unwrap();
-        assert_eq!(read, 1);
+        assert_eq!(read.len(), 1);
         assert!(section.contains("### 保存できない"));
         assert!(section.contains("(1 comment trên GitHub không lấy được"));
         assert_eq!(warnings.len(), 1);

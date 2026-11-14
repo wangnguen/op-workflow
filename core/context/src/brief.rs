@@ -50,8 +50,20 @@ pub fn render_brief(b: &BriefInput<'_>) -> String {
     } else {
         &description
     });
-    out.push_str("\n\n## Comment trên OpenProject\n");
-    let mut comments: Vec<&BriefComment> = b.comments.iter().collect();
+    out.push_str("\n\n");
+    out.push_str(&render_comment_section(b.comments, b.redact_terms));
+    out.push_str(&render_issue_section(&[], b.redact_terms));
+    out
+}
+
+/// Heading of the OpenProject comments; [`replace_comment_section`] rewrites that section only.
+pub const COMMENT_HEADING: &str = "## Comment trên OpenProject";
+
+/// `## Comment trên OpenProject` with the newest comments first, redacted, ending in a blank line.
+pub fn render_comment_section(comments: &[BriefComment], redact_terms: &[String]) -> String {
+    let clean = |s: &str| redact(s.trim(), redact_terms);
+    let mut out = format!("{COMMENT_HEADING}\n");
+    let mut comments: Vec<&BriefComment> = comments.iter().collect();
     comments.sort_by(|a, c| c.created_at.cmp(&a.created_at));
     if comments.is_empty() {
         out.push_str("(chưa có comment)\n");
@@ -66,8 +78,43 @@ pub fn render_brief(b: &BriefInput<'_>) -> String {
         ));
     }
     out.push('\n');
-    out.push_str(&render_issue_section(&[], b.redact_terms));
     out
+}
+
+/// Byte range of a `## ` section that starts with `heading`, up to the next `## ` heading.
+fn section_range(brief: &str, heading: &str) -> Option<(usize, usize)> {
+    let start = brief
+        .match_indices(heading)
+        .find(|(i, _)| *i == 0 || brief[..*i].ends_with('\n'))
+        .map(|(i, _)| i)?;
+    let body = start + heading.len();
+    let end = brief[body..]
+        .match_indices("\n## ")
+        .next()
+        .map_or(brief.len(), |(i, _)| body + i + 1);
+    Some((start, end))
+}
+
+/// Swap the OpenProject comment section for `section` (the user's edits elsewhere stay). A brief
+/// without one gets it before `## Từ issue`, or at the end.
+pub fn replace_comment_section(brief: &str, section: &str) -> String {
+    if let Some((start, end)) = section_range(brief, COMMENT_HEADING) {
+        return format!("{}{}{}", &brief[..start], section, &brief[end..]);
+    }
+    match section_range(brief, ISSUE_HEADING) {
+        Some((start, _)) => format!("{}{}{}", &brief[..start], section, &brief[start..]),
+        None => format!("{}\n\n{}", brief.trim_end(), section),
+    }
+}
+
+/// Date of the newest comment the brief holds (`### <date>` lines of the comment section).
+pub fn newest_brief_comment(brief: &str) -> Option<String> {
+    let (start, end) = section_range(brief, COMMENT_HEADING)?;
+    brief[start..end]
+        .lines()
+        .filter_map(|l| l.strip_prefix("### "))
+        .map(|d| d.trim().to_owned())
+        .max()
 }
 
 /// Heading of the last brief section; [`replace_issue_section`] rewrites from here to the end.
@@ -184,6 +231,46 @@ mod tests {
         assert!(new < old, "newest comment first");
         assert!(!out.contains("a.b@example.com"));
         assert!(!out.contains("AcmeCorp"));
+    }
+
+    #[test]
+    fn comment_section_is_replaced_without_touching_the_rest() {
+        let old = [BriefComment {
+            created_at: "2026-11-10T01:00:00Z".into(),
+            text: "cũ".into(),
+        }];
+        let brief = format!(
+            "# [WP-1] t\n\n## Yêu cầu\nsửa tay\n\n{}## Từ issue\n### Issue\nnội dung\n",
+            render_comment_section(&old, &[])
+        );
+        assert_eq!(
+            newest_brief_comment(&brief).as_deref(),
+            Some("2026-11-10T01:00:00Z")
+        );
+        let fresh = [
+            old[0].clone(),
+            BriefComment {
+                created_at: "2026-11-14T02:00:00Z".into(),
+                text: "Test failed lại, của AcmeCorp".into(),
+            },
+        ];
+        let out = replace_comment_section(&brief, &render_comment_section(&fresh, &["AcmeCorp".into()]));
+        assert!(
+            out.starts_with(
+                "# [WP-1] t\n\n## Yêu cầu\nsửa tay\n\n## Comment trên OpenProject\n### 2026-11-14"
+            )
+        );
+        assert!(out.ends_with("## Từ issue\n### Issue\nnội dung\n"), "{out}");
+        assert!(!out.contains("AcmeCorp"));
+        assert_eq!(
+            newest_brief_comment(&out).as_deref(),
+            Some("2026-11-14T02:00:00Z")
+        );
+        // a brief the user rewrote without the section gets it back before the issues
+        let bare = "# [WP-1] t\n\n## Từ issue\nx\n";
+        let out = replace_comment_section(bare, &render_comment_section(&fresh, &[]));
+        assert!(out.find(COMMENT_HEADING).unwrap() < out.find(ISSUE_HEADING).unwrap());
+        assert!(newest_brief_comment(bare).is_none());
     }
 
     #[test]

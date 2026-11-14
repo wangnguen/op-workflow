@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { agentLabel, vi } from "../../i18n/vi";
 import type { ProviderLink, QuotaSnapshot, QuotaWindow } from "../../ipc/types";
+import { onOpenQuota } from "../../ipc/client";
 import { useDismiss } from "../../shared/hooks";
-import { linkProblem, remainingPct } from "./quota";
+import { OPEN_QUOTA_EVENT, linkProblem, remainingPct } from "./quota";
 import { QuotaPopover } from "./QuotaPopover";
 import "./quota.css";
 
@@ -29,6 +30,16 @@ export function QuotaGauges({ quota, links, now, onChanged }: Props) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useDismiss(ref, open, () => setOpen(false));
+  // the tray icon (Tauri event) and quota alerts in the bell (window event) open it too
+  useEffect(() => {
+    const show = () => setOpen(true);
+    window.addEventListener(OPEN_QUOTA_EVENT, show);
+    const stop = onOpenQuota(show);
+    return () => {
+      window.removeEventListener(OPEN_QUOTA_EVENT, show);
+      stop();
+    };
+  }, []);
   const problems = links.filter(linkProblem);
   const title = problems.length
     ? problems.map((l) => `${agentLabel[l.provider]}: ${vi.quota.linkStatus[l.status]}`).join(" · ")

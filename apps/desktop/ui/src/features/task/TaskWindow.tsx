@@ -22,6 +22,8 @@ import {
 import type { Decision, FindingView, FlowAction, TaskDetail } from "../../ipc/types";
 import { formatClock, formatDuration, formatUsd } from "../../shared/format";
 import { usePolling, useNow } from "../../shared/hooks";
+import { CommentsTab } from "./CommentsTab";
+import { DiffTab } from "./DiffTab";
 import { Markdown } from "../../shared/Markdown";
 import { Icon } from "../../shared/ui/Icon";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
@@ -101,14 +103,23 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
       .finally(() => setBusy(undefined));
   };
   const act = (action: FlowAction) => run(action.type, () => flowAction(wpId, action));
+  // the Comment tab marked comments seen or rewrote the brief: counts and brief changed
+  const { refresh } = polled;
+  const countsChanged = useCallback(() => {
+    refresh();
+    onChanged();
+  }, [refresh, onChanged]);
   const decide = (f: FindingView, decision: Decision, reason?: string) =>
     run(`decide:${f.fingerprint}`, () => decideFinding({ wpId, fingerprint: f.fingerprint, decision, reason }));
 
   const counts = d ? findingCounts(d.findings) : { open: 0, fix: 0 };
+  const fresh = d?.newComments ?? 0;
   const tabs = [
     { value: "brief" as const, label: t.tabs.brief },
+    { value: "comments" as const, label: t.tabs.comments, count: fresh > 0 ? fresh : undefined },
     { value: "plan" as const, label: t.tabs.plan },
     { value: "findings" as const, label: t.tabs.findings, count: counts.open > 0 ? counts.open : undefined },
+    { value: "diff" as const, label: t.tabs.diff },
     { value: "push" as const, label: t.tabs.push },
     { value: "log" as const, label: t.tabs.log },
   ];
@@ -202,7 +213,9 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
                   onAction={act}
                 />
               )}
+              {tab === "comments" && <CommentsTab detail={d} onChanged={countsChanged} />}
               {tab === "findings" && <FindingsTab detail={d} busy={busy} onDecide={decide} onAction={act} />}
+              {tab === "diff" && <DiffTab detail={d} />}
               {tab === "push" && <PushTab detail={d} busy={busy} onAction={act} />}
               {tab === "log" && <LogTab detail={d} />}
             </div>

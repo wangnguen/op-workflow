@@ -212,3 +212,114 @@
     opacity: 0;
   }
 }
+
+/* ---------- bell ---------- */
+
+.bell {
+  position: relative;
+}
+.bell-count {
+  position: absolute;
+  top: 2px;
+  right: 1px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+.bell-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 360px;
+  max-height: min(520px, 70vh);
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--overlay);
+  box-shadow: var(--shadow-pop);
+  animation: sheet-in var(--dur-base) var(--ease-out);
+  transform-origin: top right;
+}
+.bell-pop header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.bell-pop h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.bell-empty,
+.bell-note {
+  margin: 0;
+  font-size: 12px;
+}
+.bell-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.bell-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 7px 8px 7px 10px;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.bell-item:hover {
+  background: var(--fill);
+}
+.bell-item.is-unread {
+  border-left-color: var(--accent);
+}
+.bell-item-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+.bell-kind {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.bell-kind--gate {
+  color: var(--st-waiting);
+}
+.bell-kind--error {
+  color: var(--st-failed);
+}
+.bell-kind--comment,
+.bell-kind--status {
+  color: var(--accent);
+}
+.bell-body {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-size: 12px;
+}

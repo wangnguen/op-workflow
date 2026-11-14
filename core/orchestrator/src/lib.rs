@@ -5,7 +5,10 @@
 //! the task the user started ([`start`]) and its workflow steps 2-8 ([`flow`]). Quota and the
 //! update check need no token.
 
+pub mod alerts;
+pub mod comments;
 pub mod demo;
+pub mod diffview;
 pub mod flow;
 pub mod folders;
 pub mod issues;
@@ -13,6 +16,7 @@ pub mod live;
 pub mod os;
 pub mod selftest;
 pub mod start;
+pub mod tray;
 pub mod updater;
 
 use std::path::PathBuf;
@@ -20,17 +24,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use opw_config::{Config, secrets};
+use opw_context::BriefComment;
 use opw_domain::task::display_id;
 use opw_domain::view::{
-    ApiError, AppInfo, BoardSnapshot, DataMode, DeleteBranchRequest, FindingDecision, FlowAction, InboxItem,
-    IssueFetch, OrbitSnapshot, ProjectMemory, Provider, QuotaSnapshot, RepoState, SettingsView, StartOptions,
-    StartRequest, StartResult, StepRef, StepView, TaskCard, TaskColumn, TaskDetail, TaskSystem,
-    TasksDirChange, TodayStats, UpdateView,
+    AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, CommentsView, DataMode, DeleteBranchRequest,
+    DiffView, FindingDecision, FlowAction, FlowStatus, InboxItem, IssueFetch, NotifyKind, OrbitSnapshot,
+    ProjectMemory, Provider, QuotaSnapshot, RepoState, SettingsView, StartOptions, StartRequest, StartResult,
+    StepRef, StepView, TaskCard, TaskColumn, TaskDetail, TaskSystem, TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
-use opw_tracker::{HttpTracker, TrackerApi, WorkPackage};
+use opw_tracker::{Comment, HttpTracker, TrackerApi, WorkPackage};
 
+use crate::alerts::{Alerts, NewAlert};
 use crate::flow::{CliLauncher, Flow, TaskCtx};
 use crate::live::{Live, LiveSettings, LiveState};
 use crate::updater::Updater;
@@ -45,6 +51,9 @@ const COLUMN_INBOX: &str = "inbox";
 const COLUMN_DONE: &str = "done";
 /// "Hôm nay" on the bottom bar: the last 24 hours.
 const TODAY_HOURS: u32 = 24;
+/// `task_kv` id for values that belong to no task (quota levels already announced).
+const NO_TASK: u64 = 0;
+const QUOTA_NOTIFIED: &str = "quota.notified";
 
 /// Facade used by the Tauri commands. Every method returns plain view DTOs.
 #[derive(Debug, Default)]
@@ -62,6 +71,8 @@ pub struct AppService {
     updater: Option<Updater>,
     /// Steps 2-8; `None` without local storage.
     flow: Option<Flow>,
+    /// The bell (and what the shell shows as Windows notifications).
+    alerts: Arc<Alerts>,
 }
 
 impl AppService {
@@ -101,12 +112,27 @@ impl AppService {
             .and_then(|s| s.active_tasks().ok())
             .unwrap_or_default();
         let store = store.map(|s| Arc::new(Mutex::new(s)));
+        let alerts = Arc::new(Alerts::default());
         let flow = store.as_ref().and_then(|store| {
             let dir = data_dir.as_ref()?;
             let launcher = CliLauncher::new(dir.join("guard-hooks")).ok()?;
             let flow = Flow::new(store.clone(), Arc::new(launcher), Some(dir.join("runs")));
             let quota = live.clone();
             flow.set_quota_sink(move |snap| quota.observe_claude(snap));
+            let bell = alerts.clone();
+            flow.set_alert_sink(move |a| {
+                bell.push(
+                    NewAlert {
+                        kind: a.kind,
+                        wp_id: Some(a.wp_id),
+                        task_id: Some(a.task_id),
+                        title: a.title,
+                        body: a.body,
+                        tab: Some(a.tab.to_owned()),
+                    },
+                    &opw_quota::now_rfc3339(),
+                );
+            });
             Some(flow)
         });
         let updater = Updater::start(config.update.clone(), CORE_VERSION);
@@ -120,6 +146,7 @@ impl AppService {
             active: Mutex::new(active),
             updater: Some(updater),
             flow,
+            alerts,
         }
     }
 
@@ -192,6 +219,7 @@ impl AppService {
             let mut board = demo::board(demo::tick_now());
             board.quota = live_quota(&state);
             board.links = state.links();
+            board.unread_alerts = self.alerts.unread();
             return board;
         }
         let config = self.config();
@@ -257,6 +285,7 @@ impl AppService {
                 }
             }
         }
+        self.fill_new_comments(&mut tasks, &state);
         let notice = self.inbox_notice(&state);
         let (cost_usd, tokens) = self
             .flow
@@ -272,7 +301,29 @@ impl AppService {
             mode: DataMode::Live,
             notice,
             tasks_dir_offer: self.tasks_dir_offer(),
+            unread_alerts: self.alerts.unread(),
         }
+    }
+
+    /// "+N comment" on the cards: OpenProject comments newer than the last one seen, plus new
+    /// comments of the last issue read.
+    fn fill_new_comments(&self, cards: &mut [TaskCard], state: &LiveState) {
+        let Some(store) = self.store.as_ref().and_then(|s| s.lock().ok()) else {
+            return;
+        };
+        for card in cards {
+            let cached = state.comments.get(&card.wp_id).map(Vec::as_slice);
+            card.new_comments = comments::new_count(&store, card.wp_id, cached);
+        }
+    }
+
+    fn new_comments_of(&self, wp_id: u64) -> u32 {
+        let state = self.live_state().unwrap_or_default();
+        let cached = state.comments.get(&wp_id).map(Vec::as_slice);
+        self.store
+            .as_ref()
+            .and_then(|s| s.lock().ok())
+            .map_or(0, |store| comments::new_count(&store, wp_id, cached))
     }
 
     pub fn orbit_snapshot(&self) -> OrbitSnapshot {
@@ -340,6 +391,7 @@ impl AppService {
                 system.findings = f.findings;
                 system.gate = f.gate;
             }
+            system.new_comments = self.new_comments_of(row.wp_id);
             system
         });
         OrbitSnapshot {
@@ -391,6 +443,7 @@ impl AppService {
                 status: String::new(),
                 project: row.project,
                 description: String::new(),
+                updated_at: String::new(),
             })
         })
     }
@@ -460,6 +513,7 @@ impl AppService {
             }
             _ => Err("chưa có token".into()),
         };
+        let in_brief = details.as_ref().ok().and_then(|(_, c)| comments::max_id(c));
         let config = self.config();
         let (mut result, row) = start::start(
             start::StartInput {
@@ -495,6 +549,10 @@ impl AppService {
                 "branch.switched"
             };
             let _ = store.log_event(&row.updated_at, Some(row.wp_id), kind, Some(&detail));
+            if let Some(id) = in_brief {
+                comments::raise(&store, row.wp_id, comments::SEEN, id, &row.updated_at);
+                comments::raise(&store, row.wp_id, comments::NOTIFIED, id, &row.updated_at);
+            }
         }
         if let Ok(mut active) = self.active.lock() {
             result.warnings.extend(shared_repo_warnings(&active, &row));
@@ -574,7 +632,12 @@ impl AppService {
     /// Everything the task window shows (reads the task files).
     pub fn task_detail(&self, wp_id: u64) -> Result<TaskDetail, ApiError> {
         let (ctx, flow) = self.task_ctx(wp_id)?;
-        Ok(flow.detail(&ctx))
+        Ok(self.with_counts(flow.detail(&ctx)))
+    }
+
+    fn with_counts(&self, mut detail: TaskDetail) -> TaskDetail {
+        detail.new_comments = self.new_comments_of(detail.wp_id);
+        detail
     }
 
     /// A workflow button: run, stop, retry, approve the plan, …
@@ -592,14 +655,14 @@ impl AppService {
                 active.retain(|a| a.wp_id != wp_id);
             }
         }
-        Ok(flow.detail(&ctx))
+        Ok(self.with_counts(flow.detail(&ctx)))
     }
 
     /// Fix / accept / defer one review finding.
     pub fn decide_finding(&self, decision: &FindingDecision) -> Result<TaskDetail, ApiError> {
         let (ctx, flow) = self.task_ctx(decision.wp_id)?;
         flow.decide(decision)?;
-        Ok(flow.detail(&ctx))
+        Ok(self.with_counts(flow.detail(&ctx)))
     }
 
     /// Save the brief the user edited in the task window (before the AI reads it).
@@ -611,7 +674,7 @@ impl AppService {
         let file = ctx.task_dir.join(flow::BRIEF_FILE);
         std::fs::write(&file, text)
             .map_err(|e| ApiError::new("brief.write", format!("Không ghi được brief: {e}")))?;
-        Ok(flow.detail(&ctx))
+        Ok(self.with_counts(flow.detail(&ctx)))
     }
 
     /// Show the task folder (brief, plan, push summary) in Explorer.
@@ -703,23 +766,299 @@ impl AppService {
             ));
         }
         let reads = opw_browser::read_github_issues(&urls).map_err(issues::browser_error)?;
-        let (section, read, warnings) = issues::section_from(reads)?;
+        let (section, read_issues, warnings) = issues::section_from(reads)?;
+        let read = u32::try_from(read_issues.len()).unwrap_or(u32::MAX);
+        let now = opw_quota::now_rfc3339();
+        let stored: Vec<comments::StoredIssue> = read_issues
+            .iter()
+            .map(|i| comments::StoredIssue::from_brief(i, &now))
+            .collect();
         // the user may have edited the brief while Chrome was busy: rewrite on the latest text
         let latest = std::fs::read_to_string(&file).unwrap_or(brief);
         std::fs::write(&file, opw_context::replace_issue_section(&latest, &section))
             .map_err(|e| ApiError::new("brief.write", format!("Không ghi được brief: {e}")))?;
+        let mut new_comments = 0;
         if let Some(store) = &self.store {
             if let Ok(store) = store.lock() {
+                new_comments = comments::save_issue_read(&store, wp_id, &stored, &now);
                 let detail = format!("{read} issue");
+                let _ = store.log_event(&now, Some(wp_id), "issue.read", Some(&detail));
+            }
+        }
+        Ok(IssueFetch {
+            read,
+            warnings,
+            new_comments,
+        })
+    }
+
+    // ---------- comments, diff ----------
+
+    /// The Comment tab: OpenProject comments read now (network: off the UI thread) and the
+    /// issues of the last "Lấy issue". `mark_seen`: the tab is open, so they count as seen.
+    pub fn task_comments(&self, wp_id: u64, mark_seen: bool) -> Result<CommentsView, ApiError> {
+        let (ctx, _) = self.task_ctx(wp_id)?;
+        let state = self.live_state().unwrap_or_default();
+        let now = opw_quota::now_rfc3339();
+        let (list, error) = match self.read_comments(wp_id, &state) {
+            Ok(list) => (list, None),
+            Err(e) => (state.comments.get(&wp_id).cloned().unwrap_or_default(), Some(e)),
+        };
+        let brief = std::fs::read_to_string(ctx.task_dir.join(flow::BRIEF_FILE)).ok();
+        let store = self.store.as_ref().and_then(|s| s.lock().ok());
+        let seen = store.as_ref().and_then(|s| comments::seen_id(s, wp_id));
+        let (issues, issues_seen) = store.as_ref().map_or_else(Default::default, |s| {
+            (comments::stored_issues(s, wp_id), comments::issues_seen(s, wp_id))
+        });
+        let view = CommentsView {
+            comments: comments::op_views(&list, seen),
+            task_url: (!state.base_url.is_empty())
+                .then(|| format!("{}/work_packages/{wp_id}", state.base_url.trim_end_matches('/'))),
+            issues: comments::issue_threads(&issues, &issues_seen),
+            issues_read_at: issues.iter().map(|i| i.read_at.clone()).max(),
+            brief_stale: error.is_none() && comments::brief_stale(brief.as_deref(), &list),
+            error,
+            fetched_at: now.clone(),
+        };
+        if mark_seen {
+            if let Some(s) = &store {
+                if view.error.is_none() {
+                    comments::mark_seen(s, wp_id, &list, &now);
+                } else {
+                    comments::mark_issues_seen(s, wp_id, &now);
+                }
+            }
+            self.alerts
+                .mark_task_read(wp_id, &[AlertKind::Comment, AlertKind::Status]);
+        }
+        Ok(view)
+    }
+
+    /// OpenProject comments of one task, read now; the cache (badges) follows.
+    fn read_comments(&self, wp_id: u64, state: &LiveState) -> Result<Vec<Comment>, String> {
+        let Some(token) = state.token.as_deref().filter(|_| !state.base_url.is_empty()) else {
+            return Err("Chưa có token OpenProject: nhập ở Cài đặt → OpenProject để xem comment.".into());
+        };
+        let list = HttpTracker::new(&state.base_url, token)
+            .comments(wp_id)
+            .map_err(|e| format!("Không đọc được comment từ OpenProject: {e}"))?;
+        if let Some(live) = &self.live {
+            live.put_comments(wp_id, list.clone());
+        }
+        Ok(list)
+    }
+
+    /// Rewrite the brief's `## Comment trên OpenProject` with the comments on OpenProject now
+    /// (redacted like at start). The rest of the brief, including the user's edits, stays.
+    pub fn refresh_brief_comments(&self, wp_id: u64) -> Result<CommentsView, ApiError> {
+        let (ctx, flow) = self.task_ctx(wp_id)?;
+        if flow.detail(&ctx).status == FlowStatus::Running {
+            return Err(ApiError::new(
+                "brief.busy",
+                "Một bước đang chạy và đang đọc brief. Đợi bước xong rồi cập nhật.",
+            ));
+        }
+        let state = self.live_state().unwrap_or_default();
+        let list = self
+            .read_comments(wp_id, &state)
+            .map_err(|e| ApiError::new("comments.read", e))?;
+        let file = ctx.task_dir.join(flow::BRIEF_FILE);
+        let brief = std::fs::read_to_string(&file)
+            .map_err(|_| ApiError::new("brief.missing", "Chưa có brief: bấm Bắt đầu cho task này trước"))?;
+        let items: Vec<BriefComment> = list
+            .iter()
+            .map(|c| BriefComment {
+                created_at: c.created_at.clone(),
+                text: c.raw.clone(),
+            })
+            .collect();
+        let section = opw_context::render_comment_section(&items, &[]);
+        std::fs::write(&file, opw_context::replace_comment_section(&brief, &section))
+            .map_err(|e| ApiError::new("brief.write", format!("Không ghi được brief: {e}")))?;
+        if let Some(store) = &self.store {
+            if let Ok(store) = store.lock() {
+                let detail = format!("{} comment", list.len());
                 let _ = store.log_event(
                     &opw_quota::now_rfc3339(),
                     Some(wp_id),
-                    "issue.read",
+                    "brief.comments",
                     Some(&detail),
                 );
             }
         }
-        Ok(IssueFetch { read, warnings })
+        self.task_comments(wp_id, true)
+    }
+
+    /// The Diff tab (git, read-only; off the UI thread). `mark_seen`: remember what was shown,
+    /// for "N file đổi từ lần xem trước" next time.
+    pub fn task_diff(&self, wp_id: u64, mark_seen: bool) -> Result<DiffView, ApiError> {
+        let (ctx, _) = self.task_ctx(wp_id)?;
+        diffview::task_diff(
+            self.store.as_deref(),
+            &ctx.row,
+            mark_seen,
+            &opw_quota::now_rfc3339(),
+        )
+    }
+
+    // ---------- alerts ----------
+
+    /// The bell, newest first.
+    pub fn alerts(&self) -> Vec<AlertView> {
+        self.alerts.list()
+    }
+
+    /// Mark alerts read (empty = all).
+    pub fn mark_alerts_read(&self, ids: &[u64]) {
+        self.alerts.mark_read(ids);
+    }
+
+    /// Look for new comments, status changes and quota levels; return the alerts added since the
+    /// last call whose kind has Windows notifications on. The shell calls this every few seconds.
+    pub fn poll_alerts(&self) -> Vec<AlertView> {
+        let now = opw_quota::now_rfc3339();
+        let config = self.config();
+        if let (Some(state), Some(store)) = (self.live_state(), &self.store) {
+            if let Ok(store) = store.lock() {
+                if state.token.is_some() {
+                    let started = self.started_ids(&store);
+                    for wp in state.tasks.as_deref().unwrap_or_default() {
+                        let task_id = display_id(&config.tracker.task_prefix, wp.id);
+                        let tab = started.contains(&wp.id).then(|| "comments".to_owned());
+                        self.check_status(&store, wp, &task_id, tab.clone(), &now);
+                        if let Some(list) = state.comments.get(&wp.id) {
+                            self.check_comments(&store, wp, list, &task_id, tab, &now);
+                        }
+                    }
+                }
+                self.check_quota(&store, &live_quota(&state), &config.quota.warn_at, &now);
+            }
+        }
+        self.alerts
+            .take_fresh()
+            .into_iter()
+            .filter(|a| alerts::toast_wanted(a.kind, &config.notify))
+            .collect()
+    }
+
+    /// Tasks that have a task window (started at least once).
+    fn started_ids(&self, store: &Store) -> Vec<u64> {
+        let mut ids: Vec<u64> = self.active_rows().iter().map(|r| r.wp_id).collect();
+        for column in [COLUMN_INBOX, COLUMN_DONE] {
+            ids.extend(store.task_ids_in(column).unwrap_or_default());
+        }
+        ids
+    }
+
+    fn check_comments(
+        &self,
+        store: &Store,
+        wp: &WorkPackage,
+        list: &[Comment],
+        task_id: &str,
+        tab: Option<String>,
+        now: &str,
+    ) {
+        let Some(max) = comments::max_id(list) else { return };
+        let notified: Option<u64> = store
+            .kv_get(wp.id, comments::NOTIFIED, "")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok());
+        let Some(notified) = notified else {
+            // first time the app sees this task: what is there now is the baseline
+            comments::raise(store, wp.id, comments::NOTIFIED, max, now);
+            if comments::seen_id(store, wp.id).is_none() {
+                comments::raise(store, wp.id, comments::SEEN, max, now);
+            }
+            return;
+        };
+        if max <= notified {
+            return;
+        }
+        let fresh: Vec<&Comment> = list.iter().filter(|c| c.id > notified).collect();
+        if let Some(newest) = fresh.iter().max_by_key(|c| c.id) {
+            let who = newest.author.as_deref().unwrap_or("OpenProject");
+            self.alerts.push(
+                NewAlert {
+                    kind: AlertKind::Comment,
+                    wp_id: Some(wp.id),
+                    task_id: Some(task_id.to_owned()),
+                    title: format!("{task_id} · {} comment mới", fresh.len()),
+                    body: format!("{who}: {}", alerts::excerpt(&newest.raw, 140)),
+                    tab,
+                },
+                now,
+            );
+        }
+        comments::raise(store, wp.id, comments::NOTIFIED, max, now);
+    }
+
+    fn check_status(&self, store: &Store, wp: &WorkPackage, task_id: &str, tab: Option<String>, now: &str) {
+        if wp.status.is_empty() {
+            return;
+        }
+        let before = store.kv_get(wp.id, comments::STATUS, "").ok().flatten();
+        if before.as_deref() == Some(wp.status.as_str()) {
+            return;
+        }
+        let _ = store.kv_set(wp.id, comments::STATUS, "", &wp.status, now);
+        if before.is_some() && alerts::alarming_status(&wp.status) {
+            self.alerts.push(
+                NewAlert {
+                    kind: AlertKind::Status,
+                    wp_id: Some(wp.id),
+                    task_id: Some(task_id.to_owned()),
+                    title: format!("{task_id} chuyển sang {}", wp.status),
+                    body: wp.subject.clone(),
+                    tab,
+                },
+                now,
+            );
+        }
+    }
+
+    fn check_quota(&self, store: &Store, quota: &[QuotaSnapshot], levels: &[u8], now: &str) {
+        for c in alerts::quota_crossings(quota, levels) {
+            let remembered = store.kv_get(NO_TASK, QUOTA_NOTIFIED, &c.key).ok().flatten();
+            if !alerts::quota_is_new(&c, remembered.as_deref()) {
+                continue;
+            }
+            let _ = store.kv_set(NO_TASK, QUOTA_NOTIFIED, &c.key, &alerts::quota_mark(&c), now);
+            self.alerts.push(
+                NewAlert {
+                    kind: AlertKind::Quota,
+                    wp_id: None,
+                    task_id: None,
+                    title: alerts::quota_title(&c),
+                    body: format!(
+                        "Còn khoảng {:.0}% tới lần reset. Mở Hạn mức để xem giờ reset.",
+                        (100.0 - c.used_pct).max(0.0)
+                    ),
+                    tab: None,
+                },
+                now,
+            );
+        }
+    }
+
+    /// Icon and tooltip of the tray icon.
+    pub fn tray_view(&self) -> tray::TrayView {
+        match self.live_state() {
+            Some(state) => tray::tray_view(&live_quota(&state), &state.links()),
+            None => tray::tray_view(&demo::board(demo::tick_now()).quota, &[]),
+        }
+    }
+
+    /// Turn one kind of Windows notification on or off.
+    pub fn set_notify(&self, kind: NotifyKind, on: bool) -> Result<SettingsView, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
+        opw_config::save_notify(path, kind, on).map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        Ok(self.settings())
     }
 
     /// Open `chrome://inspect/#remote-debugging`, where the user allows "Lấy issue" to connect.
@@ -826,6 +1165,7 @@ impl AppService {
             tasks_dir: self.tasks_root().map(|p| p.to_string_lossy().into_owned()),
             tasks_dir_chosen: config.tasks_dir.is_some(),
             tasks_dir_suggested: folders::desktop_suggestion().map(|p| p.to_string_lossy().into_owned()),
+            notify: config.notify,
         }
     }
 

@@ -39,7 +39,10 @@ ureq = { version = "3.5.2", default-features = false, features = ["native-tls-no
 keyring = { version = "3.6.3", features = ["windows-native"] }
 # websocket to the user's own Chrome (DevTools protocol on 127.0.0.1, no TLS)
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
-tauri = { version = "2.12.5", features = [] }
+# tray-icon: quota gauge in the system tray (PLAN.md §7)
+tauri = { version = "2.12.5", features = ["tray-icon"] }
+# Windows toasts for new comments, steps that wait, quota levels
+tauri-plugin-notification = "2.4.0"
 tauri-build = { version = "2.7.4", features = [] }
 
 [workspace.lints.rust]

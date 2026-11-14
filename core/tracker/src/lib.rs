@@ -35,6 +35,9 @@ pub struct WorkPackage {
     pub status: String,
     pub project: String,
     pub description: String,
+    /// `updatedAt`: changes with any edit (a comment, the status, …), so the app only reloads
+    /// comments of tasks whose value moved.
+    pub updated_at: String,
 }
 
 #[derive(Deserialize)]
@@ -44,6 +47,7 @@ struct RawWp {
     subject: String,
     lock_version: u64,
     description: Option<RawFormattable>,
+    updated_at: Option<String>,
     #[serde(rename = "_links")]
     links: RawLinks,
 }
@@ -73,6 +77,7 @@ pub fn parse_work_package(v: &Value) -> TrackerResult<WorkPackage> {
         status: raw.links.status.title.unwrap_or_default(),
         project: raw.links.project.title.unwrap_or_default(),
         description: raw.description.and_then(|d| d.raw).unwrap_or_default(),
+        updated_at: raw.updated_at.unwrap_or_default(),
     })
 }
 
@@ -91,6 +96,8 @@ pub struct Comment {
     pub id: u64,
     pub created_at: String,
     pub raw: String,
+    /// Name of the writer, for the Comment tab only (the brief leaves it out).
+    pub author: Option<String>,
 }
 
 /// `GET /api/v3/work_packages/{id}/activities` → only activities that carry a comment.
@@ -109,6 +116,10 @@ pub fn comments_from_activities(v: &Value) -> Vec<Comment> {
                     .unwrap_or_default()
                     .to_owned(),
                 raw: raw.to_owned(),
+                author: a
+                    .pointer("/_links/user/title")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             })
         })
         .collect()
@@ -289,14 +300,17 @@ mod tests {
                        "project": {"href": "/api/v3/projects/208", "title": "Web Platform"}}});
         let parsed = parse_work_package_collection(&json!({"_embedded": {"elements": [wp]}})).unwrap();
         assert_eq!(parsed[0].status, "Open");
+        assert_eq!(parsed[0].updated_at, "");
         assert_eq!(parsed[0].lock_version, 3);
 
         let acts = json!({"_embedded": {"elements": [
             {"id": 1, "createdAt": "2026-11-12T01:00:00Z", "comment": {"raw": ""}},
-            {"id": 2, "createdAt": "2026-11-12T02:00:00Z", "comment": {"raw": " Lỗi khi lưu "}}]}});
+            {"id": 2, "createdAt": "2026-11-12T02:00:00Z", "comment": {"raw": " Lỗi khi lưu "},
+             "_links": {"user": {"href": "/api/v3/users/9", "title": "Tester A"}}}]}});
         let comments = comments_from_activities(&acts);
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].raw, "Lỗi khi lưu");
+        assert_eq!(comments[0].author.as_deref(), Some("Tester A"));
     }
 
     #[test]

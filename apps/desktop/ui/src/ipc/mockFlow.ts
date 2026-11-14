@@ -21,6 +21,7 @@ import type {
   ToolEvent,
 } from "./types";
 import { STEP_ORDER } from "../shared/steps";
+import { mockNewComments } from "./mockTask";
 
 /** How long a mock step "runs". */
 export const MOCK_STEP_MS = 2600;
@@ -407,6 +408,7 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     push: f.push,
     log: [...f.log, ...tools(f).map((t) => ({ at: t.at, kind: "tool" as const, text: t.name, step: f.current }))],
     costUsd: Object.values(f.costs).reduce((a, b) => a + (b ?? 0), 0),
+    newComments: mockNewComments(wpId),
   };
   if (f.phase === "running" && f.current && f.runStarted) {
     detail.running = { step: f.current, agent: agentOf(f.current), startedAt: f.runStarted, tools: tools(f), contextTokens: 182_000 };

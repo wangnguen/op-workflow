@@ -1,5 +1,6 @@
 // The only module that talks to Tauri. Outside Tauri (plain browser) it serves mock data.
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   mockAppInfo,
   mockBoard,
@@ -18,10 +19,22 @@ import {
   mockUpdate,
 } from "./mock";
 import { mockDecideFinding, mockFlowAction, mockSaveBrief, mockTaskDetail } from "./mockFlow";
+import {
+  mockAlerts,
+  mockMarkAlertsRead,
+  mockRefreshBriefComments,
+  mockSetNotify,
+  mockTaskComments,
+  mockTaskDiff,
+} from "./mockTask";
 import type {
+  AlertView,
   ApiError,
   AppInfo,
   BoardSnapshot,
+  CommentsView,
+  DiffView,
+  NotifyKind,
   CommandArgs,
   Commands,
   DeleteBranchRequest,
@@ -118,6 +131,40 @@ export const saveBrief = (wpId: number, text: string): Promise<TaskDetail> =>
   call("save_brief", () => mockSaveBrief(wpId, text), { wpId, text });
 /** Shows the task folder (brief, plan, push summary) in Explorer. */
 export const openTaskFolder = (wpId: number): Promise<null> => call("open_task_folder", () => null, { wpId });
+/** Comment tab: OpenProject comments (read now) and the last issue read; `markSeen` clears "mới". */
+export const getTaskComments = (wpId: number, markSeen: boolean): Promise<CommentsView> =>
+  call("task_comments", () => mockTaskComments(wpId, markSeen), { wpId, markSeen });
+/** Rewrites the brief's OpenProject comment section with the comments there now. */
+export const refreshBriefComments = (wpId: number): Promise<CommentsView> =>
+  call("refresh_brief_comments", () => mockRefreshBriefComments(wpId), { wpId });
+/** Diff tab: the task's change since its base (git, read-only); `markSeen` remembers it. */
+export const getTaskDiff = (wpId: number, markSeen: boolean): Promise<DiffView> =>
+  call("task_diff", () => mockTaskDiff(wpId, markSeen), { wpId, markSeen });
+
+// ---------- bell, notifications, tray ----------
+
+export const getAlerts = (): Promise<AlertView[]> => call("alerts", mockAlerts);
+/** Marks alerts read; no ids = all. */
+export const markAlertsRead = (ids: number[] = []): Promise<null> =>
+  call("mark_alerts_read", () => mockMarkAlertsRead(ids), { ids });
+/** Turns one kind of Windows notification on or off. */
+export const setNotify = (kind: NotifyKind, on: boolean): Promise<SettingsView> =>
+  call("set_notify", () => ({ ...mockSettings(), notify: mockSetNotify(kind, on) }), { kind, on });
+
+/** The tray icon asks to open the quota popover. Returns the unsubscribe function. */
+export function onOpenQuota(handler: () => void): () => void {
+  if (!isTauri()) return () => undefined;
+  let stop: (() => void) | undefined;
+  let done = false;
+  void listen("opw://open-quota", () => handler()).then((unlisten) => {
+    if (done) unlisten();
+    else stop = unlisten;
+  });
+  return () => {
+    done = true;
+    stop?.();
+  };
+}
 
 // ---------- update check ----------
 

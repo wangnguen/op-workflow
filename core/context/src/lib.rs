@@ -6,8 +6,9 @@ pub mod brief;
 pub mod prompts;
 
 pub use brief::{
-    BriefComment, BriefInput, BriefIssue, BriefIssueComment, ISSUE_HEADING, render_brief,
-    render_issue_section, replace_issue_section,
+    BriefComment, BriefInput, BriefIssue, BriefIssueComment, COMMENT_HEADING, ISSUE_HEADING,
+    newest_brief_comment, render_brief, render_comment_section, render_issue_section,
+    replace_comment_section, replace_issue_section,
 };
 
 use std::sync::LazyLock;
