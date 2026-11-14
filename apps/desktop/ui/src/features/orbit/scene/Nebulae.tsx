@@ -5,7 +5,7 @@ import type { ItemDragStart } from "../OrbitScene";
 import { nebulaLayout, type Point } from "../geometry";
 import type { LayoutOverrides } from "../useLayout";
 import { interactive } from "./interactive";
-import { truncate, wrapText } from "./text";
+import { textUnits, truncate, wrapText } from "./text";
 
 interface Props {
   inbox: InboxItem[];
@@ -21,8 +21,11 @@ const round1 = (n: number) => Math.round(n * 10) / 10;
 /** First label line sits this far below the nebula centre at full size. */
 const LABEL_Y = 50;
 const MIN_TEXT_SCALE = 0.85;
-/** Rough width of one character (11–12px Inter), to size label backdrops. */
-const CHAR_W = 6;
+/** Rough width of one text unit (a Latin character at 11–12px Inter; CJK takes two), to size
+ *  label backdrops. */
+const CHAR_W = 6.3;
+/** The bold card title runs a little wider. */
+const TITLE_CHAR_W = 6.8;
 const HINT_MAX_CHARS = 64;
 /** Full-title card shown on hover. */
 const CARD_LINE_CHARS = 38;
@@ -32,8 +35,8 @@ export const nebulaKey = (taskId: string) => `nebula:${taskId}`;
 
 /** Lines on a dark rounded card, centred on (0, top); drawn last so nothing covers it. */
 function TextCard({ at, title, lines }: { at: Point; title?: string; lines: string[] }) {
-  const longest = Math.max(...lines.map((l) => l.length), title?.length ?? 0);
-  const w = Math.round(longest * CHAR_W + 22);
+  const longest = Math.max(...lines.map((l) => textUnits(l) * CHAR_W), title ? textUnits(title) * TITLE_CHAR_W : 0);
+  const w = Math.round(longest + 24);
   const rows = lines.length + (title ? 1 : 0);
   const h = rows * CARD_LINE_H + 12;
   return (
@@ -59,7 +62,7 @@ function IdleCore({ count, notice }: { count: number; notice: string | undefined
   const full = notice ?? (count > 0 ? vi.orbit.noActiveHint : vi.orbit.inboxEmpty);
   const cut = full.length > HINT_MAX_CHARS;
   const hint = truncate(full, HINT_MAX_CHARS);
-  const w = Math.round(hint.length * CHAR_W + 24);
+  const w = Math.round(textUnits(hint) * CHAR_W + 24);
   return (
     <g className={`idle-core${notice ? " has-notice" : ""}`}>
       <circle r={44} className="idle-slot" />

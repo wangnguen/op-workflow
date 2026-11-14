@@ -3,6 +3,7 @@
 import type { QuotaSnapshot, QuotaWindow, Severity, StepKind } from "../../ipc/types";
 import { remainingPct } from "../quota/quota";
 import { STEP_ORDER } from "../../shared/steps";
+import { textUnits } from "./scene/text";
 
 export interface Point {
   x: number;
@@ -305,7 +306,7 @@ export function labelPosition(index: number, rot: Spin = 0, width = 96): LabelLa
 
 /** Rough width of a label in user units (Inter at the planet label sizes). */
 export function labelWidth(main: string, sub: string): number {
-  return Math.max(main.length * 7.2, sub.length * 6.2);
+  return Math.max(textUnits(main) * 7.2, textUnits(sub) * 6.2);
 }
 
 export function arcPath(r: number, startDeg: number, endDeg: number): string {
