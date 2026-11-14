@@ -1,5 +1,6 @@
 import { agentLabel, stepHint, stepLabel, stepStateLabel, vi } from "../../i18n/vi";
-import type { TaskCard } from "../../ipc/types";
+import type { FlowAction, Provider, TaskCard } from "../../ipc/types";
+import type { TaskTab } from "../task/taskTabs";
 import { formatUsd } from "../../shared/format";
 import { STEP_COUNT } from "../../shared/steps";
 import { Icon } from "../../shared/ui/Icon";
@@ -15,6 +16,12 @@ interface Props {
   /** "Lấy issue": read the task's GitHub issues into its brief */
   onIssues?: (card: TaskCard) => void;
   readingIssues?: boolean;
+  /** open the task window, optionally on one tab */
+  onOpen: (card: TaskCard, tab?: TaskTab) => void;
+  /** a workflow button (run, stop, retry, …) */
+  onFlow: (card: TaskCard, action: FlowAction) => void;
+  /** open `claude auth login` / `codex login` for a step that failed signed out */
+  onLogin?: (provider: Provider) => void;
 }
 
 const b = vi.board;
@@ -29,9 +36,14 @@ function projectTone(project: string): number {
 
 const monogram = (project: string) => (project.trim()[0] ?? "?").toUpperCase();
 
-const intakeDone = (card: TaskCard) => card.step?.kind === "intake" && card.step.state === "done";
+const f = vi.flow;
 
-function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssues }: Props) {
+/** Intake done and nothing after it yet: the brief is what exists, issues can still be read. */
+const beforeAnalyze = (card: TaskCard) =>
+  (card.step?.kind === "intake" && card.step.state === "done") ||
+  (card.step?.kind === "analyze" && card.step.state === "pending");
+
+function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssues, onOpen, onFlow, onLogin }: Props) {
   if (card.column === "inbox") {
     return (
       <button className="btn btn--primary btn--sm" onClick={() => onStart(card)}>
@@ -40,15 +52,98 @@ function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssue
       </button>
     );
   }
-  if (card.column === "awaitingPush") return <button className="btn btn--sm">{b.copy}</button>;
+  const open = (tab?: TaskTab) => (
+    <button className="btn btn--ghost btn--sm" title={f.openHint} onClick={() => onOpen(card, tab)}>
+      {f.open}
+    </button>
+  );
+  if (card.column === "awaitingPush") {
+    return (
+      <>
+        <button className="btn btn--sm" onClick={() => onOpen(card, "push")}>
+          {b.copy}
+        </button>
+        <button className="btn btn--primary btn--sm" title={f.finishHint} onClick={() => onFlow(card, { type: "finish" })}>
+          <Icon name="check" size={12} />
+          {f.finish}
+        </button>
+      </>
+    );
+  }
   const pause = (
     <button className="btn btn--ghost btn--sm" title={b.pauseHint} onClick={() => onPause(card)}>
       <Icon name="pause" size={12} />
       {b.pause}
     </button>
   );
-  // Intake done; the AI steps after it are not in the app yet, so the brief is what exists.
-  if (intakeDone(card)) {
+  const step = card.step;
+  if (step?.state === "running") {
+    return (
+      <>
+        {open("log")}
+        <button className="btn btn--sm" title={f.stopHint} onClick={() => onFlow(card, { type: "stop" })}>
+          <Icon name="pause" size={12} />
+          {f.stop}
+        </button>
+      </>
+    );
+  }
+  if (step?.state === "failed") {
+    const login = card.login;
+    return (
+      <>
+        {pause}
+        {open("log")}
+        {login && onLogin && (
+          <button className="btn btn--sm" title={vi.quota.loginHint(login === "codex" ? "Codex" : "Claude")} onClick={() => onLogin(login)}>
+            {f.login}
+          </button>
+        )}
+        <button className="btn btn--primary btn--sm" onClick={() => onFlow(card, { type: "retry" })}>
+          <Icon name="refresh" size={12} />
+          {f.retry}
+        </button>
+      </>
+    );
+  }
+  if (step?.state === "waitingUser") {
+    if (card.gate === "selfCode") {
+      return (
+        <>
+          {pause}
+          {open()}
+          <button className="btn btn--primary btn--sm" title={f.selfCodeDoneHint} onClick={() => onFlow(card, { type: "selfCodeDone" })}>
+            <Icon name="check" size={12} />
+            {f.selfCodeDone}
+          </button>
+        </>
+      );
+    }
+    const tab: TaskTab = card.gate === "mediumTriage" ? "findings" : "plan";
+    const label = card.gate === "mediumTriage" ? f.triage : b.reviewPlan;
+    return (
+      <>
+        {pause}
+        <button className="btn btn--primary btn--sm" onClick={() => onOpen(card, tab)}>
+          {label}
+        </button>
+      </>
+    );
+  }
+  if (step?.state === "pending" && step.kind !== "analyze") {
+    return (
+      <>
+        {pause}
+        {open()}
+        <button className="btn btn--primary btn--sm" title={f.runHint} onClick={() => onFlow(card, { type: "run" })}>
+          <Icon name="play" size={12} />
+          {f.run(stepLabel[step.kind])}
+        </button>
+      </>
+    );
+  }
+  // Before analyze: read the issues into the brief first, then run the analysis.
+  if (beforeAnalyze(card)) {
     return (
       <>
         {pause}
@@ -64,22 +159,24 @@ function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssue
           </button>
         )}
         {onBrief && (
-          <button className="btn btn--sm" title={b.briefHint} onClick={() => onBrief(card)}>
+          <button className="btn btn--ghost btn--sm btn--icon" title={b.brief} aria-label={b.brief} onClick={() => onBrief(card)}>
             <Icon name="file" size={13} />
-            {b.brief}
+          </button>
+        )}
+        {open("brief")}
+        {step?.kind === "analyze" && (
+          <button className="btn btn--primary btn--sm" title={f.runHint} onClick={() => onFlow(card, { type: "run" })}>
+            <Icon name="play" size={12} />
+            {f.run(stepLabel.analyze)}
           </button>
         )}
       </>
     );
   }
-  if (card.step?.state === "waitingUser") {
-    const label = card.step.kind === "analyze" ? b.reviewPlan : b.openTask;
-    return <button className="btn btn--primary btn--sm">{label}</button>;
-  }
   return (
     <>
       {pause}
-      <button className="btn btn--sm">{b.openTask}</button>
+      {open()}
     </>
   );
 }
@@ -115,7 +212,8 @@ export function TaskCardView(props: Props) {
         <div className={`card-line card-line--${step.state}`} title={stepHint[step.kind]}>
           <StatusIcon state={step.state} />
           <span className="card-line-text">
-            {b.step(step.index, stepLabel[step.kind])} · {stepStateLabel[step.state]}
+            {b.step(step.index, stepLabel[step.kind])} ·{" "}
+            {step.state === "pending" && card.column === "active" ? f.status.ready.toLowerCase() : stepStateLabel[step.state]}
           </span>
           <span className="card-steps" aria-hidden="true">
             {Array.from({ length: STEP_COUNT }, (_, i) => {
@@ -140,7 +238,13 @@ export function TaskCardView(props: Props) {
         </div>
       )}
 
-      {intakeDone(card) && <p className="card-note">{b.nextStep}</p>}
+      {card.flowNote ? (
+        <p className={`card-note${step?.state === "failed" ? " card-note--error" : ""}`} title={card.flowNote}>
+          {card.flowNote}
+        </p>
+      ) : (
+        beforeAnalyze(card) && <p className="card-note">{b.nextStep}</p>
+      )}
 
       {(card.agent || card.costUsd !== undefined) && (
         <div className="card-agent">

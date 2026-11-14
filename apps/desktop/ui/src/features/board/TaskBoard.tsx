@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { vi } from "../../i18n/vi";
-import { errorMessage, isMockMode, openBrief, pauseTask, setTasksDir } from "../../ipc/client";
+import { errorMessage, flowAction, isMockMode, openBrief, openLogin, pauseTask, setTasksDir } from "../../ipc/client";
 import type { BoardSnapshot, TaskColumn } from "../../ipc/types";
+import { TaskWindow } from "../task/TaskWindow";
+import type { TaskTab } from "../task/taskTabs";
 import { Icon } from "../../shared/ui/Icon";
 import { TaskCardView } from "./TaskCardView";
 import { joined, useStartWork } from "./useStartWork";
@@ -26,6 +28,7 @@ const COLUMNS: { key: Exclude<TaskColumn, "done">; title: string; hint: string }
 export function TaskBoard({ board, onSettings, onChanged }: Props) {
   const start = useStartWork({ tasks: board.tasks, onChanged });
   const [offerBusy, setOfferBusy] = useState(false);
+  const [opened, setOpened] = useState<{ wpId: number; tab?: TaskTab }>();
 
   const run = (action: Promise<unknown>) => {
     action.then(onChanged).catch((e: unknown) => start.setFlash({ kind: "warn", text: errorMessage(e) }));
@@ -97,6 +100,9 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
                     onBrief={isMockMode() ? undefined : (c) => run(openBrief(c.wpId))}
                     onIssues={start.readIssues}
                     readingIssues={start.reading.has(card.wpId)}
+                    onOpen={(c, tab) => setOpened({ wpId: c.wpId, tab })}
+                    onFlow={(c, action) => run(flowAction(c.wpId, action))}
+                    onLogin={(p) => run(openLogin(p))}
                   />
                 ))}
               </div>
@@ -105,6 +111,9 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
         })}
       </div>
       {start.dialog}
+      {opened && (
+        <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={onChanged} />
+      )}
     </div>
   );
 }

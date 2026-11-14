@@ -7,6 +7,13 @@
 | Mẫu tên branch | `core/domain/src/task.rs`, config `projects.*.branch` | App không đổi trạng thái OpenProject; bạn tự đổi. `infer_branch_template` đoán mẫu từ nhánh có sẵn |
 | Hộp "Bắt đầu làm việc" (tìm repo, nhánh, tạo branch, brief) | `core/orchestrator/src/start.rs`, `core/vcs/src/discover.rs`, `apps/desktop/ui/src/features/board/StartWorkDialog.tsx` | Test dùng repo git tạm; không push |
 | Mẫu `brief.md` | `core/context/src/brief.rs` | Luôn đi qua `redact` |
+| Chạy các bước 2–8 (thứ tự, cổng, dừng sau mỗi bước, kiểm tra git trước/sau) | `core/orchestrator/src/flow.rs` (`Flow`, `run_step`, `git_surprise`) | Test dùng `Launcher` giả trên repo git tạm, không gọi AI thật. Trạng thái lưu ở bảng `flow` (JSON của `Saved`) |
+| Prompt từng bước (plan, code, fix, review, push summary) | `core/context/src/prompts.rs` | Brief/issue bọc trong thẻ và gọi là dữ liệu (chống prompt injection) |
+| Cờ dòng lệnh của từng bước | `core/agents/src/claude.rs` (`analyze_args`, `code_args`, `review_args`, …), `core/agents/src/codex.rs` | Bước nào cũng có `--tools`, `--strict-mcp-config`, `--max-budget-usd`; test khoá danh sách cờ |
+| Đọc lỗi review từ câu trả lời, khối commit/PR | `core/agents/src/text.rs` | Ưu tiên khối JSON, sau đó mốc 🔴/🟠/🟡/🔵 và `[High]`; không đọc được thì bước lỗi (không coi là sạch) |
+| Chạy tiến trình AI (stdin, đọc từng dòng, Dừng, timeout) | `core/agents/src/run.rs`, `CliLauncher` trong `flow.rs` | Kill cả cây tiến trình (`taskkill /T /F`); luôn kèm `guard_env` |
+| Giới hạn tiền/thời gian, tự chạy bước tiếp | config `steps` (`opw_config::StepsConfig`), `flow::limits` | Không ghi thì dùng mặc định trong `limits` |
+| Cửa sổ task (tab Brief/Plan/Lỗi review/Push/Log) | `apps/desktop/ui/src/features/task/` | Bản xem trước dùng `ipc/mockFlow.ts` (các bước giả, cùng luật với `flow.rs`) |
 | Kiểm tra bản mới | `core/update/src/lib.rs`, `core/orchestrator/src/updater.rs`, config `update` | Chỉ GET GitHub Releases; không tự tải, không tự cài |
 | Field gửi qua IPC | `core/domain/src/view.rs` **và** `apps/desktop/ui/src/ipc/types.ts` | Sửa cả hai; test `view::tests` khoá JSON |
 | Lệnh IPC mới | `apps/desktop/src-tauri/src/*_api.rs` + đăng ký trong `main.rs` + `Commands` trong `types.ts` | |

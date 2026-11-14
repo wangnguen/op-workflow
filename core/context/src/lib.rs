@@ -3,6 +3,7 @@
 //! Redaction and the task brief. Handoff templates come in Phase 3.
 
 pub mod brief;
+pub mod prompts;
 
 pub use brief::{
     BriefComment, BriefInput, BriefIssue, BriefIssueComment, ISSUE_HEADING, render_brief,

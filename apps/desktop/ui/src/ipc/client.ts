@@ -17,6 +17,7 @@ import {
   mockStartTask,
   mockUpdate,
 } from "./mock";
+import { mockDecideFinding, mockFlowAction, mockSaveBrief, mockTaskDetail } from "./mockFlow";
 import type {
   ApiError,
   AppInfo,
@@ -24,6 +25,8 @@ import type {
   CommandArgs,
   Commands,
   DeleteBranchRequest,
+  FindingDecision,
+  FlowAction,
   IssueFetch,
   OrbitSnapshot,
   Provider,
@@ -32,6 +35,7 @@ import type {
   StartOptions,
   StartRequest,
   StartResult,
+  TaskDetail,
   TasksDirChange,
   UpdateView,
 } from "./types";
@@ -97,6 +101,23 @@ export const setTasksDir = (dir?: string): Promise<TasksDirChange> =>
   call("set_tasks_dir", () => mockSetTasksDir(dir), { dir });
 /** Shows the task's brief.md in Explorer. */
 export const openBrief = (wpId: number): Promise<null> => call("open_brief", () => null, { wpId });
+
+// ---------- workflow (steps 2-8) ----------
+
+/** Brief, plan, findings, push summary and log of one task in progress. */
+export const getTaskDetail = (wpId: number): Promise<TaskDetail> =>
+  call("task_detail", () => mockTaskDetail(wpId), { wpId });
+/** Run / stop / retry a step, approve or reject the plan, finish the task, … */
+export const flowAction = (wpId: number, action: FlowAction): Promise<TaskDetail> =>
+  call("flow_action", () => mockFlowAction(wpId, action), { wpId, action });
+/** Fix / accept / defer one review finding. */
+export const decideFinding = (decision: FindingDecision): Promise<TaskDetail> =>
+  call("decide_finding", () => mockDecideFinding(decision), { decision });
+/** Save the brief the user edited before the AI reads it. */
+export const saveBrief = (wpId: number, text: string): Promise<TaskDetail> =>
+  call("save_brief", () => mockSaveBrief(wpId, text), { wpId, text });
+/** Shows the task folder (brief, plan, push summary) in Explorer. */
+export const openTaskFolder = (wpId: number): Promise<null> => call("open_task_folder", () => null, { wpId });
 
 // ---------- update check ----------
 

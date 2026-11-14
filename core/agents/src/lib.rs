@@ -5,6 +5,8 @@ pub mod claude;
 pub mod cli;
 pub mod codex;
 pub mod env;
+pub mod run;
+pub mod text;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentsError {

@@ -15,6 +15,7 @@ import { useCompactionMarkers } from "./useCompactionMarkers";
 import { useLayout } from "./useLayout";
 import { useMotionClock } from "./motion";
 import "./orbit.css";
+import type { TaskTab } from "../task/taskTabs";
 
 interface Props {
   snapshot: OrbitSnapshot;
@@ -24,6 +25,8 @@ interface Props {
   onFocus?: (taskId: string | null) => void;
   /** "Bắt đầu làm việc" on an Inbox task picked on the map */
   onStartTask?: (taskId: string) => void;
+  /** open the task window of a task in progress */
+  onOpenTask?: (taskId: string, tab?: TaskTab) => void;
   /** the map is hidden (Phiên shows Bảng): stop the motion, keep the angle */
   paused?: boolean;
 }
@@ -47,7 +50,7 @@ function statusLine(s: OrbitSnapshot): string {
   return parts.join(" · ");
 }
 
-export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, onStartTask, paused = false }: Props) {
+export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, onStartTask, onOpenTask, paused = false }: Props) {
   const [picked, setPicked] = useState<Selection | null>(null);
   // several tasks can be in progress; the picked one sits in the centre
   const [ownFocus, setOwnFocus] = useState<string | null>(null);
@@ -151,7 +154,7 @@ ${vi.orbit.systemPick}`,
           </button>
         </div>
       </div>
-      <DetailPanel snapshot={snapshot} selection={selection} onSelect={setPicked} now={now} onStartTask={onStartTask} />
+      <DetailPanel snapshot={snapshot} selection={selection} onSelect={setPicked} now={now} onStartTask={onStartTask} onOpenTask={onOpenTask} />
     </div>
   );
 }

@@ -238,6 +238,17 @@
   color: var(--text-faint);
   font-size: 11.5px;
   line-height: 1.45;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.card-note:hover {
+  -webkit-line-clamp: unset;
+}
+.card-note--error {
+  border-left-color: var(--st-failed);
+  color: color-mix(in srgb, var(--st-failed) 70%, var(--text));
 }
 .card-agent {
   display: flex;

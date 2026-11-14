@@ -8,6 +8,8 @@
 //!   -> finalReview (/review-local again) -> <critical/high: fix, then crossReview again
 //!                                           | medium: triage gate> -> pushSummary -> done
 //! ```
+//! At the plan gate the user can also code by hand (`SelfCode`): the workflow waits until they
+//! say they are done, then reviews their change like an AI implementation.
 //! The machine never commits or pushes; after `pushSummary` the task waits for the user.
 
 use serde::{Deserialize, Serialize};
@@ -82,7 +84,8 @@ pub enum StepState {
 }
 
 /// Where the workflow as a whole stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Phase {
     NotStarted,
     Running(StepKind),
@@ -101,6 +104,10 @@ pub enum WorkflowEvent {
     PlanApproved,
     /// User gave feedback on the plan; analyze runs again.
     PlanRejected,
+    /// At the plan gate: the user codes this one by hand.
+    SelfCode,
+    /// The user finished coding by hand; review it.
+    SelfCodeDone,
     /// First `/review-local` finished. `blocking` = findings to fix before Codex reviews.
     ReviewLocalFinished {
         blocking: usize,
@@ -114,12 +121,18 @@ pub enum WorkflowEvent {
         critical_or_high: usize,
         medium_undecided: usize,
     },
-    MediumTriaged,
+    /// Every medium finding of the final review is decided; `fix` of them go back to a fix.
+    MediumTriaged {
+        fix: usize,
+    },
+    /// Write the push summary again (another issue number, or the user changed the code).
+    RedoPushSummary,
     Pause,
     Resume,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Workflow {
     states: [StepState; STEP_COUNT],
     phase: Phase,
@@ -159,11 +172,27 @@ impl Workflow {
         self.round
     }
 
+    pub fn max_rounds(&self) -> u8 {
+        self.max_rounds
+    }
+
+    /// The step that failed, while waiting at the error gate.
+    pub fn failed_step(&self) -> Option<StepKind> {
+        match self.phase {
+            Phase::Gate(GateKind::Error) => self.current_step(),
+            _ => None,
+        }
+    }
+
     pub fn current_step(&self) -> Option<StepKind> {
         match self.phase {
             Phase::Running(step) => Some(step),
             Phase::Gate(GateKind::PlanReview) => Some(StepKind::Analyze),
             Phase::Gate(GateKind::MediumTriage) => Some(StepKind::FinalReview),
+            Phase::Gate(GateKind::SelfCode) => Some(StepKind::Implement),
+            Phase::Gate(GateKind::Error) => StepKind::ALL
+                .into_iter()
+                .find(|s| self.state_of(*s) == StepState::Failed),
             _ => None,
         }
     }
@@ -195,6 +224,16 @@ impl Workflow {
                 self.run(StepKind::Implement)
             }
             (Phase::Gate(GateKind::PlanReview), E::PlanRejected) => self.run(StepKind::Analyze),
+            (Phase::Gate(GateKind::PlanReview), E::SelfCode) => {
+                self.set(StepKind::Analyze, StepState::Done);
+                self.set(StepKind::Implement, StepState::WaitingUser);
+                self.phase = Phase::Gate(GateKind::SelfCode);
+                Ok(())
+            }
+            (Phase::Gate(GateKind::SelfCode), E::SelfCodeDone) => {
+                self.set(StepKind::Implement, StepState::Done);
+                self.run(StepKind::ReviewLocal)
+            }
 
             (Phase::Running(StepKind::ReviewLocal), E::ReviewLocalFinished { blocking }) => {
                 self.set(StepKind::ReviewLocal, StepState::Done);
@@ -233,10 +272,16 @@ impl Workflow {
                     self.run(StepKind::PushSummary)
                 }
             }
-            (Phase::Gate(GateKind::MediumTriage), E::MediumTriaged) => {
+            (Phase::Gate(GateKind::MediumTriage), E::MediumTriaged { fix }) => {
                 self.set(StepKind::FinalReview, StepState::Done);
-                self.run(StepKind::PushSummary)
+                if fix > 0 {
+                    self.run(StepKind::Fix)
+                } else {
+                    self.run(StepKind::PushSummary)
+                }
             }
+
+            (Phase::AwaitingPush, E::RedoPushSummary) => self.run(StepKind::PushSummary),
 
             (phase @ (Phase::Running(_) | Phase::Gate(_)), E::Pause) => {
                 self.paused_from = Some(phase);
@@ -361,6 +406,9 @@ mod tests {
         wf.apply(clean_final()).unwrap();
         wf.apply(E::StepSucceeded(StepKind::PushSummary)).unwrap();
         assert_eq!(wf.phase(), Phase::AwaitingPush);
+        let mut again = wf.clone();
+        again.apply(E::RedoPushSummary).unwrap();
+        assert_eq!(again.phase(), Phase::Running(StepKind::PushSummary));
         assert!(
             StepKind::ALL
                 .iter()
@@ -433,8 +481,48 @@ mod tests {
         .unwrap();
         assert_eq!(wf.phase(), Phase::Gate(GateKind::MediumTriage));
         assert_eq!(wf.current_step(), Some(StepKind::FinalReview));
-        wf.apply(E::MediumTriaged).unwrap();
+        wf.apply(E::MediumTriaged { fix: 0 }).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::PushSummary));
+    }
+
+    #[test]
+    fn mediums_picked_for_fixing_go_through_fix_and_codex_again() {
+        let mut wf = started_to_review();
+        wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
+        wf.apply(E::FinalReviewFinished {
+            critical_or_high: 0,
+            medium_undecided: 1,
+        })
+        .unwrap();
+        wf.apply(E::MediumTriaged { fix: 1 }).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::Fix));
+        wf.apply(E::StepSucceeded(StepKind::Fix)).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::CrossReview));
+    }
+
+    #[test]
+    fn user_can_code_by_hand_then_reviews_run() {
+        let mut wf = Workflow::default();
+        wf.apply(E::Start).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Intake)).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Analyze)).unwrap();
+        wf.apply(E::SelfCode).unwrap();
+        assert_eq!(wf.phase(), Phase::Gate(GateKind::SelfCode));
+        assert_eq!(wf.state_of(StepKind::Implement), StepState::WaitingUser);
+        assert_eq!(wf.current_step(), Some(StepKind::Implement));
+        assert!(wf.apply(E::SelfCodeDone).is_ok());
+        assert_eq!(wf.phase(), Phase::Running(StepKind::ReviewLocal));
+        assert_eq!(wf.state_of(StepKind::Implement), StepState::Done);
+    }
+
+    #[test]
+    fn state_survives_a_round_trip_through_json() {
+        let mut wf = started_to_review();
+        wf.apply(E::CrossReviewFinished { blocking: 1 }).unwrap();
+        wf.apply(E::StepFailed(StepKind::Fix)).unwrap();
+        let back: Workflow = serde_json::from_str(&serde_json::to_string(&wf).unwrap()).unwrap();
+        assert_eq!(back, wf);
+        assert_eq!(back.failed_step(), Some(StepKind::Fix));
     }
 
     #[test]

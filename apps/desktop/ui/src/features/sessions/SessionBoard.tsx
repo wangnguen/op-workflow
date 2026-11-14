@@ -13,6 +13,8 @@ interface Props {
   onBrief?: (taskId: string) => void;
   /** tasks whose issues are being read right now */
   reading?: ReadonlySet<string>;
+  /** open the task window (brief, plan, findings, push, log) */
+  onOpen?: (taskId: string) => void;
 }
 
 const AVATAR: Record<AgentKind, string> = { claude: "CL", codex: "CX", shell: "SH" };
@@ -23,7 +25,7 @@ const COLUMNS: { key: SessionStatus; title: string; hint: string }[] = [
   { key: "idle", title: vi.sessions.idle, hint: vi.sessions.idleHint },
 ];
 
-function Card({ s, onShow, onIssues, onBrief, reading }: { s: SessionItem } & Omit<Props, "snapshot">) {
+function Card({ s, onShow, onIssues, onBrief, onOpen, reading }: { s: SessionItem } & Omit<Props, "snapshot">) {
   const taskId = s.taskId;
   const isTask = !s.agent;
   return (
@@ -80,7 +82,12 @@ function Card({ s, onShow, onIssues, onBrief, reading }: { s: SessionItem } & Om
             {vi.board.brief}
           </button>
         )}
-        {!isTask && (
+        {taskId && s.inApp && onOpen && (
+          <button className="btn btn--sm" title={vi.flow.openHint} onClick={() => onOpen(taskId)}>
+            {vi.flow.open}
+          </button>
+        )}
+        {!s.inApp && (
           <button className="btn btn--sm" disabled title={vi.sessions.openPaneLater}>
             {vi.sessions.openPane}
           </button>

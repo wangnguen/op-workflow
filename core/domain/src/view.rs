@@ -38,6 +38,8 @@ pub enum GateKind {
     MediumTriage,
     AgentQuestion,
     Error,
+    /// The user chose to code this task by hand at the plan gate.
+    SelfCode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +163,15 @@ pub struct TaskCard {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_pct: Option<f64>,
     pub new_comments: u32,
+    /// What the task waits for, when it waits for the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<GateKind>,
+    /// One line about the workflow (the error of a failed step, the next step, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_note: Option<String>,
+    /// The failed step needs this provider signed in again ("Đăng nhập" on the card).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<Provider>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -480,6 +491,22 @@ pub struct FindingView {
     pub line: Option<u32>,
     pub source: String,
     pub state: FindingState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+    /// Why the user accepted it (or left it for later).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The user asked for this one to be fixed (counts even when it is only low).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chosen: bool,
+    /// Cross-review round that reported it last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<u8>,
+    /// Step that reported it last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<StepKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -507,6 +534,178 @@ pub struct TaskSystem {
     pub new_comments: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateView>,
+}
+
+// ---------- workflow (steps 2-8) ----------
+
+/// Where a task's workflow stands, as the task window and the card buttons need it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FlowStatus {
+    /// Intake not done yet (should not happen for a started task).
+    NotStarted,
+    /// `current` is the next step; it runs when the user presses Run (or by itself when
+    /// auto-advance is on).
+    Ready,
+    /// An AI process is working on `current` right now.
+    Running,
+    /// Waiting for the user: see `gate`.
+    Gate,
+    /// push-summary is ready; the user reviews, commits and pushes by hand.
+    AwaitingPush,
+    /// The user said the push is done.
+    Done,
+}
+
+/// Why the last step failed, and whether signing in may help.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowError {
+    /// `agent.missing`, `agent.signedOut`, `step.failed`, `step.stopped`, `step.timeout`,
+    /// `step.budget`, `git.unexpected`, `findings.parse`, `repo.busy`, `repo.branch`, ...
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+}
+
+/// The AI process running a step right now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunView {
+    pub step: StepKind,
+    pub agent: AgentKind,
+    pub started_at: String,
+    /// Newest last.
+    pub tools: Vec<ToolEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+}
+
+/// One fenced block of the push summary (commit message, PR description, ...), copied as is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushBlock {
+    pub label: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushView {
+    /// Issue number passed to `/push-summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<u64>,
+    /// Whole answer, markdown.
+    pub text: String,
+    pub blocks: Vec<PushBlock>,
+}
+
+/// One line of the task's log tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogLine {
+    pub at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<StepKind>,
+    /// `info`, `tool`, `ok`, `error`
+    pub kind: String,
+    pub text: String,
+}
+
+/// Everything the task window shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDetail {
+    pub wp_id: u64,
+    pub task_id: String,
+    pub title: String,
+    pub project: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    pub status: FlowStatus,
+    /// Step that runs next, runs now, failed, or waits for the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<StepKind>,
+    pub steps: Vec<StepView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<GateView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<FlowError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<RunView>,
+    pub round: u8,
+    pub max_rounds: u8,
+    /// Run the next step by itself after one finishes (off: stop after each step).
+    pub auto_advance: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    pub findings: Vec<FindingView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<PushView>,
+    /// Newest last.
+    pub log: Vec<LogLine>,
+    pub cost_usd: f64,
+}
+
+/// A button in the task window or on the card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum FlowAction {
+    /// Run the current step (the one shown as ready).
+    Run,
+    /// Stop the running step; it can be retried.
+    Stop,
+    /// Run the failed step again.
+    Retry,
+    /// Plan gate: the AI codes the plan.
+    ApprovePlan,
+    /// Plan gate: analyze again with this feedback.
+    RejectPlan { feedback: String },
+    /// Plan gate: the user codes by hand.
+    SelfCode,
+    /// The user finished coding by hand.
+    SelfCodeDone,
+    /// Every medium finding is decided: continue.
+    FinishTriage,
+    /// Write the push summary again (optionally for another issue number).
+    RerunPush {
+        #[serde(default)]
+        issue: Option<u64>,
+    },
+    /// The user pushed: the task leaves the board.
+    Finish,
+    /// Turn auto-advance on/off for this task.
+    SetAuto { on: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Decision {
+    /// Fix it in the next fix step.
+    Fix,
+    /// Keep the code; `reason` says why.
+    Accept,
+    /// Leave it for later.
+    Defer,
+    /// Back to undecided.
+    Reset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingDecision {
+    pub wp_id: u64,
+    pub fingerprint: String,
+    pub decision: Decision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -571,6 +770,9 @@ mod tests {
             cost_usd: None,
             context_pct: Some(24.0),
             new_comments: 2,
+            gate: None,
+            flow_note: None,
+            login: None,
         };
         let v = serde_json::to_value(&card).unwrap();
         assert_eq!(
@@ -650,9 +852,29 @@ mod tests {
             "finalReview"
         );
         assert_eq!(s(serde_json::to_value(Severity::Critical).unwrap()), "critical");
+        assert_eq!(s(serde_json::to_value(GateKind::SelfCode).unwrap()), "selfCode");
+        assert_eq!(
+            s(serde_json::to_value(FlowStatus::AwaitingPush).unwrap()),
+            "awaitingPush"
+        );
         assert_eq!(
             s(serde_json::to_value(SessionStatus::Waiting).unwrap()),
             "waiting"
         );
+    }
+
+    #[test]
+    fn flow_actions_match_ts() {
+        let a: FlowAction = serde_json::from_value(json!({"type": "rejectPlan", "feedback": "x"})).unwrap();
+        assert_eq!(a, FlowAction::RejectPlan { feedback: "x".into() });
+        let a: FlowAction = serde_json::from_value(json!({"type": "rerunPush"})).unwrap();
+        assert_eq!(a, FlowAction::RerunPush { issue: None });
+        let a: FlowAction = serde_json::from_value(json!({"type": "setAuto", "on": true})).unwrap();
+        assert_eq!(a, FlowAction::SetAuto { on: true });
+        let d: FindingDecision = serde_json::from_value(json!({
+            "wpId": 1, "fingerprint": "ab", "decision": "accept", "reason": "ok"
+        }))
+        .unwrap();
+        assert_eq!(d.decision, Decision::Accept);
     }
 }

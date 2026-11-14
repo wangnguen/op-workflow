@@ -1,4 +1,4 @@
-import { stepLabel, vi } from "../../i18n/vi";
+import { gateLabel, stepLabel, vi } from "../../i18n/vi";
 import type { AgentKind, AgentView, OrbitSnapshot, SessionStatus, TaskSystem } from "../../ipc/types";
 
 export interface SessionItem {
@@ -47,13 +47,20 @@ export function groupSessions(s: OrbitSnapshot): SessionGroups {
       continue;
     }
     for (const agent of flatten(a.agents)) {
-      const status: SessionStatus = a.gate && agent === a.agents[0] ? "waiting" : agent.status;
+      const main = agent === a.agents[0];
+      const status: SessionStatus = a.gate && main ? "waiting" : agent.status;
+      const detail =
+        a.gate && main
+          ? gateLabel[a.gate.kind]
+          : main && agent.status === "idle"
+            ? vi.flow.ready(stepLabel[agent.step])
+            : a.repo;
       groups[status].push({
         id: agent.id,
         agent: agent.kind,
         taskId: a.taskId,
         title: `${a.taskId} · ${stepLabel[agent.step]}`,
-        detail: a.repo,
+        detail,
         status,
         contextPct: agent.handoffAt > 0 ? (agent.contextTokens / agent.handoffAt) * 100 : undefined,
         inApp: true,

@@ -116,6 +116,13 @@ pub fn now_rfc3339() -> String {
     OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default()
 }
 
+/// `hours` ago, in the same UTC form as [`now_rfc3339`] (so the strings compare in time order).
+pub fn hours_ago_rfc3339(hours: u32) -> String {
+    (OffsetDateTime::now_utc() - time::Duration::hours(i64::from(hours)))
+        .format(&Rfc3339)
+        .unwrap_or_default()
+}
+
 fn codex_windows(v: &Value, used_key: &str, mins_key: &str, reset_key: &str) -> Vec<QuotaWindow> {
     ["primary", "secondary"]
         .iter()

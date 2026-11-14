@@ -208,6 +208,13 @@ impl Live {
         }
     }
 
+    /// Quota read from a workflow step's own `rate_limit_event` (every headless Claude run
+    /// reports it for free, PLAN.md §9).
+    pub fn observe_claude(&self, snap: QuotaSnapshot) {
+        update(&self.state, |s| s.claude = Some(snap));
+        set_link(&self.state, Provider::Claude, LinkStatus::Ok, None);
+    }
+
     /// Fetch tasks now instead of waiting for the next poll.
     pub fn refresh(&self) {
         let _ = self.wake_tasks.send(());

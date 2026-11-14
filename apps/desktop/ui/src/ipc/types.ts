@@ -18,7 +18,7 @@ export type SessionStatus = "running" | "waiting" | "idle";
 
 export type TaskColumn = "inbox" | "active" | "awaitingPush" | "done";
 
-export type GateKind = "planReview" | "mediumTriage" | "agentQuestion" | "error";
+export type GateKind = "planReview" | "mediumTriage" | "agentQuestion" | "error" | "selfCode";
 
 export interface AppInfo {
   version: string;
@@ -60,7 +60,7 @@ export interface QuotaSnapshot {
 
 export interface StepRef {
   kind: StepKind;
-  /** 1..7 */
+  /** 1..8 */
   index: number;
   state: StepState;
   since: string;
@@ -86,6 +86,12 @@ export interface TaskCard {
   /** 0..100, share of the handoff threshold */
   contextPct?: number;
   newComments: number;
+  /** what the task waits for, when it waits for the user */
+  gate?: GateKind;
+  /** one line about the workflow: the error of a failed step, what the gate needs */
+  flowNote?: string;
+  /** the failed step needs this provider signed in again */
+  login?: Provider;
 }
 
 export interface TodayStats {
@@ -319,6 +325,16 @@ export interface FindingView {
   /** "codex", "claude", "review-local" */
   source: string;
   state: FindingState;
+  detail?: string;
+  suggestion?: string;
+  /** why the user accepted (or deferred) it */
+  reason?: string;
+  /** the user asked for it to be fixed */
+  chosen?: boolean;
+  /** cross-review round that reported it last */
+  round?: number;
+  /** step that reported it last */
+  step?: StepKind;
 }
 
 export interface GateView {
@@ -367,6 +383,98 @@ export interface OrbitSnapshot {
   notice?: string;
 }
 
+// ---------- workflow (steps 2-8) ----------
+
+/** ready = the current step runs when the user presses Run; gate = waits for the user. */
+export type FlowStatus = "notStarted" | "ready" | "running" | "gate" | "awaitingPush" | "done";
+
+export interface FlowError {
+  /** agent.missing, agent.signedOut, step.failed, step.stopped, step.timeout, step.budget, git.unexpected, … */
+  code: string;
+  message: string;
+  /** signing in to this provider may help */
+  provider?: Provider;
+}
+
+export interface RunView {
+  step: StepKind;
+  agent: AgentKind;
+  startedAt: string;
+  /** newest last */
+  tools: ToolEvent[];
+  contextTokens?: number;
+}
+
+export interface PushBlock {
+  label: string;
+  text: string;
+}
+
+export interface PushView {
+  issue?: number;
+  /** whole answer, markdown */
+  text: string;
+  blocks: PushBlock[];
+}
+
+export interface LogLine {
+  at: string;
+  step?: StepKind;
+  kind: "info" | "tool" | "ok" | "error";
+  text: string;
+}
+
+/** Everything the task window shows. */
+export interface TaskDetail {
+  wpId: number;
+  taskId: string;
+  title: string;
+  project: string;
+  repo?: string;
+  branch?: string;
+  base?: string;
+  status: FlowStatus;
+  /** step that runs next, runs now, failed, or waits for the user */
+  current?: StepKind;
+  steps: StepView[];
+  gate?: GateView;
+  error?: FlowError;
+  running?: RunView;
+  round: number;
+  maxRounds: number;
+  /** run the next step by itself (off: stop after each step) */
+  autoAdvance: boolean;
+  brief?: string;
+  plan?: string;
+  findings: FindingView[];
+  push?: PushView;
+  /** newest last */
+  log: LogLine[];
+  costUsd: number;
+}
+
+export type FlowAction =
+  | { type: "run" }
+  | { type: "stop" }
+  | { type: "retry" }
+  | { type: "approvePlan" }
+  | { type: "rejectPlan"; feedback: string }
+  | { type: "selfCode" }
+  | { type: "selfCodeDone" }
+  | { type: "finishTriage" }
+  | { type: "rerunPush"; issue?: number }
+  | { type: "finish" }
+  | { type: "setAuto"; on: boolean };
+
+export type Decision = "fix" | "accept" | "defer" | "reset";
+
+export interface FindingDecision {
+  wpId: number;
+  fingerprint: string;
+  decision: Decision;
+  reason?: string;
+}
+
 // ---------- commands ----------
 
 /** Tauri command names → result type. Arguments are listed in `CommandArgs`. */
@@ -395,6 +503,11 @@ export interface Commands {
   fetch_issues: IssueFetch;
   open_browser_debug: null;
   set_tasks_dir: TasksDirChange;
+  task_detail: TaskDetail;
+  flow_action: TaskDetail;
+  decide_finding: TaskDetail;
+  save_brief: TaskDetail;
+  open_task_folder: null;
 }
 
 export interface CommandArgs {
@@ -411,4 +524,9 @@ export interface CommandArgs {
   reveal_path: { path: string };
   fetch_issues: { wpId: number };
   set_tasks_dir: { dir?: string };
+  task_detail: { wpId: number };
+  flow_action: { wpId: number; action: FlowAction };
+  decide_finding: { decision: FindingDecision };
+  save_brief: { wpId: number; text: string };
+  open_task_folder: { wpId: number };
 }

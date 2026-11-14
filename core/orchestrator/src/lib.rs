@@ -2,9 +2,11 @@
 //!
 //! [`AppService`] is the facade used by the Tauri commands. Without an OpenProject token it serves
 //! the [`demo`] timeline; once a token is saved it serves the real task inbox from [`live`], plus
-//! the task the user started ([`start`]). Quota and the update check need no token.
+//! the task the user started ([`start`]) and its workflow steps 2-8 ([`flow`]). Quota and the
+//! update check need no token.
 
 pub mod demo;
+pub mod flow;
 pub mod folders;
 pub mod issues;
 pub mod live;
@@ -14,20 +16,22 @@ pub mod start;
 pub mod updater;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use opw_config::{Config, secrets};
 use opw_domain::task::display_id;
 use opw_domain::view::{
-    ApiError, AppInfo, BoardSnapshot, DataMode, DeleteBranchRequest, InboxItem, IssueFetch, OrbitSnapshot,
-    ProjectMemory, Provider, QuotaSnapshot, RepoState, SettingsView, StartOptions, StartRequest, StartResult,
-    StepRef, StepView, TaskCard, TaskColumn, TaskSystem, TasksDirChange, TodayStats, UpdateView,
+    ApiError, AppInfo, BoardSnapshot, DataMode, DeleteBranchRequest, FindingDecision, FlowAction, InboxItem,
+    IssueFetch, OrbitSnapshot, ProjectMemory, Provider, QuotaSnapshot, RepoState, SettingsView, StartOptions,
+    StartRequest, StartResult, StepRef, StepView, TaskCard, TaskColumn, TaskDetail, TaskSystem,
+    TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
 use opw_tracker::{HttpTracker, TrackerApi, WorkPackage};
 
+use crate::flow::{CliLauncher, Flow, TaskCtx};
 use crate::live::{Live, LiveSettings, LiveState};
 use crate::updater::Updater;
 
@@ -37,6 +41,10 @@ const DB_FILE: &str = "opw.db";
 const NO_URL_NOTICE: &str = "Chưa có URL OpenProject cho bản này. Mở Cài đặt → OpenProject, nhập URL rồi bấm Kiểm tra & lưu (token đã lưu thì không cần dán lại).";
 pub(crate) const COLUMN_ACTIVE: &str = "active";
 const COLUMN_INBOX: &str = "inbox";
+/// The user pushed: the task leaves the board.
+const COLUMN_DONE: &str = "done";
+/// "Hôm nay" on the bottom bar: the last 24 hours.
+const TODAY_HOURS: u32 = 24;
 
 /// Facade used by the Tauri commands. Every method returns plain view DTOs.
 #[derive(Debug, Default)]
@@ -45,13 +53,15 @@ pub struct AppService {
     config: Mutex<Config>,
     config_path: Option<PathBuf>,
     data_dir: Option<PathBuf>,
-    live: Option<Live>,
-    store: Option<Mutex<Store>>,
+    live: Option<Arc<Live>>,
+    store: Option<Arc<Mutex<Store>>>,
     store_error: Option<String>,
     /// Cache of the tasks in the "Đang làm" column (most recent first), so snapshots do not
     /// hit SQLite. Several tasks can be in progress at once.
     active: Mutex<Vec<TaskRow>>,
     updater: Option<Updater>,
+    /// Steps 2-8; `None` without local storage.
+    flow: Option<Flow>,
 }
 
 impl AppService {
@@ -81,7 +91,7 @@ impl AppService {
             claude_probe_model: config.quota.claude_probe_model.clone(),
             probe_dir,
         };
-        let live = Live::start(settings, config.tracker.base_url.clone(), token);
+        let live = Arc::new(Live::start(settings, config.tracker.base_url.clone(), token));
         let (store, store_error) = match open_store(data_dir.as_deref()) {
             Ok(s) => (Some(s), None),
             Err(e) => (None, Some(e)),
@@ -90,16 +100,46 @@ impl AppService {
             .as_ref()
             .and_then(|s| s.active_tasks().ok())
             .unwrap_or_default();
+        let store = store.map(|s| Arc::new(Mutex::new(s)));
+        let flow = store.as_ref().and_then(|store| {
+            let dir = data_dir.as_ref()?;
+            let launcher = CliLauncher::new(dir.join("guard-hooks")).ok()?;
+            let flow = Flow::new(store.clone(), Arc::new(launcher), Some(dir.join("runs")));
+            let quota = live.clone();
+            flow.set_quota_sink(move |snap| quota.observe_claude(snap));
+            Some(flow)
+        });
         let updater = Updater::start(config.update.clone(), CORE_VERSION);
         Self {
             config: Mutex::new(config),
             config_path,
             data_dir,
             live: Some(live),
-            store: store.map(Mutex::new),
+            store,
             store_error,
             active: Mutex::new(active),
             updater: Some(updater),
+            flow,
+        }
+    }
+
+    /// For tests: a service on this store and flow, demo data otherwise.
+    #[cfg(test)]
+    fn with_flow(store: Arc<Mutex<Store>>, flow: Flow, config: Config, tasks_dir: PathBuf) -> Self {
+        let active = store
+            .lock()
+            .ok()
+            .and_then(|s| s.active_tasks().ok())
+            .unwrap_or_default();
+        Self {
+            config: Mutex::new(Config {
+                tasks_dir: Some(tasks_dir.to_string_lossy().into_owned()),
+                ..config
+            }),
+            store: Some(store),
+            active: Mutex::new(active),
+            flow: Some(flow),
+            ..Self::default()
         }
     }
 
@@ -115,7 +155,7 @@ impl AppService {
     }
 
     fn live_state(&self) -> Option<LiveState> {
-        self.live.as_ref().map(Live::snapshot)
+        self.live.as_ref().map(|l| l.snapshot())
     }
 
     fn active_rows(&self) -> Vec<TaskRow> {
@@ -138,6 +178,9 @@ impl AppService {
             cost_usd: None,
             context_pct: None,
             new_comments: 0,
+            gate: None,
+            flow_note: None,
+            login: None,
         }
     }
 
@@ -151,12 +194,15 @@ impl AppService {
             board.links = state.links();
             return board;
         }
-        let prefix = self.config().tracker.task_prefix;
+        let config = self.config();
+        let prefix = config.tracker.task_prefix.clone();
+        let done = self.done_ids();
         let mut tasks: Vec<TaskCard> = state
             .tasks
             .as_deref()
             .unwrap_or_default()
             .iter()
+            .filter(|wp| !done.contains(&wp.id))
             .map(|wp| Self::task_card(&prefix, wp, &state))
             .collect();
         let active = self.active_rows();
@@ -180,6 +226,9 @@ impl AppService {
                         cost_usd: None,
                         context_pct: None,
                         new_comments: 0,
+                        gate: None,
+                        flow_note: None,
+                        login: None,
                     });
                     tasks.len() - 1
                 }
@@ -194,17 +243,32 @@ impl AppService {
                 state: StepState::Done,
                 since: row.updated_at.clone(),
             });
+            if let (Some(flow), Some(ctx)) = (&self.flow, self.ctx_for(row, &config)) {
+                flow.ensure(&ctx);
+                if let Some(f) = flow.card(&ctx) {
+                    card.column = f.column;
+                    card.step = Some(f.step);
+                    card.agent = f.agent;
+                    card.cost_usd = f.cost_usd;
+                    card.context_pct = f.context_pct;
+                    card.gate = f.gate;
+                    card.flow_note = f.note;
+                    card.login = f.login;
+                }
+            }
         }
         let notice = self.inbox_notice(&state);
+        let (cost_usd, tokens) = self
+            .flow
+            .as_ref()
+            .map(|f| f.usage_since(&opw_quota::hours_ago_rfc3339(TODAY_HOURS)))
+            .unwrap_or_default();
         BoardSnapshot {
             tasks,
             active_task_ids: active.into_iter().map(|r| r.display_id).collect(),
             quota: live_quota(&state),
             links: state.links(),
-            today: TodayStats {
-                tokens: 0,
-                cost_usd: 0.0,
-            },
+            today: TodayStats { tokens, cost_usd },
             mode: DataMode::Live,
             notice,
             tasks_dir_offer: self.tasks_dir_offer(),
@@ -220,16 +284,25 @@ impl AppService {
             orbit.quota = live_quota(&state);
             return orbit;
         }
-        let prefix = self.config().tracker.task_prefix;
+        let config = self.config();
+        let prefix = config.tracker.task_prefix.clone();
         let tasks = state.tasks.as_deref().unwrap_or_default();
         let active = self.active_rows();
+        let done = self.done_ids();
         let mut systems = active.iter().map(|row| {
             let nx_status = tasks
                 .iter()
                 .find(|wp| wp.id == row.wp_id)
                 .map(|wp| wp.status.clone())
                 .unwrap_or_default();
-            TaskSystem {
+            let flow = match (&self.flow, self.ctx_for(row, &config)) {
+                (Some(flow), Some(ctx)) => {
+                    flow.ensure(&ctx);
+                    flow.system(&ctx)
+                }
+                _ => None,
+            };
+            let mut system = TaskSystem {
                 task_id: row.display_id.clone(),
                 title: row.title.clone(),
                 repo: row.repo.as_deref().map(repo_name).unwrap_or_default(),
@@ -260,14 +333,21 @@ impl AppService {
                 findings: Vec::new(),
                 new_comments: 0,
                 gate: None,
+            };
+            if let Some(f) = flow {
+                system.steps = f.steps;
+                system.agents = f.agents;
+                system.findings = f.findings;
+                system.gate = f.gate;
             }
+            system
         });
         OrbitSnapshot {
             active: systems.next(),
             others: systems.collect(),
             inbox: tasks
                 .iter()
-                .filter(|wp| active.iter().all(|a| a.wp_id != wp.id))
+                .filter(|wp| active.iter().all(|a| a.wp_id != wp.id) && !done.contains(&wp.id))
                 .map(|wp| InboxItem {
                     task_id: display_id(&prefix, wp.id),
                     title: wp.subject.clone(),
@@ -419,9 +499,12 @@ impl AppService {
         if let Ok(mut active) = self.active.lock() {
             result.warnings.extend(shared_repo_warnings(&active, &row));
             active.retain(|a| a.wp_id != row.wp_id);
-            active.insert(0, row);
+            active.insert(0, row.clone());
         }
         self.reload_config();
+        if let (Some(flow), Some(ctx)) = (&self.flow, self.ctx_for(&row, &self.config())) {
+            flow.started(&ctx);
+        }
         Ok(result)
     }
 
@@ -441,10 +524,100 @@ impl AppService {
         if !found {
             return Err(task_not_found());
         }
+        if let Some(flow) = &self.flow {
+            // the workflow keeps its place; a step that was running has to be run again
+            flow.stop(wp_id);
+        }
         if let Ok(mut active) = self.active.lock() {
             active.retain(|a| a.wp_id != wp_id);
         }
         Ok(())
+    }
+
+    // ---------- workflow (steps 2-8) ----------
+
+    fn ctx_for(&self, row: &TaskRow, config: &Config) -> Option<TaskCtx> {
+        Some(TaskCtx {
+            row: row.clone(),
+            task_dir: self.tasks_root()?.join(&row.display_id),
+            config: config.clone(),
+        })
+    }
+
+    /// The workflow context of a task in progress.
+    fn task_ctx(&self, wp_id: u64) -> Result<(TaskCtx, &Flow), ApiError> {
+        let flow = self.flow.as_ref().ok_or_else(|| {
+            ApiError::new(
+                "storage",
+                "Chưa mở được dữ liệu cục bộ nên không chạy được các bước",
+            )
+        })?;
+        let row = self
+            .active_rows()
+            .into_iter()
+            .find(|r| r.wp_id == wp_id)
+            .or_else(|| self.stored_task(wp_id))
+            .ok_or_else(task_not_found)?;
+        let ctx = self
+            .ctx_for(&row, &self.config())
+            .ok_or_else(|| ApiError::new("brief.missing", "Chưa có thư mục dữ liệu"))?;
+        Ok((ctx, flow))
+    }
+
+    fn done_ids(&self) -> Vec<u64> {
+        self.store
+            .as_ref()
+            .and_then(|s| s.lock().ok()?.task_ids_in(COLUMN_DONE).ok())
+            .unwrap_or_default()
+    }
+
+    /// Everything the task window shows (reads the task files).
+    pub fn task_detail(&self, wp_id: u64) -> Result<TaskDetail, ApiError> {
+        let (ctx, flow) = self.task_ctx(wp_id)?;
+        Ok(flow.detail(&ctx))
+    }
+
+    /// A workflow button: run, stop, retry, approve the plan, …
+    pub fn flow_action(&self, wp_id: u64, action: FlowAction) -> Result<TaskDetail, ApiError> {
+        let (ctx, flow) = self.task_ctx(wp_id)?;
+        let finish = action == FlowAction::Finish;
+        flow.act(ctx.clone(), action)?;
+        if finish {
+            if let Some(store) = &self.store {
+                if let Ok(store) = store.lock() {
+                    let _ = store.set_column(wp_id, COLUMN_DONE, &opw_quota::now_rfc3339());
+                }
+            }
+            if let Ok(mut active) = self.active.lock() {
+                active.retain(|a| a.wp_id != wp_id);
+            }
+        }
+        Ok(flow.detail(&ctx))
+    }
+
+    /// Fix / accept / defer one review finding.
+    pub fn decide_finding(&self, decision: &FindingDecision) -> Result<TaskDetail, ApiError> {
+        let (ctx, flow) = self.task_ctx(decision.wp_id)?;
+        flow.decide(decision)?;
+        Ok(flow.detail(&ctx))
+    }
+
+    /// Save the brief the user edited in the task window (before the AI reads it).
+    pub fn save_brief(&self, wp_id: u64, text: &str) -> Result<TaskDetail, ApiError> {
+        let (ctx, flow) = self.task_ctx(wp_id)?;
+        if text.trim().is_empty() {
+            return Err(ApiError::new("brief.empty", "Brief trống"));
+        }
+        let file = ctx.task_dir.join(flow::BRIEF_FILE);
+        std::fs::write(&file, text)
+            .map_err(|e| ApiError::new("brief.write", format!("Không ghi được brief: {e}")))?;
+        Ok(flow.detail(&ctx))
+    }
+
+    /// Show the task folder (brief, plan, push summary) in Explorer.
+    pub fn open_task_folder(&self, wp_id: u64) -> Result<(), ApiError> {
+        let (ctx, _) = self.task_ctx(wp_id)?;
+        os::open_folder(&ctx.task_dir).map_err(|e| ApiError::new("path.missing", e.to_string()))
     }
 
     /// Folder of the task folders: `tasksDir` from config, else `<data dir>/tasks`.
@@ -826,6 +999,53 @@ mod tests {
         let u = svc.update_status();
         assert_eq!(u.current, CORE_VERSION);
         assert!(!u.available);
+    }
+
+    struct NoAi;
+    impl flow::Launcher for NoAi {
+        fn launch(
+            &self,
+            _: &flow::Job,
+            _: &std::sync::atomic::AtomicBool,
+            _: &mut dyn FnMut(&str),
+        ) -> Result<opw_agents::run::RunOutcome, flow::LaunchError> {
+            Err(flow::LaunchError::Missing)
+        }
+    }
+
+    #[test]
+    fn task_window_reads_and_saves_the_brief() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .upsert_task(&TaskRow {
+                wp_id: 7,
+                display_id: "WP-7".into(),
+                title: "t".into(),
+                project: "p".into(),
+                repo: None,
+                branch: Some("f/WP-7".into()),
+                base: Some("main".into()),
+                column: COLUMN_ACTIVE.into(),
+                updated_at: "2026-11-14T08:00:00Z".into(),
+            })
+            .unwrap();
+        let flow = Flow::new(store.clone(), Arc::new(NoAi), None);
+        let svc = AppService::with_flow(store, flow, Config::default(), tmp.path().to_path_buf());
+        assert_eq!(svc.task_detail(8).unwrap_err().code, "task.notFound");
+        let d = svc.task_detail(7).unwrap();
+        assert_eq!(d.current, Some(StepKind::Analyze));
+        assert!(d.brief.is_none());
+        std::fs::create_dir_all(tmp.path().join("WP-7")).unwrap();
+        assert_eq!(svc.save_brief(7, "  ").unwrap_err().code, "brief.empty");
+        let d = svc.save_brief(7, "# [WP-7] t\n").unwrap();
+        assert_eq!(d.brief.as_deref(), Some("# [WP-7] t\n"));
+        assert_eq!(
+            svc.flow_action(7, FlowAction::Finish).unwrap_err().code,
+            "flow.notNow"
+        );
     }
 
     #[test]

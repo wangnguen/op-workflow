@@ -14,6 +14,7 @@ import { formatClock, formatDuration, formatRelative, formatTokens, formatUsd } 
 import { STEP_COUNT } from "../../shared/steps";
 import { findAgent, type Selection } from "./selection";
 import { StatusChip } from "../../shared/ui/StatusChip";
+import { gateTab, type TaskTab } from "../task/taskTabs";
 
 interface Props {
   snapshot: OrbitSnapshot;
@@ -21,6 +22,8 @@ interface Props {
   onSelect: (s: Selection) => void;
   /** start an Inbox task (absent: the button explains to use the Task board) */
   onStartTask?: (taskId: string) => void;
+  /** open the task window of a task in progress, on the tab that matters */
+  onOpenTask?: (taskId: string, tab?: TaskTab) => void;
   now: number;
 }
 
@@ -118,7 +121,7 @@ function AgentDetail({ agent, now, onSelect }: { agent: AgentView; now: number; 
   );
 }
 
-export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask }: Props) {
+export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, onOpenTask }: Props) {
   const a = snapshot.active;
   let body: ReactNode = <p className="dp-empty">{t.noneSelected}</p>;
 
@@ -137,6 +140,11 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask }:
         <Row label={t.elapsed}>{formatDuration(now - Date.parse(a.startedAt))}</Row>
         {a.newComments > 0 && <Row label={t.newComments}>{a.newComments}</Row>}
         <Row label={t.findings}>{a.findings.length}</Row>
+        {onOpenTask && (
+          <button className="btn btn--sm dp-open" title={vi.flow.openHint} onClick={() => onOpenTask(a.taskId)}>
+            {vi.flow.open}
+          </button>
+        )}
         <h4>{t.steps}</h4>
         <StepList steps={a.steps} onSelect={onSelect} />
       </>
@@ -182,6 +190,12 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask }:
             </span>
           </Row>
           <Row label={t.source}>{f.source}</Row>
+          {f.detail && <p className="dim">{f.detail}</p>}
+          {onOpenTask && (
+            <button className="btn btn--sm dp-open" onClick={() => onOpenTask(a.taskId, "findings")}>
+              {vi.flow.tabs.findings}
+            </button>
+          )}
         </>
       );
     }
@@ -194,7 +208,11 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask }:
         </header>
         <h3 className="dp-title">{gateLabel[a.gate.kind]}</h3>
         <p>{a.gate.message}</p>
-        <button className="btn btn--primary" disabled title={t.gateLater}>
+        <button
+          className="btn btn--primary"
+          disabled={!onOpenTask}
+          onClick={() => a.gate && onOpenTask?.(a.taskId, gateTab(a.gate.kind))}
+        >
           {t.openGate}
         </button>
       </div>

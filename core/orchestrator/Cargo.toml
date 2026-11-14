@@ -20,6 +20,7 @@ opw-context.workspace = true
 opw-update.workspace = true
 opw-browser.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 dirs.workspace = true
 
 [dev-dependencies]

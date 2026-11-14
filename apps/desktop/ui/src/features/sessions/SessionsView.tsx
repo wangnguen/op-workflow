@@ -9,6 +9,8 @@ import { StatusChip } from "../../shared/ui/StatusChip";
 import { useStartWork } from "../board/useStartWork";
 import "../board/board.css";
 import { OrbitView } from "../orbit/OrbitView";
+import { TaskWindow } from "../task/TaskWindow";
+import type { TaskTab } from "../task/taskTabs";
 import { SessionBoard } from "./SessionBoard";
 import "./sessions.css";
 
@@ -86,6 +88,7 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
   const [focusId, setFocusId] = useState<string | null>(null);
   const tasks = useMemo(() => board?.tasks ?? [], [board]);
   const start = useStartWork({ tasks, onChanged, onStarted: setFocusId });
+  const [opened, setOpened] = useState<{ wpId: number; tab?: TaskTab }>();
 
   const changeMode = (next: Mode) => {
     setMode(next);
@@ -100,6 +103,10 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
   const activeCount = tasks.filter((t) => t.column === "active").length;
   const reading = new Set(tasks.filter((t) => start.reading.has(t.wpId)).map((t) => t.id));
   const fail = (e: unknown) => start.setFlash({ kind: "warn", text: errorMessage(e) });
+  const openTask = (taskId: string, tab?: TaskTab) => {
+    const c = card(taskId);
+    if (c) setOpened({ wpId: c.wpId, tab });
+  };
 
   // Both views stay mounted: switching only fades the other one in on top, so nothing is
   // rebuilt and the map keeps its zoom, position and selection.
@@ -139,6 +146,7 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
                   const c = card(taskId);
                   if (c) start.open(c);
                 }}
+                onOpenTask={openTask}
               />
             </div>
             <div {...pane("board")}>
@@ -161,12 +169,16 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
                       }
                 }
                 reading={reading}
+                onOpen={openTask}
               />
             </div>
           </>
         )}
       </div>
       {start.dialog}
+      {opened && (
+        <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={onChanged} />
+      )}
     </div>
   );
 }

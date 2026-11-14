@@ -64,6 +64,19 @@ const MIGRATIONS: &[&str] = &[
         kind        TEXT NOT NULL,
         detail      TEXT
      );",
+    // 2: workflow state per task (steps 2-8) and what reviewers said about each finding
+    "CREATE TABLE flow (
+        wp_id       INTEGER PRIMARY KEY REFERENCES task(wp_id),
+        state       TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+     );
+     ALTER TABLE finding ADD COLUMN detail TEXT;
+     ALTER TABLE finding ADD COLUMN suggestion TEXT;
+     ALTER TABLE finding ADD COLUMN step TEXT;
+     ALTER TABLE finding ADD COLUMN round INTEGER;
+     ALTER TABLE finding ADD COLUMN chosen INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE finding ADD COLUMN seen_at TEXT;
+     CREATE INDEX step_run_started ON step_run(started_at);",
 ];
 
 /// Schema version this build understands.
@@ -98,6 +111,95 @@ fn task_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         column: r.get(7)?,
         updated_at: r.get(8)?,
     })
+}
+
+/// One review finding as stored. `state` and `severity` are the lowercase names used in JSON
+/// (`open`, `fixing`, `fixed`, `accepted`, `deferred`; `critical` … `low`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingRow {
+    pub wp_id: u64,
+    pub fingerprint: String,
+    pub severity: String,
+    pub title: String,
+    pub file: String,
+    pub line: Option<u32>,
+    pub source: String,
+    pub state: String,
+    pub reason: Option<String>,
+    pub detail: Option<String>,
+    pub suggestion: Option<String>,
+    /// Step that reported it last (`reviewLocal`, `crossReview`, `finalReview`).
+    pub step: Option<String>,
+    pub round: Option<u8>,
+    /// The user asked for it to be fixed.
+    pub chosen: bool,
+    pub seen_at: Option<String>,
+}
+
+const FINDING_COLUMNS: &str = "wp_id, fingerprint, severity, title, file, line, source, state, reason, detail, suggestion, step, round, chosen, seen_at";
+
+fn finding_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FindingRow> {
+    Ok(FindingRow {
+        wp_id: u64::try_from(r.get::<_, i64>(0)?).unwrap_or_default(),
+        fingerprint: r.get(1)?,
+        severity: r.get(2)?,
+        title: r.get(3)?,
+        file: r.get(4)?,
+        line: r.get::<_, Option<i64>>(5)?.and_then(|l| u32::try_from(l).ok()),
+        source: r.get(6)?,
+        state: r.get(7)?,
+        reason: r.get(8)?,
+        detail: r.get(9)?,
+        suggestion: r.get(10)?,
+        step: r.get(11)?,
+        round: r.get::<_, Option<i64>>(12)?.and_then(|l| u8::try_from(l).ok()),
+        chosen: r.get::<_, i64>(13)? != 0,
+        seen_at: r.get(14)?,
+    })
+}
+
+/// One run of a workflow step by an AI process.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepRunRow {
+    pub id: i64,
+    pub wp_id: u64,
+    pub step: String,
+    pub agent: Option<String>,
+    pub session_id: Option<String>,
+    /// `running`, `done`, `failed`
+    pub state: String,
+    pub round: Option<u8>,
+    pub cost_usd: Option<f64>,
+    pub tokens_in: Option<u64>,
+    pub tokens_out: Option<u64>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+/// How a step run ended.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StepRunEnd<'a> {
+    pub state: &'a str,
+    pub session_id: Option<&'a str>,
+    pub cost_usd: Option<f64>,
+    pub tokens_in: Option<u64>,
+    pub tokens_out: Option<u64>,
+    pub ended_at: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventRow {
+    pub at: String,
+    pub kind: String,
+    pub detail: Option<String>,
+}
+
+fn id_param(wp_id: u64) -> i64 {
+    i64::try_from(wp_id).unwrap_or(i64::MAX)
+}
+
+fn opt_u64(v: Option<u64>) -> Option<i64> {
+    v.and_then(|n| i64::try_from(n).ok())
 }
 
 pub struct Store {
@@ -195,6 +297,17 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Ids of the tasks in one board column (e.g. `done`).
+    pub fn task_ids_in(&self, column: &str) -> StorageResult<Vec<u64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT wp_id FROM task WHERE column_name = ?1")?;
+        let rows = stmt.query_map([column], |r| {
+            Ok(u64::try_from(r.get::<_, i64>(0)?).unwrap_or_default())
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Move a task to another board column. Returns `false` when the task is unknown.
     pub fn set_column(&self, wp_id: u64, column: &str, at: &str) -> StorageResult<bool> {
         let n = self.conn.execute(
@@ -214,6 +327,187 @@ impl Store {
         self.conn.execute(
             "INSERT INTO event_log (at, wp_id, kind, detail) VALUES (?1, ?2, ?3, ?4)",
             params![at, wp_id.and_then(|id| i64::try_from(id).ok()), kind, detail],
+        )?;
+        Ok(())
+    }
+
+    /// Newest `limit` events of one task, oldest first.
+    pub fn events(&self, wp_id: u64, limit: usize) -> StorageResult<Vec<EventRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT at, kind, detail FROM (
+               SELECT id, at, kind, detail FROM event_log WHERE wp_id = ?1 ORDER BY id DESC LIMIT ?2
+             ) ORDER BY id",
+        )?;
+        let rows = stmt.query_map(
+            params![id_param(wp_id), i64::try_from(limit).unwrap_or(i64::MAX)],
+            |r| {
+                Ok(EventRow {
+                    at: r.get(0)?,
+                    kind: r.get(1)?,
+                    detail: r.get(2)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    // ---------- workflow ----------
+
+    /// Workflow state of one task (JSON owned by the orchestrator).
+    pub fn flow(&self, wp_id: u64) -> StorageResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT state FROM flow WHERE wp_id = ?1",
+                [id_param(wp_id)],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every stored workflow, `(wp_id, state)`.
+    pub fn flows(&self) -> StorageResult<Vec<(u64, String)>> {
+        let mut stmt = self.conn.prepare("SELECT wp_id, state FROM flow")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((u64::try_from(r.get::<_, i64>(0)?).unwrap_or_default(), r.get(1)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn save_flow(&self, wp_id: u64, state: &str, at: &str) -> StorageResult<()> {
+        self.conn.execute(
+            "INSERT INTO flow (wp_id, state, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(wp_id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at",
+            params![id_param(wp_id), state, at],
+        )?;
+        Ok(())
+    }
+
+    /// A step run starts; returns its id for [`Store::end_step_run`].
+    pub fn begin_step_run(
+        &self,
+        wp_id: u64,
+        step: &str,
+        agent: &str,
+        round: Option<u8>,
+        at: &str,
+    ) -> StorageResult<i64> {
+        self.conn.execute(
+            "INSERT INTO step_run (wp_id, step, agent, state, round, started_at)
+             VALUES (?1, ?2, ?3, 'running', ?4, ?5)",
+            params![id_param(wp_id), step, agent, round, at],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn end_step_run(&self, id: i64, end: &StepRunEnd<'_>) -> StorageResult<()> {
+        self.conn.execute(
+            "UPDATE step_run SET state = ?2, session_id = COALESCE(?3, session_id), cost_usd = ?4,
+               tokens_in = ?5, tokens_out = ?6, ended_at = ?7 WHERE id = ?1",
+            params![
+                id,
+                end.state,
+                end.session_id,
+                end.cost_usd,
+                opt_u64(end.tokens_in),
+                opt_u64(end.tokens_out),
+                end.ended_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Runs that never ended (the app closed while they ran) are marked failed.
+    pub fn fail_unfinished_runs(&self, at: &str) -> StorageResult<usize> {
+        Ok(self.conn.execute(
+            "UPDATE step_run SET state = 'failed', ended_at = ?1 WHERE ended_at IS NULL",
+            [at],
+        )?)
+    }
+
+    /// Step runs of one task, oldest first.
+    pub fn step_runs(&self, wp_id: u64) -> StorageResult<Vec<StepRunRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, wp_id, step, agent, session_id, state, round, cost_usd, tokens_in, tokens_out,
+                    started_at, ended_at
+             FROM step_run WHERE wp_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([id_param(wp_id)], |r| {
+            Ok(StepRunRow {
+                id: r.get(0)?,
+                wp_id: u64::try_from(r.get::<_, i64>(1)?).unwrap_or_default(),
+                step: r.get(2)?,
+                agent: r.get(3)?,
+                session_id: r.get(4)?,
+                state: r.get(5)?,
+                round: r.get::<_, Option<i64>>(6)?.and_then(|v| u8::try_from(v).ok()),
+                cost_usd: r.get(7)?,
+                tokens_in: r.get::<_, Option<i64>>(8)?.and_then(|v| u64::try_from(v).ok()),
+                tokens_out: r.get::<_, Option<i64>>(9)?.and_then(|v| u64::try_from(v).ok()),
+                started_at: r.get(10)?,
+                ended_at: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Cost and tokens (in + out) of every step run started at or after `since` (RFC 3339).
+    pub fn usage_since(&self, since: &str) -> StorageResult<(f64, u64)> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(cost_usd), 0), COALESCE(SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)), 0)
+             FROM step_run WHERE started_at >= ?1",
+            [since],
+            |r| {
+                Ok((
+                    r.get::<_, f64>(0)?,
+                    u64::try_from(r.get::<_, i64>(1)?).unwrap_or_default(),
+                ))
+            },
+        )?)
+    }
+
+    // ---------- findings ----------
+
+    /// Findings of one task, most severe first, then by file and line.
+    pub fn findings(&self, wp_id: u64) -> StorageResult<Vec<FindingRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FINDING_COLUMNS} FROM finding WHERE wp_id = ?1
+             ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                      file, line"
+        ))?;
+        let rows = stmt.query_map([id_param(wp_id)], finding_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn upsert_finding(&self, f: &FindingRow) -> StorageResult<()> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO finding ({FINDING_COLUMNS})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 ON CONFLICT(wp_id, fingerprint) DO UPDATE SET
+                   severity = excluded.severity, title = excluded.title, file = excluded.file,
+                   line = excluded.line, source = excluded.source, state = excluded.state,
+                   reason = excluded.reason, detail = excluded.detail, suggestion = excluded.suggestion,
+                   step = excluded.step, round = excluded.round, chosen = excluded.chosen,
+                   seen_at = excluded.seen_at"
+            ),
+            params![
+                id_param(f.wp_id),
+                f.fingerprint,
+                f.severity,
+                f.title,
+                f.file,
+                f.line,
+                f.source,
+                f.state,
+                f.reason,
+                f.detail,
+                f.suggestion,
+                f.step,
+                f.round,
+                i64::from(f.chosen),
+                f.seen_at
+            ],
         )?;
         Ok(())
     }
@@ -274,6 +568,93 @@ mod tests {
                 Some("feature/187716 from development"),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn keeps_flow_step_runs_findings_and_events() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_task(&row("active")).unwrap();
+        assert_eq!(store.flow(187716).unwrap(), None);
+        store
+            .save_flow(187716, "{\"a\":1}", "2026-11-14T08:00:00Z")
+            .unwrap();
+        store
+            .save_flow(187716, "{\"a\":2}", "2026-11-14T08:01:00Z")
+            .unwrap();
+        assert_eq!(store.flow(187716).unwrap().as_deref(), Some("{\"a\":2}"));
+        assert_eq!(store.flows().unwrap().len(), 1);
+
+        let id = store
+            .begin_step_run(187716, "analyze", "claude", None, "2026-11-14T08:00:00Z")
+            .unwrap();
+        let open = store
+            .begin_step_run(187716, "implement", "claude", None, "2026-11-14T09:00:00Z")
+            .unwrap();
+        store
+            .end_step_run(
+                id,
+                &StepRunEnd {
+                    state: "done",
+                    session_id: Some("s-1"),
+                    cost_usd: Some(0.5),
+                    tokens_in: Some(1000),
+                    tokens_out: Some(200),
+                    ended_at: "2026-11-14T08:05:00Z",
+                },
+            )
+            .unwrap();
+        assert_eq!(store.fail_unfinished_runs("2026-11-14T10:00:00Z").unwrap(), 1);
+        let runs = store.step_runs(187716).unwrap();
+        assert_eq!(runs[0].session_id.as_deref(), Some("s-1"));
+        assert_eq!(runs[1].id, open);
+        assert_eq!(runs[1].state, "failed");
+        let (cost, tokens) = store.usage_since("2026-11-14T00:00:00Z").unwrap();
+        assert!((cost - 0.5).abs() < 1e-9);
+        assert_eq!(tokens, 1200);
+        assert_eq!(store.usage_since("2026-11-15T00:00:00Z").unwrap().1, 0);
+
+        let mut f = FindingRow {
+            wp_id: 187716,
+            fingerprint: "abc".into(),
+            severity: "low".into(),
+            title: "t".into(),
+            file: "a.ts".into(),
+            line: Some(3),
+            source: "codex".into(),
+            state: "open".into(),
+            reason: None,
+            detail: Some("d".into()),
+            suggestion: None,
+            step: Some("crossReview".into()),
+            round: Some(1),
+            chosen: false,
+            seen_at: None,
+        };
+        store.upsert_finding(&f).unwrap();
+        f.fingerprint = "def".into();
+        f.severity = "high".into();
+        f.chosen = true;
+        store.upsert_finding(&f).unwrap();
+        f.state = "accepted".into();
+        f.reason = Some("ok".into());
+        store.upsert_finding(&f).unwrap();
+        let all = store.findings(187716).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].severity, "high");
+        assert_eq!(all[0].state, "accepted");
+        assert!(all[0].chosen);
+        assert_eq!(all[1].line, Some(3));
+
+        for kind in ["a", "b", "c"] {
+            store
+                .log_event("2026-11-14T08:00:00Z", Some(187716), kind, None)
+                .unwrap();
+        }
+        let events = store.events(187716, 2).unwrap();
+        assert_eq!(
+            events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+            ["b", "c"]
+        );
     }
 
     #[test]

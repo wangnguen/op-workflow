@@ -33,6 +33,7 @@ import type {
   UpdateView,
 } from "./types";
 import { STEP_COUNT, STEP_ORDER } from "../shared/steps";
+import { mockFlowCard, mockFlowSystem, mockRegisterFlow } from "./mockFlow";
 
 export const DEMO_FRAME_MS = 4000;
 /** One demo frame stands for this much "real" time in timestamps. */
@@ -218,8 +219,16 @@ const STATUSES: SessionStatus[] = ["idle", "running", "waiting"];
 const INBOX_VIEW: InboxItem[] = (() => {
   const n = urlCount("inbox");
   if (n === undefined) return INBOX;
+  // every third one has a long Japanese title, as many real tasks do
   return Array.from({ length: n }, (_, i) =>
-    INBOX[i] ?? { taskId: `WP-${188100 + i}`, title: `Task demo số ${i + 1}: sửa lỗi hiển thị danh sách`, project: "Web Platform" },
+    INBOX[i] ?? {
+      taskId: `WP-${188100 + i}`,
+      title:
+        i % 3 === 2
+          ? `■ Demo ■ [Bug] 共有フォルダの権限変更で403 insufficient_scopeエラーが発生する問題の調査・対応 / Điều tra lỗi 403 khi đổi quyền thư mục (${i + 1})`
+          : `Task demo số ${i + 1}: sửa lỗi hiển thị danh sách`,
+      project: "Web Platform",
+    },
   );
 })();
 
@@ -393,7 +402,9 @@ const SECOND = {
 
 function secondSystem(now: number): TaskSystem {
   const started = iso(now - 25 * 60_000);
-  return {
+  mockRegisterFlow(SECOND.wpId, SECOND.id, SECOND.title);
+  const flow = mockFlowSystem(SECOND.wpId);
+  const system: TaskSystem = {
     taskId: SECOND.id,
     title: SECOND.title,
     repo: SECOND.repo,
@@ -410,6 +421,7 @@ function secondSystem(now: number): TaskSystem {
     findings: [],
     newComments: 0,
   };
+  return flow ? { ...system, ...flow } : system;
 }
 
 export function orbitForFrame(frameIndex: number, now: number): OrbitSnapshot {
@@ -479,6 +491,7 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
     },
   ];
   if (f.active) {
+    mockRegisterFlow(SECOND.wpId, SECOND.id, SECOND.title);
     tasks.push({
       id: SECOND.id,
       wpId: SECOND.wpId,
@@ -491,6 +504,7 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
       column: "active",
       step: { kind: "intake", index: 1, state: "done", since: iso(now - 25 * 60_000) },
       newComments: 0,
+      ...mockFlowCard(SECOND.wpId),
     });
   }
   const board: BoardSnapshot = {

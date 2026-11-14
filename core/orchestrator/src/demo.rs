@@ -36,7 +36,7 @@ fn script() -> Vec<E> {
             critical_or_high: 0,
             medium_undecided: 1,
         },
-        E::MediumTriaged,
+        E::MediumTriaged { fix: 0 },
         E::StepSucceeded(StepKind::PushSummary),
     ]
 }
@@ -154,6 +154,12 @@ fn to_view(f: Finding) -> FindingView {
         line: f.line,
         source: f.source,
         state: f.state,
+        detail: None,
+        suggestion: None,
+        reason: None,
+        chosen: false,
+        round: None,
+        step: None,
     }
 }
 
@@ -250,6 +256,7 @@ fn active_system(frame: u64) -> Option<TaskSystem> {
             GateKind::MediumTriage => "1 finding medium chờ bạn quyết".into(),
             GateKind::AgentQuestion => "AI đang hỏi bạn".into(),
             GateKind::Error => "Bước bị lỗi".into(),
+            GateKind::SelfCode => "Bạn đang tự code".into(),
         },
     });
     Some(TaskSystem {
@@ -316,6 +323,9 @@ pub fn board(tick: u64) -> BoardSnapshot {
         cost_usd: None,
         context_pct: None,
         new_comments: comments,
+        gate: None,
+        flow_note: None,
+        login: None,
     };
     let mut tasks = vec![
         inbox(188001, "Thêm bộ lọc danh sách user", "Web Platform", 2),
@@ -340,6 +350,9 @@ pub fn board(tick: u64) -> BoardSnapshot {
             cost_usd: Some(1.84),
             context_pct: None,
             new_comments: 0,
+            gate: None,
+            flow_note: None,
+            login: None,
         },
     ];
     if let Some(sys) = &system {
@@ -372,6 +385,9 @@ pub fn board(tick: u64) -> BoardSnapshot {
             cost_usd: Some(0.21 + 0.1 * frame as f64),
             context_pct: agent.map(|a| (a.context_tokens as f64 / a.handoff_at as f64 * 100.0).min(100.0)),
             new_comments: sys.new_comments,
+            gate: None,
+            flow_note: None,
+            login: None,
         });
     }
     BoardSnapshot {

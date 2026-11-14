@@ -6,6 +6,7 @@
 #![cfg_attr(all(windows, target_env = "gnu"), allow(linker_messages))]
 
 mod app_api;
+mod flow_api;
 mod settings_api;
 mod start_api;
 
@@ -55,6 +56,11 @@ fn main() {
             settings_api::open_config,
             settings_api::reveal_path,
             settings_api::set_tasks_dir,
+            flow_api::task_detail,
+            flow_api::flow_action,
+            flow_api::decide_finding,
+            flow_api::save_brief,
+            flow_api::open_task_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running op-workflow");

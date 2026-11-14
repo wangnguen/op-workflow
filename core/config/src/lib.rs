@@ -121,6 +121,36 @@ pub struct RepoConfig {
     pub last_base: Option<String>,
     pub deny_paths: Vec<String>,
     pub post_edit: Vec<String>,
+    /// Commands the AI may run while coding in this repo (`npm run lint *`, `npx tsc *`), on top
+    /// of the repo's own `.claude/settings.json` allow list. Anything else is refused.
+    pub allow_bash: Vec<String>,
+}
+
+/// Limits of one workflow step (`steps.<step>` in config). Unset fields use the app's defaults.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StepConfig {
+    /// `claude` or `codex` (cross-review only for now).
+    pub agent: Option<String>,
+    pub max_budget_usd: Option<f64>,
+    /// Cross-review ⇄ fix rounds before the final review.
+    pub max_rounds: Option<u8>,
+    pub timeout_min: Option<u32>,
+}
+
+/// Steps 2-8 (`steps` in config).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StepsConfig {
+    /// Run the next step by itself when one finishes. Off by default: PLAN.md §12 asks for a few
+    /// real tasks in "stop after each step" mode first. Each task can turn it on for itself.
+    pub auto_advance: bool,
+    pub analyze: StepConfig,
+    pub implement: StepConfig,
+    pub review_local: StepConfig,
+    pub fix: StepConfig,
+    pub cross_review: StepConfig,
+    pub push_summary: StepConfig,
 }
 
 /// New-version check against the public GitHub Releases of the app (read-only GET).
@@ -153,6 +183,7 @@ pub struct Config {
     pub handoff: HandoffConfig,
     pub update: UpdateConfig,
     pub gate: GatePolicy,
+    pub steps: StepsConfig,
     pub workspaces: Vec<String>,
     pub projects: BTreeMap<String, ProjectConfig>,
     pub repos: BTreeMap<String, RepoConfig>,
@@ -173,6 +204,7 @@ impl Config {
             handoff: section(root, "handoff", &mut warnings),
             update: section(root, "update", &mut warnings),
             gate: section(root, "gate", &mut warnings),
+            steps: section(root, "steps", &mut warnings),
             workspaces: section(root, "workspaces", &mut warnings),
             projects: section(root, "projects", &mut warnings),
             repos: section(root, "repos", &mut warnings),
@@ -422,6 +454,25 @@ mod tests {
         assert_eq!(cfg.handoff, HandoffConfig::default());
         assert_eq!(cfg.warnings.len(), 1);
         assert_eq!(cfg.projects["Web Platform"].branch_template(), "feature/{taskId}");
+    }
+
+    #[test]
+    fn steps_section_keeps_what_is_set() {
+        let cfg = Config::from_value(&json!({
+            "steps": {
+                "autoAdvance": true,
+                "analyze": { "maxBudgetUsd": 2.5 },
+                "crossReview": { "agent": "claude", "maxRounds": 2 }
+            },
+            "repos": { "~/code/web": { "allowBash": ["npm run lint *"] } }
+        }));
+        assert!(cfg.steps.auto_advance);
+        assert_eq!(cfg.steps.analyze.max_budget_usd, Some(2.5));
+        assert_eq!(cfg.steps.cross_review.agent.as_deref(), Some("claude"));
+        assert_eq!(cfg.steps.cross_review.max_rounds, Some(2));
+        assert_eq!(cfg.steps.fix, StepConfig::default());
+        assert_eq!(cfg.repos["~/code/web"].allow_bash, ["npm run lint *"]);
+        assert!(!Config::from_value(&Value::Null).steps.auto_advance);
     }
 
     #[test]
