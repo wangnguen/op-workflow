@@ -13,6 +13,7 @@ pub mod flow;
 pub mod folders;
 pub mod issues;
 pub mod live;
+pub mod models;
 pub mod os;
 pub mod selftest;
 pub mod start;
@@ -75,6 +76,8 @@ pub struct AppService {
     flow: Option<Flow>,
     /// The bell (and what the shell shows as Windows notifications).
     alerts: Arc<Alerts>,
+    /// Models and effort levels of the CLIs on this machine (Settings → Các bước AI).
+    models: models::Catalogs,
 }
 
 impl AppService {
@@ -149,6 +152,7 @@ impl AppService {
             updater: Some(updater),
             flow,
             alerts,
+            models: models::Catalogs::default(),
         }
     }
 
@@ -1187,8 +1191,18 @@ impl AppService {
             tasks_dir_suggested: folders::desktop_suggestion().map(|p| p.to_string_lossy().into_owned()),
             notify: config.notify,
             steps: steps::settings(&config, &self.done_step_runs()),
-            codex_models: steps::codex_models(),
         }
+    }
+
+    /// Settings → Các bước AI: the models and effort levels the Claude and Codex CLIs on this
+    /// machine offer (no prompt, no tokens). Reused for 10 minutes unless `refresh`. Starts the
+    /// CLIs, so call it off the UI thread.
+    pub fn step_models(&self, refresh: bool) -> opw_domain::view::StepModels {
+        let dir = self
+            .data_dir
+            .as_ref()
+            .map_or_else(|| std::env::temp_dir().join("opw-probe"), |d| d.join("probe"));
+        self.models.get(&dir, refresh)
     }
 
     fn done_step_runs(&self) -> Vec<opw_storage::StepRunRow> {
@@ -1205,7 +1219,7 @@ impl AppService {
             .as_deref()
             .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
         let config = self.config();
-        let agent = steps::validate(req, &config)?;
+        let agent = steps::validate(req, &config, self.models.cached().as_ref())?;
         let agent_key = (req.step == StepKind::CrossReview).then_some(match agent {
             opw_domain::view::AgentKind::Codex => "codex",
             _ => "claude",

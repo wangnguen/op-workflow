@@ -534,6 +534,31 @@
 
 /* ---------- Các bước AI ---------- */
 
+.set-source {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: -4px 0 14px;
+}
+.set-source-lines {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+.set-source-line--warn,
+.set-warn {
+  color: var(--st-waiting);
+}
+/* same width for "Đọc lại" and "Đang đọc…", so the lines beside it do not reflow */
+.set-source .btn {
+  flex: none;
+  min-width: 88px;
+}
+
 .set-step-controls {
   display: flex;
   flex-wrap: wrap;

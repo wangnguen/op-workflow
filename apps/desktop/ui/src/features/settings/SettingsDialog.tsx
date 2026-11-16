@@ -5,6 +5,7 @@ import {
   clearNxToken,
   errorMessage,
   getSettings,
+  getStepModels,
   getUpdateStatus,
   isMockMode,
   openBrowserDebug,
@@ -16,7 +17,7 @@ import {
   setNotify,
   setTasksDir,
 } from "../../ipc/client";
-import type { NotifyKind, Provider, ProviderLink, SettingsView, UpdateView } from "../../ipc/types";
+import type { NotifyKind, Provider, ProviderLink, SettingsView, StepModels, UpdateView } from "../../ipc/types";
 import { LinkActions } from "../quota/QuotaPopover";
 import { linkProblem } from "../quota/quota";
 import { formatRelative } from "../../shared/format";
@@ -219,6 +220,9 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
   const [pathError, setPathError] = useState<string | null>(null);
   const [update, setUpdate] = useState<UpdateView | null>(null);
   const [checking, setChecking] = useState(false);
+  const [models, setModels] = useState<StepModels | null>(null);
+  const [modelsBusy, setModelsBusy] = useState(false);
+  const modelsAsked = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLElement>(null);
 
@@ -228,6 +232,29 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
       .catch((e: unknown) => setError(errorMessage(e)));
   }, []);
 
+  // Models and effort levels come from the CLIs on the machine (both start for ~2 s, no tokens),
+  // so they are read the first time Các bước AI opens, not with every Settings open.
+  const readModels = useCallback((refresh: boolean) => {
+    setModelsBusy(true);
+    getStepModels(refresh)
+      .then(setModels)
+      .catch((e: unknown) => setError(errorMessage(e)))
+      .finally(() => setModelsBusy(false));
+  }, []);
+  useEffect(() => {
+    if (page !== "steps" || modelsAsked.current) return;
+    modelsAsked.current = true;
+    readModels(false);
+  }, [page, readModels]);
+
+  // The parent passes a new `onClose` on every render (its clock ticks each second). Reading it
+  // through a ref keeps the effect below to the moment the dialog opens: re-running it moved the
+  // focus back to the page list every second, which closed any open dropdown.
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  }, [onClose]);
+
   useEffect(() => {
     reload();
     getUpdateStatus()
@@ -235,7 +262,7 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
       .catch(() => undefined);
     const id = window.setInterval(reload, 3000);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") closeRef.current();
     };
     document.addEventListener("keydown", onKey);
     navRef.current?.querySelector<HTMLElement>('[aria-current="page"]')?.focus();
@@ -243,7 +270,7 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
       window.clearInterval(id);
       document.removeEventListener("keydown", onKey);
     };
-  }, [reload, onClose]);
+  }, [reload]);
 
   const run = (action: () => Promise<SettingsView>, clearInput: boolean) => {
     setBusy(true);
@@ -517,7 +544,15 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                   </>
                 )}
 
-                {page === "steps" && <StepsPage view={view} onSaved={setView} />}
+                {page === "steps" && (
+                  <StepsPage
+                    view={view}
+                    onSaved={setView}
+                    models={models}
+                    modelsBusy={modelsBusy}
+                    onReadModels={() => readModels(true)}
+                  />
+                )}
 
                 {page === "quota" && (
                   <>

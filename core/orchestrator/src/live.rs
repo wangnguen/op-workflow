@@ -461,7 +461,7 @@ fn fetch_changed_comments(
 
 // ---------- child processes ----------
 
-fn hidden(cmd: &mut Command) -> &mut Command {
+pub(crate) fn hidden(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -472,7 +472,7 @@ fn hidden(cmd: &mut Command) -> &mut Command {
 }
 
 /// Lines from a child's stdout, read on their own thread so callers can time out.
-fn line_reader(child: &mut Child) -> Option<Receiver<String>> {
+pub(crate) fn line_reader(child: &mut Child) -> Option<Receiver<String>> {
     let stdout = child.stdout.take()?;
     let (tx, rx) = mpsc::channel();
     spawn_named("opw-child-stdout", move || {

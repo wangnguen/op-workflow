@@ -159,8 +159,42 @@ export interface SettingsView {
   notify?: NotifySettings;
   /** agent, model and effort of each AI step, with past cost and time */
   steps?: StepSetting[];
-  /** models named in ~/.codex/config.toml (the first is Codex's default) */
-  codexModels?: string[];
+}
+
+/** Models and effort levels the Claude / Codex CLIs on this machine offer (`step_models`). */
+export interface StepModels {
+  claude: AgentCatalog;
+  codex: AgentCatalog;
+}
+
+/** What one agent CLI offers; `fromCli: false` = the app's built-in list, `error` says why. */
+export interface AgentCatalog {
+  agent: AgentKind;
+  models: AgentModel[];
+  /** model the CLI uses without a flag, as configured (e.g. "opus[1m]") */
+  defaultModel?: string;
+  /** entry of `models` that `defaultModel` resolves to */
+  defaultId?: string;
+  /** "Opus 5.5 · 1M" */
+  defaultLabel?: string;
+  /** effort the CLI uses without a flag */
+  defaultEffort?: string;
+  fromCli: boolean;
+  cliVersion?: string;
+  error?: string;
+  /** RFC 3339 */
+  readAt?: string;
+}
+
+export interface AgentModel {
+  /** what goes into --model / -m */
+  id: string;
+  label: string;
+  description?: string;
+  /** effort levels this model takes; empty = no effort flag */
+  efforts: string[];
+  defaultEffort?: string;
+  isDefault: boolean;
 }
 
 /** One AI step in Settings → Các bước AI; absent model/effort = the CLI's default. */
@@ -695,6 +729,7 @@ export interface Commands {
   mark_alerts_read: null;
   set_notify: SettingsView;
   set_step_choice: SettingsView;
+  step_models: StepModels;
 }
 
 export interface CommandArgs {
@@ -722,4 +757,5 @@ export interface CommandArgs {
   mark_alerts_read: { ids: number[] };
   set_notify: { kind: NotifyKind; on: boolean };
   set_step_choice: { choice: StepChoiceRequest };
+  step_models: { refresh: boolean };
 }

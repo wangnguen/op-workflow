@@ -1,7 +1,7 @@
 //! Settings commands: OpenProject token (kept in Windows Credential Manager) and manual refresh.
 //! Names and payloads must match `apps/desktop/ui/src/ipc/types.ts` (`Commands`).
 
-use opw_domain::view::{ApiError, SettingsView, StepChoiceRequest, TasksDirChange};
+use opw_domain::view::{ApiError, SettingsView, StepChoiceRequest, StepModels, TasksDirChange};
 use opw_orchestrator::AppService;
 use tauri::State;
 
@@ -59,4 +59,11 @@ pub fn set_step_choice(
     choice: StepChoiceRequest,
 ) -> Result<SettingsView, ApiError> {
     service.set_step_choice(&choice)
+}
+
+/// Settings → Các bước AI: models and effort levels of the Claude / Codex CLIs on this machine.
+/// Starts both CLIs (no prompt, no tokens, about 2 s), so off the UI thread.
+#[tauri::command(async)]
+pub fn step_models(service: State<'_, AppService>, refresh: bool) -> StepModels {
+    service.step_models(refresh)
 }

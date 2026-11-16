@@ -1,6 +1,7 @@
 // Mock data for browser mode, with a looping demo timeline so the UI animates.
 // Every DEMO_FRAME_MS the active task advances one frame through the 8 steps.
 import type {
+  AgentCatalog,
   AgentKind,
   AgentView,
   AppInfo,
@@ -26,6 +27,7 @@ import type {
   StartResult,
   StepChoiceRequest,
   StepKind,
+  StepModels,
   StepSetting,
   StepState,
   StepView,
@@ -552,7 +554,68 @@ export function mockSettings(): SettingsView {
     tasksDirSuggested: MOCK_DESKTOP_TASKS,
     notify: mockNotify(),
     steps: mockStepSettings(),
-    codexModels: ["gpt-6.1-sol"],
+  };
+}
+
+const LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
+/** What the CLIs answer in the preview (shaped like the real lists, shortened).
+ *  `?modelsError` shows failed reads: Claude with the last list it gave, Codex with none. */
+export function mockStepModels(): StepModels {
+  const readAt = new Date().toISOString();
+  const ok = mockGoodModels(readAt);
+  if (typeof location !== "undefined" && new URLSearchParams(location.search).has("modelsError")) {
+    const yesterday = new Date(Date.now() - 26 * 3600 * 1000).toISOString();
+    return {
+      claude: { ...ok.claude, fromCli: false, error: "Claude CLI không trả lời sau 20 giây", readAt: yesterday, cliVersion: undefined },
+      codex: {
+        agent: "codex",
+        models: [],
+        defaultModel: "gpt-6.1-sol",
+        defaultLabel: "gpt-6.1-sol",
+        defaultEffort: "xhigh",
+        fromCli: false,
+        error: "Chưa cài Codex CLI (không thấy codex trên PATH)",
+      },
+    };
+  }
+  return ok;
+}
+
+function mockGoodModels(readAt: string): StepModels {
+  return {
+    claude: {
+      agent: "claude",
+      models: [
+        { id: "claude-opus-5-5", label: "Opus 5.5", description: "For complex work and everyday tasks", efforts: LEVELS, isDefault: true },
+        { id: "claude-sonnet-5-5", label: "Sonnet 5.5", description: "Most efficient for simpler tasks", efforts: LEVELS, isDefault: false },
+        { id: "claude-fable-5-2", label: "Fable 5.2", description: "For your toughest challenges", efforts: LEVELS, isDefault: false },
+        { id: "claude-haiku-5-5", label: "Haiku 5.5", description: "Fastest for quick answers", efforts: LEVELS, isDefault: false },
+        { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", description: "Fastest for quick answers", efforts: [], isDefault: false },
+        { id: "claude-opus-4-6", label: "Opus 4.6", efforts: ["low", "medium", "high", "max"], isDefault: false },
+      ],
+      defaultModel: "opus[1m]",
+      defaultId: "claude-opus-5-5",
+      defaultLabel: "Opus 5.5 · 1M",
+      defaultEffort: "high",
+      fromCli: true,
+      cliVersion: "2.1.325",
+      readAt,
+    },
+    codex: {
+      agent: "codex",
+      models: [
+        { id: "gpt-6.1-sol", label: "GPT-6.1-Sol", description: "Latest workhorse model", efforts: [...LEVELS, "ultra"], defaultEffort: "low", isDefault: true },
+        { id: "gpt-6-luna", label: "GPT-6-Luna", description: "Fast and affordable", efforts: LEVELS, defaultEffort: "medium", isDefault: false },
+      ],
+      defaultModel: "gpt-6.1-sol",
+      defaultId: "gpt-6.1-sol",
+      defaultLabel: "GPT-6.1-Sol",
+      defaultEffort: "xhigh",
+      fromCli: true,
+      cliVersion: "0.169.0",
+      readAt,
+    },
   };
 }
 
@@ -593,8 +656,33 @@ export function mockSetStepChoice(choice: StepChoiceRequest): SettingsView {
   if (choice.model && !/^[A-Za-z0-9._:/[\]-]+$/.test(choice.model)) {
     throw { code: "step.choice", message: `Tên model không hợp lệ: ${choice.model}` };
   }
+  const agent = choice.step === "crossReview" ? (choice.agent ?? mockPicks.crossReview?.agent ?? "codex") : "claude";
+  const catalog = mockStepModels()[agent === "codex" ? "codex" : "claude"];
+  // only listed models; a saved one the list no longer has may stay (same rule as the core)
+  if (choice.model && catalog.fromCli && choice.model !== mockPicks[choice.step]?.model && !catalog.models.some((m) => m.id === choice.model)) {
+    throw { code: "step.choice", message: `${agent === "codex" ? "Codex" : "Claude Code"} trên máy không có model ${choice.model}` };
+  }
+  if (choice.effort) {
+    const problem = mockEffortProblem(catalog, choice.model, choice.effort);
+    if (problem) throw { code: "step.choice", message: problem };
+  }
   mockPicks[choice.step] = { agent: choice.agent, model: choice.model, effort: choice.effort };
   return mockSettings();
+}
+
+/** Same rule as the core's `models::check_effort`: the picked model (else the CLI's default)
+ *  must take the effort; a model the list does not know takes any level some model takes. */
+function mockEffortProblem(catalog: AgentCatalog, model: string | undefined, effort: string): string | undefined {
+  if (!/^[a-z]{1,16}$/.test(effort)) return `Effort không hợp lệ: ${effort}`;
+  if (!catalog.fromCli) return undefined;
+  const id = model ?? catalog.defaultId;
+  const entry = catalog.models.find((m) => m.id === id);
+  if (entry) {
+    if (entry.efforts.length === 0) return `${entry.label} không nhận effort`;
+    if (entry.efforts.includes(effort)) return undefined;
+    return `${entry.label} không có effort ${effort} (có: ${entry.efforts.join(", ")})`;
+  }
+  return catalog.models.some((m) => m.efforts.includes(effort)) ? undefined : `Không model nào của máy có effort ${effort}`;
 }
 
 const MOCK_DESKTOP_TASKS = "C:/Users/me/Desktop/op-workflow-tasks";

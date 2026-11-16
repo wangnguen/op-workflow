@@ -1,21 +1,25 @@
 import { useState } from "react";
 import { agentLabel, stepHint, stepLabel, vi } from "../../i18n/vi";
 import { errorMessage, setStepChoice } from "../../ipc/client";
-import type { AgentKind, SettingsView, StepChoiceRequest, StepSetting } from "../../ipc/types";
-import { formatDuration, formatUsd } from "../../shared/format";
-import { claudeModel, priceText } from "../../shared/models";
+import type { AgentCatalog, AgentKind, SettingsView, StepChoiceRequest, StepModels, StepSetting } from "../../ipc/types";
+import { formatDateTime, formatDuration, formatHourMinute, formatUsd } from "../../shared/format";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
-import { CUSTOM, effortOptions, modelOptions } from "./stepChoice";
+import { effortForModel, effortOptions, modelEntry, modelOptions } from "./stepChoice";
 
 const t = vi.settings.steps;
 
 interface Props {
   view: SettingsView | null;
   onSaved: (view: SettingsView) => void;
+  /** lists read from the CLIs on this machine; `null` until the first read ends */
+  models: StepModels | null;
+  modelsBusy: boolean;
+  onReadModels: () => void;
 }
 
-/** Settings → Các bước AI: model and effort per step, with prices and past runs for reference. */
-export function StepsPage({ view, onSaved }: Props) {
+/** Settings → Các bước AI: model and effort per step, picked from what the CLIs on the machine
+ *  list, with past runs for reference. */
+export function StepsPage({ view, onSaved, models, modelsBusy, onReadModels }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [savedStep, setSavedStep] = useState<string | null>(null);
   const rows = view?.steps ?? [];
@@ -33,6 +37,15 @@ export function StepsPage({ view, onSaved }: Props) {
   return (
     <>
       <p className="set-intro">{t.intro}</p>
+      <div className="set-source" aria-live="polite">
+        <span className="set-source-lines">
+          <SourceLine name="Claude Code" catalog={models?.claude} />
+          <SourceLine name="Codex" catalog={models?.codex} />
+        </span>
+        <button className="btn btn--sm" disabled={modelsBusy} onClick={onReadModels}>
+          {modelsBusy && models ? t.rereading : t.reread}
+        </button>
+      </div>
       {error && <p className="note note--error">{error}</p>}
       <div className="set-group">
         {rows.map((row, i) => (
@@ -40,7 +53,7 @@ export function StepsPage({ view, onSaved }: Props) {
             key={row.step}
             index={i + 2}
             row={row}
-            codexModels={view?.codexModels ?? []}
+            catalog={models ? (row.agent === "codex" ? models.codex : models.claude) : undefined}
             saved={savedStep === row.step}
             onSave={save}
           />
@@ -51,14 +64,28 @@ export function StepsPage({ view, onSaved }: Props) {
   );
 }
 
-function StepRow({ index, row, codexModels, saved, onSave }: {
+/** Where one agent's list came from. Always one line, so the page does not move when it loads. */
+function SourceLine({ name, catalog }: { name: string; catalog: AgentCatalog | undefined }) {
+  if (!catalog) return <span className="set-source-line faint">{t.reading(name)}</span>;
+  if (!catalog.fromCli) {
+    // the last list this CLI gave (saved by the core), else nothing but "Theo máy"
+    const text = catalog.readAt
+      ? t.lastList(name, catalog.error ?? "", formatDateTime(catalog.readAt))
+      : t.fallback(name, catalog.error ?? "");
+    return <span className="set-source-line set-source-line--warn">{text}</span>;
+  }
+  const time = catalog.readAt ? formatHourMinute(catalog.readAt) : undefined;
+  return <span className="set-source-line">{t.source(name, catalog.cliVersion, catalog.models.length, time)}</span>;
+}
+
+function StepRow({ index, row, catalog, saved, onSave }: {
   index: number;
   row: StepSetting;
-  codexModels: readonly string[];
+  catalog: AgentCatalog | undefined;
   saved: boolean;
   onSave: (c: StepChoiceRequest) => void;
 }) {
-  const [custom, setCustom] = useState<string | null>(null);
+  const [resetNote, setResetNote] = useState<string | null>(null);
   const agent: AgentKind = row.agent;
   const send = (patch: Partial<StepChoiceRequest>) =>
     onSave({
@@ -68,9 +95,18 @@ function StepRow({ index, row, codexModels, saved, onSave }: {
       effort: row.effort,
       ...patch,
     });
-  const models = modelOptions(row, agent, codexModels);
-  const known = claudeModel(row.model ?? row.lastModel);
-  const price = agent === "codex" ? t.priceUnknown : known ? t.price(known.label, priceText(known)) : undefined;
+  /** A new model keeps the effort only if that model takes it. */
+  const pickModel = (model: string | undefined) => {
+    const effort = effortForModel(catalog, row.effort, model);
+    const entry = modelEntry(catalog, model);
+    setResetNote(row.effort && !effort ? t.effortReset(row.effort, entry?.label ?? model ?? t.machine) : null);
+    send({ model, effort });
+  };
+  const models = modelOptions(row, catalog);
+  const efforts = effortOptions(row, catalog);
+  const entry = modelEntry(catalog, row.model);
+  const loading = catalog === undefined;
+  const about = entry?.description ? `${entry.label}: ${entry.description}.` : undefined;
   const history = t.history(
     row.runs,
     row.avgCostUsd !== undefined ? formatUsd(row.avgCostUsd) : undefined,
@@ -95,7 +131,10 @@ function StepRow({ index, row, codexModels, saved, onSave }: {
             <SegmentedControl
               options={(["codex", "claude"] as const).map((a) => ({ value: a, label: agentLabel[a] }))}
               value={agent === "codex" ? "codex" : "claude"}
-              onChange={(a) => onSave({ step: row.step, agent: a })}
+              onChange={(a) => {
+                setResetNote(null);
+                onSave({ step: row.step, agent: a });
+              }}
               label={`${t.agent} · ${stepLabel[row.step]}`}
             />
           ) : (
@@ -106,16 +145,10 @@ function StepRow({ index, row, codexModels, saved, onSave }: {
           <span className="faint">{t.model}</span>
           <select
             className="input"
-            value={custom !== null ? CUSTOM : (row.model ?? "")}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === CUSTOM) {
-                setCustom(row.model ?? "");
-                return;
-              }
-              setCustom(null);
-              send({ model: v || undefined });
-            }}
+            disabled={loading}
+            title={loading ? t.waitList : undefined}
+            value={row.model ?? ""}
+            onChange={(e) => pickModel(e.target.value || undefined)}
           >
             {models.map((o) => (
               <option key={o.value} value={o.value}>
@@ -126,8 +159,17 @@ function StepRow({ index, row, codexModels, saved, onSave }: {
         </label>
         <label className="set-step-field">
           <span className="faint">{t.effort}</span>
-          <select className="input" value={row.effort ?? ""} onChange={(e) => send({ effort: e.target.value || undefined })}>
-            {effortOptions(row, agent).map((o) => (
+          <select
+            className="input"
+            disabled={loading || efforts.length === 1}
+            title={loading ? t.waitList : undefined}
+            value={row.effort ?? ""}
+            onChange={(e) => {
+              setResetNote(null);
+              send({ effort: e.target.value || undefined });
+            }}
+          >
+            {efforts.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
@@ -135,43 +177,8 @@ function StepRow({ index, row, codexModels, saved, onSave }: {
           </select>
         </label>
       </div>
-      {custom !== null && (
-        <span className="set-inline">
-          <input
-            className="mono"
-            autoFocus
-            autoComplete="off"
-            spellCheck={false}
-            placeholder={t.customPlaceholder}
-            value={custom}
-            onChange={(e) => setCustom(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && custom.trim()) {
-                send({ model: custom.trim() });
-                setCustom(null);
-              } else if (e.key === "Escape") {
-                e.stopPropagation();
-                setCustom(null);
-              }
-            }}
-          />
-          <button
-            className="btn btn--sm btn--primary"
-            disabled={!custom.trim()}
-            onClick={() => {
-              send({ model: custom.trim() });
-              setCustom(null);
-            }}
-          >
-            {t.customSave}
-          </button>
-        </span>
-      )}
-      <span className="set-row-hint">
-        {[price, agent === "codex" ? t.codexNote : undefined, row.agentChoice ? t.agentNote : undefined]
-          .filter(Boolean)
-          .join(" ")}
-      </span>
+      {resetNote && <span className="set-row-hint set-warn">{resetNote}</span>}
+      <span className="set-row-hint">{[about, row.agentChoice ? t.agentNote : undefined].filter(Boolean).join(" ")}</span>
     </div>
   );
 }

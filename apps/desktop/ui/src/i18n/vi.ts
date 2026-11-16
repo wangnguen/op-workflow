@@ -127,23 +127,32 @@ export const vi = {
     codexQuota: "Codex",
     steps: {
       intro:
-        "Mỗi bước chọn model và effort riêng. \"Theo máy\" = không truyền cờ, CLI dùng mặc định trên máy bạn (như chạy tay). Giá và số liệu bên cạnh chỉ để tham khảo; app không tự chọn thay bạn.",
+        "Mỗi bước chọn model và effort riêng, trong danh sách app hỏi thẳng Claude Code và Codex trên máy bạn (có model mới thì bấm Đọc lại). \"Theo máy\" = không truyền cờ, CLI dùng mặc định của máy (như chạy tay). App không tự chọn thay bạn.",
       agent: "Agent",
       model: "Model",
       effort: "Effort",
       machine: "Theo máy",
+      machineIs: (what: string) => `Theo máy (${what})`,
       machineWas: (model: string) => `Theo máy (lần trước: ${model})`,
       appDefault: (effort: string) => `Mặc định của app (${effort})`,
-      custom: "Gõ tên khác…",
-      customPlaceholder: "Tên model, ví dụ gpt-6.1-sol",
-      customSave: "Dùng",
-      price: (model: string, text: string) => `${model}: ${text} mỗi 1M token vào / ra`,
-      priceUnknown: "Giá: xem trang của nhà cung cấp.",
+      notListed: (model: string) => `${model} (máy không còn model này)`,
+      noEffort: "Model này không nhận effort",
+      effortNotListed: (effort: string) => `${effort} (model này không có)`,
+      effortReset: (effort: string, model: string) => `${model} không có effort ${effort}, nên effort về "Theo máy".`,
+      reading: (name: string) => `${name}: đang đọc danh sách model…`,
+      reread: "Đọc lại",
+      rereading: "Đang đọc…",
+      source: (name: string, version: string | undefined, count: number, time: string | undefined) =>
+        `${name}${version ? ` ${version}` : ""}: ${count} model` + (time ? `, đọc lúc ${time}` : ""),
+      lastList: (name: string, error: string, time: string) =>
+        `${name}: ${error || "không đọc được từ CLI"}. Đang dùng danh sách đọc lúc ${time}.`,
+      fallback: (name: string, error: string) =>
+        `${name}: ${error || "không đọc được từ CLI"}. Chưa có danh sách, chỉ chọn được "Theo máy".`,
+      waitList: "Đang đọc danh sách model từ CLI…",
       history: (runs: number, cost: string | undefined, time: string | undefined) =>
         runs === 0
           ? "Chưa chạy lần nào"
           : [`${runs} lần chạy`, cost && `TB ${cost}`, time && `TB ${time}`].filter(Boolean).join(" · "),
-      codexNote: "Model của Codex lấy từ ~/.codex/config.toml; gõ tên nếu muốn model khác.",
       agentNote: "Đổi agent thì model và effort về \"Theo máy\".",
       saved: "Đã lưu vào config.json",
       flags: "Cờ: Claude --model / --effort, Codex -m / -c model_reasoning_effort",

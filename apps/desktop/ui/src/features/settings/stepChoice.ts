@@ -1,34 +1,75 @@
-// Options of Settings → Các bước AI (pure, easy to test).
+// Options of Settings → Các bước AI (pure, easy to test). Only what the CLIs on the machine list
+// (`step_models`) can be picked; while the lists load, a select only shows what is picked now.
 import { vi } from "../../i18n/vi";
-import type { AgentKind, StepSetting } from "../../ipc/types";
-import { CLAUDE_MODELS, effortsFor, modelName, priceText } from "../../shared/models";
+import type { AgentCatalog, AgentModel, StepSetting } from "../../ipc/types";
+import { modelName } from "../../shared/models";
 
 const t = vi.settings.steps;
-
-/** Value of the "type another name" entry in the model list. */
-export const CUSTOM = "__custom";
 
 export interface Option {
   value: string;
   label: string;
 }
 
-/** Model list: "theo máy" first, then the agent's known models, the current pick if it is
- *  not one of them, then "Gõ tên khác…". */
-export function modelOptions(row: StepSetting, agent: AgentKind, codexModels: readonly string[]): Option[] {
-  const machine = row.lastModel && !row.model ? t.machineWas(modelName(row.lastModel)) : t.machine;
-  const known: Option[] =
-    agent === "codex"
-      ? codexModels.map((m, i) => ({ value: m, label: i === 0 ? `${m} (mặc định của Codex)` : m }))
-      : CLAUDE_MODELS.map((m) => ({ value: m.id, label: `${m.label} · ${priceText(m)}` }));
-  const out: Option[] = [{ value: "", label: machine }, ...known];
-  if (row.model && !known.some((o) => o.value === row.model)) out.push({ value: row.model, label: row.model });
-  out.push({ value: CUSTOM, label: t.custom });
+/** "Theo máy" with what it turns out to be: the CLI's configured default, else the last run. */
+function machineModel(row: StepSetting, catalog: AgentCatalog | undefined): string {
+  if (catalog?.defaultLabel) return t.machineIs(catalog.defaultLabel);
+  if (row.lastModel && !row.model) return t.machineWas(modelName(row.lastModel));
+  return t.machine;
+}
+
+/** Model list: "Theo máy" first, then what the CLI lists, and the saved pick if the CLI no
+ *  longer lists it (so the select can show it; it cannot be picked again once left).
+ *  Without a catalog (still loading): the current pick only. */
+export function modelOptions(row: StepSetting, catalog: AgentCatalog | undefined): Option[] {
+  const out: Option[] = [{ value: "", label: machineModel(row, catalog) }];
+  const listed = (catalog?.models ?? []).map((m) => ({ value: m.id, label: m.label }));
+  out.push(...listed);
+  if (row.model && !listed.some((o) => o.value === row.model)) {
+    out.push({ value: row.model, label: catalog ? t.notListed(row.model) : row.model });
+  }
   return out;
 }
 
-/** Effort list: "theo máy" (or the app's own default) first, then the agent's levels. */
-export function effortOptions(row: StepSetting, agent: AgentKind): Option[] {
-  const first = row.effortDefault && agent === row.agent ? t.appDefault(row.effortDefault) : t.machine;
-  return [{ value: "", label: first }, ...effortsFor(agent).map((e) => ({ value: e, label: e }))];
+/** The catalog entry a step runs with: the picked model, else the CLI's default. */
+export function modelEntry(catalog: AgentCatalog | undefined, model: string | undefined): AgentModel | undefined {
+  const id = model ?? catalog?.defaultId;
+  return id ? catalog?.models.find((m) => m.id === id) : undefined;
+}
+
+/** Effort levels for `model` (undefined = the machine's default model). A model the list does
+ *  not know (a saved one it no longer lists, an unknown default) gets every level some model
+ *  takes. */
+export function effortLevels(catalog: AgentCatalog | undefined, model: string | undefined): string[] {
+  if (!catalog) return [];
+  const entry = modelEntry(catalog, model);
+  if (entry) return entry.efforts;
+  const all: string[] = [];
+  for (const m of catalog.models) for (const e of m.efforts) if (!all.includes(e)) all.push(e);
+  return all;
+}
+
+/** Effort list: "Theo máy" (with the CLI's default, or the app's own default) first, then the
+ *  levels the step's model takes. A model without effort gets one disabled-looking entry. */
+export function effortOptions(row: StepSetting, catalog: AgentCatalog | undefined): Option[] {
+  const levels = effortLevels(catalog, row.model);
+  const takesNone = catalog !== undefined && levels.length === 0 && modelEntry(catalog, row.model) !== undefined;
+  const first = takesNone
+    ? t.noEffort
+    : row.effortDefault
+      ? t.appDefault(row.effortDefault)
+      : catalog?.defaultEffort
+        ? t.machineIs(catalog.defaultEffort)
+        : t.machine;
+  const out: Option[] = [{ value: "", label: first }, ...levels.map((e) => ({ value: e, label: e }))];
+  if (row.effort && !levels.includes(row.effort)) {
+    out.push({ value: row.effort, label: catalog ? t.effortNotListed(row.effort) : row.effort });
+  }
+  return out;
+}
+
+/** The effort to keep when the model changes: dropped when the new model does not take it. */
+export function effortForModel(catalog: AgentCatalog | undefined, effort: string | undefined, model: string | undefined): string | undefined {
+  if (!effort || !catalog) return effort;
+  return effortLevels(catalog, model).includes(effort) ? effort : undefined;
 }

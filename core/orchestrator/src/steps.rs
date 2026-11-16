@@ -1,21 +1,16 @@
 //! Settings → Các bước AI: the agent, model and effort of each AI step, and what past runs of
-//! that step cost. The app shows prices and history for reference only; it never picks a model
-//! or an effort by itself (PLAN.md §12, "Model và effort theo bước").
+//! that step cost. Models and effort levels are picked from the lists the CLIs on the machine
+//! give (`models.rs`); the app never picks one by itself (PLAN.md §12, "Model và effort theo bước").
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use opw_config::Config;
-use opw_domain::view::{AgentKind, ApiError, StepChoiceRequest, StepSetting};
+use opw_domain::view::{AgentKind, ApiError, StepChoiceRequest, StepModels, StepSetting};
 use opw_domain::workflow::StepKind;
 use opw_storage::StepRunRow;
 
 use crate::flow::{agent_for, default_effort, step_config, step_key};
-
-/// `--effort` values of Claude Code (`claude --help`, 2.1.323).
-pub const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-/// `model_reasoning_effort` values of Codex.
-pub const CODEX_EFFORTS: [&str; 5] = ["minimal", "low", "medium", "high", "xhigh"];
+use crate::models::check_effort;
 
 /// The AI steps, in workflow order (intake runs no AI).
 pub fn ai_steps() -> impl Iterator<Item = StepKind> {
@@ -74,22 +69,6 @@ pub fn settings(config: &Config, done_runs: &[StepRunRow]) -> Vec<StepSetting> {
         .collect()
 }
 
-/// `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`).
-fn codex_config() -> Option<PathBuf> {
-    let home = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))?;
-    Some(home.join("config.toml"))
-}
-
-/// Models named in the Codex config, for the Settings list (empty when there is none).
-pub fn codex_models() -> Vec<String> {
-    codex_config()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|t| opw_agents::codex::configured_models(&t))
-        .unwrap_or_default()
-}
-
 /// A model name goes into the CLI's arguments: letters, digits and `._-:/[]` only, so it can
 /// never be read as another flag.
 fn valid_model(m: &str) -> bool {
@@ -104,7 +83,13 @@ fn invalid(message: impl Into<String>) -> ApiError {
 }
 
 /// Check a Settings pick before it goes into config.json. Returns the agent the step will use.
-pub fn validate(req: &StepChoiceRequest, config: &Config) -> Result<AgentKind, ApiError> {
+/// `models` are the lists last read from the CLIs (Settings reads them before showing the
+/// page); the effort must be one the picked model takes there.
+pub fn validate(
+    req: &StepChoiceRequest,
+    config: &Config,
+    models: Option<&StepModels>,
+) -> Result<AgentKind, ApiError> {
     if req.step == StepKind::Intake {
         return Err(invalid("Bước Nhận task không chạy AI"));
     }
@@ -116,20 +101,35 @@ pub fn validate(req: &StepChoiceRequest, config: &Config) -> Result<AgentKind, A
         Some(a) => a,
         None => agent_for(req.step, config),
     };
-    if let Some(m) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+    let catalog = models.map(|m| {
+        if agent == AgentKind::Codex {
+            &m.codex
+        } else {
+            &m.claude
+        }
+    });
+    let model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+    if let Some(m) = model {
         if !valid_model(m) {
             return Err(invalid(format!("Tên model không hợp lệ: {m}")));
         }
+        // only models the CLI lists; a saved one it no longer lists may stay (to change the effort)
+        let saved = step_config(req.step, &config.steps)
+            .and_then(|c| c.model.as_deref())
+            .map(str::trim);
+        if let Some(c) = catalog.filter(|c| c.from_cli) {
+            if saved != Some(m) && !c.models.iter().any(|x| x.id == m) {
+                let cli = if agent == AgentKind::Codex {
+                    "Codex"
+                } else {
+                    "Claude Code"
+                };
+                return Err(invalid(format!("{cli} trên máy không có model {m}")));
+            }
+        }
     }
     if let Some(e) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
-        let allowed: &[&str] = if agent == AgentKind::Codex {
-            &CODEX_EFFORTS
-        } else {
-            &CLAUDE_EFFORTS
-        };
-        if !allowed.contains(&e) {
-            return Err(invalid(format!("Effort không hợp lệ cho bước này: {e}")));
-        }
+        check_effort(catalog, model, e).map_err(invalid)?;
     }
     Ok(agent)
 }
@@ -215,44 +215,84 @@ mod tests {
             model: model.map(str::to_owned),
             effort: effort.map(str::to_owned),
         };
+        // the lists as the CLIs gave them
+        let models = StepModels {
+            claude: crate::models::claude_catalog(
+                &json!({"models": [
+                    {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "supportsEffort": true,
+                     "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+                    {"value": "claude-haiku-4-5", "resolvedModel": "claude-haiku-4-5"}
+                ]}),
+                &serde_json::Value::Null,
+                None,
+                "t",
+            ),
+            codex: crate::models::codex_catalog(
+                &[
+                    json!({"model": "gpt-6.1-sol", "isDefault": true, "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low"}, {"reasoningEffort": "xhigh"}, {"reasoningEffort": "ultra"}
+                    ]}),
+                ],
+                &serde_json::Value::Null,
+                None,
+                "t",
+            ),
+        };
+        let ok = |r: StepChoiceRequest| validate(&r, &config, Some(&models)).unwrap();
         assert_eq!(
-            validate(
-                &req(StepKind::Fix, None, Some("claude-sonnet-5-5"), Some("max")),
-                &config
-            )
-            .unwrap(),
+            ok(req(StepKind::Fix, None, Some("claude-sonnet-5-5"), Some("max"))),
             AgentKind::Claude
         );
         assert_eq!(
-            validate(
-                &req(
-                    StepKind::CrossReview,
-                    Some(AgentKind::Codex),
-                    Some("gpt-6.1-sol"),
-                    Some("xhigh")
-                ),
-                &config
-            )
-            .unwrap(),
+            ok(req(
+                StepKind::CrossReview,
+                Some(AgentKind::Codex),
+                Some("gpt-6.1-sol"),
+                Some("ultra")
+            )),
+            AgentKind::Codex
+        );
+        // "Theo máy" model: the effort of Codex's default model
+        assert_eq!(
+            ok(req(
+                StepKind::CrossReview,
+                Some(AgentKind::Codex),
+                None,
+                Some("xhigh")
+            )),
             AgentKind::Codex
         );
         for bad in [
             req(StepKind::Intake, None, None, None),
             req(StepKind::Fix, None, Some("--dangerously-skip-permissions"), None),
             req(StepKind::Fix, None, Some("opus 5"), None),
-            req(StepKind::Fix, None, None, Some("ultra")),
+            req(StepKind::Fix, None, None, Some("ultra\"")),
             req(StepKind::CrossReview, Some(AgentKind::Codex), None, Some("max")),
+            req(
+                StepKind::CrossReview,
+                Some(AgentKind::Codex),
+                None,
+                Some("minimal"),
+            ),
+            req(StepKind::Fix, None, Some("claude-haiku-4-5"), Some("low")),
             req(StepKind::Fix, Some(AgentKind::Codex), None, None),
+            // not in the list the CLI gave
+            req(StepKind::Fix, None, Some("claude-opus-9"), None),
+            req(StepKind::CrossReview, None, Some("claude-sonnet-5-5"), None),
         ] {
             assert_eq!(
-                validate(&bad, &config).unwrap_err().code,
+                validate(&bad, &config, Some(&models)).unwrap_err().code,
                 "step.choice",
                 "{bad:?}"
             );
         }
-        assert_eq!(
-            opw_agents::codex::configured_models("model = \"gpt-a\"\n"),
-            ["gpt-a"]
-        );
+        // a model saved earlier that the CLI no longer lists may stay, e.g. to change the effort
+        let saved = Config::from_value(&json!({"steps": {"fix": {"model": "claude-old-1"}}}));
+        let keep = req(StepKind::Fix, None, Some("claude-old-1"), Some("max"));
+        assert!(validate(&keep, &saved, Some(&models)).is_ok());
+        assert!(validate(&keep, &config, Some(&models)).is_err());
+        // lists not read yet: plain words pass, the CLI has the last say
+        assert!(validate(&req(StepKind::Fix, None, None, Some("max")), &config, None).is_ok());
+        assert!(validate(&req(StepKind::Fix, None, None, Some("-x")), &config, None).is_err());
     }
 }

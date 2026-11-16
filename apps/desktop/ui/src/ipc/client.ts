@@ -15,6 +15,7 @@ import {
   mockSetTasksDir,
   mockSetStepChoice,
   mockSettings,
+  mockStepModels,
   mockStartOptions,
   mockStartTask,
   mockUpdate,
@@ -50,6 +51,7 @@ import type {
   StartRequest,
   StartResult,
   StepChoiceRequest,
+  StepModels,
   TaskDetail,
   TasksDirChange,
   UpdateView,
@@ -81,6 +83,14 @@ export const openConfig = (): Promise<null> => call("open_config", () => null);
 /** Settings → Các bước AI: agent, model and effort of one step (absent = the machine's default). */
 export const setStepChoice = (choice: StepChoiceRequest): Promise<SettingsView> =>
   call("set_step_choice", () => mockSetStepChoice(choice), { choice });
+/** Models and effort levels the Claude / Codex CLIs on this machine offer. The core starts both
+ *  CLIs (no prompt, no tokens, ~2 s) and reuses the answer for 10 minutes unless `refresh`. */
+export async function getStepModels(refresh: boolean): Promise<StepModels> {
+  const models = await call("step_models", mockStepModels, { refresh });
+  // the preview waits like the real read does, so the loading state can be seen
+  if (!isTauri()) await new Promise((r) => window.setTimeout(r, 900));
+  return models;
+}
 
 // ---------- Claude / Codex connection ----------
 

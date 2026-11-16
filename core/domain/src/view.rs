@@ -274,9 +274,66 @@ pub struct SettingsView {
     /// Agent, model and effort of each AI step, with what past runs cost (Các bước AI).
     #[serde(default)]
     pub steps: Vec<StepSetting>,
-    /// Models named in `~/.codex/config.toml` (the first is Codex's default).
+}
+
+/// Models and effort levels the Claude and Codex CLIs on this machine offer, for Settings →
+/// Các bước AI. Read on demand (`step_models`), not with every settings poll.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepModels {
+    pub claude: AgentCatalog,
+    pub codex: AgentCatalog,
+}
+
+/// What one agent CLI offers. When the CLI is missing or does not answer, `from_cli` is
+/// `false`, `error` says why and `models` is the last list the CLI gave on this machine (`read_at`
+/// says when), or empty when there is none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCatalog {
+    pub agent: AgentKind,
+    pub models: Vec<AgentModel>,
+    /// The model the CLI uses when the app passes no flag ("Theo máy"), as configured
+    /// (e.g. `opus[1m]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// The entry of `models` that `default_model` resolves to, when the list has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_id: Option<String>,
+    /// `default_model` the way the list names it ("Opus 5.5 · 1M").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_label: Option<String>,
+    /// The effort the CLI uses when the app passes none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    pub from_cli: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// When the list was read (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<String>,
+}
+
+/// One model in an agent's list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModel {
+    /// What goes into `--model` / `-m`.
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Effort levels this model takes; empty = it takes no effort flag.
     #[serde(default)]
-    pub codex_models: Vec<String>,
+    pub efforts: Vec<String>,
+    /// The model's own default effort (Codex lists one per model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    /// The CLI's recommended / default model.
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 /// One AI step in Settings → Các bước AI. The app never picks a model or effort by itself:

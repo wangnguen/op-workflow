@@ -182,6 +182,32 @@ fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| (*a).to_owned()).collect()
 }
 
+/// Ask the CLI which models and effort levels this account can use, without any prompt (no
+/// API call, no tokens): start a stream-json session, send [`INITIALIZE_REQUEST`] on stdin, read
+/// the `control_response` line (`response.response.models`), then close stdin. Checked with
+/// Claude Code 2.1.325. Settings and plugins stay off so no hook runs; the model list does not
+/// depend on them (the machine's default model is read from settings.json separately).
+pub fn catalog_args() -> Vec<String> {
+    strings(&[
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "",
+        "--no-session-persistence",
+    ])
+}
+
+/// The control request [`catalog_args`] answers with the model list.
+pub const INITIALIZE_REQUEST: &str =
+    r#"{"type":"control_request","request_id":"opw-models","request":{"subtype":"initialize"}}"#;
+
 /// Minimal quota probe (PLAN.md §9): ~645 input + ~90 output Haiku tokens, run in an empty
 /// directory so no CLAUDE.md is loaded. Read the `rate_limit_event` line from its output.
 pub fn quota_probe_args(model: &str) -> Vec<String> {
