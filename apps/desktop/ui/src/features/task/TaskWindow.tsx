@@ -27,8 +27,10 @@ import { formatDuration, formatUsd } from "../../shared/format";
 import { usePolling, useNow } from "../../shared/hooks";
 import { ChatTab } from "./ChatTab";
 import { CommentsTab } from "./CommentsTab";
+import { ContinueDialog } from "./ContinueDialog";
 import { CopyPush } from "./CopyPush";
 import { DiffTab } from "./DiffTab";
+import { FinishDialog } from "./FinishDialog";
 import { Markdown } from "../../shared/Markdown";
 import { modelText } from "../../shared/models";
 import { Icon } from "../../shared/ui/Icon";
@@ -73,6 +75,8 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   /** run shown in the Chat tab (undefined = the running or latest one) */
   const [chatRunId, setChatRunId] = useState<number>();
+  /** "Đã push xong" / "Làm tiếp" open over the window */
+  const [dialog, setDialog] = useState<"finish" | "continue">();
 
   // whichever is newer: the poll, or the answer of the last button
   useEffect(() => {
@@ -94,7 +98,8 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      // a dialog over the window takes Escape itself
+      if (e.key === "Escape" && !e.defaultPrevented) onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -204,6 +209,8 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
               onAction={act}
               onLogin={(p) => run("login", () => openLogin(p))}
               onShow={setTab}
+              onFinish={() => setDialog("finish")}
+              onContinue={() => setDialog("continue")}
               onFeedback={() => {
                 setTab("plan");
                 setFeedbackOpen(true);
@@ -256,6 +263,35 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
           </>
         )}
       </div>
+      {d && dialog === "finish" && (
+        <FinishDialog
+          wpId={wpId}
+          taskId={d.taskId}
+          branch={d.branch}
+          atPush={d.status === "awaitingPush"}
+          stepName={d.current ? stepLabel[d.current] : undefined}
+          onClose={() => setDialog(undefined)}
+          onFinished={(next) => {
+            setLatest(next);
+            onChanged();
+            polled.refresh();
+          }}
+        />
+      )}
+      {d && dialog === "continue" && (
+        <ContinueDialog
+          wpId={wpId}
+          taskId={d.taskId}
+          detail={d}
+          onClose={() => setDialog(undefined)}
+          onDone={(next) => {
+            setDialog(undefined);
+            setLatest(next);
+            onChanged();
+            polled.refresh();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -293,9 +329,13 @@ interface StripProps {
   onLogin: (p: "claude" | "codex") => void;
   onShow: (tab: TaskTab) => void;
   onFeedback: () => void;
+  /** "Đã push xong": the push check dialog */
+  onFinish: () => void;
+  /** "Làm tiếp" on a finished task */
+  onContinue: () => void;
 }
 
-function StatusStrip({ detail: d, busy, onError, onAction, onLogin, onShow, onFeedback }: StripProps) {
+function StatusStrip({ detail: d, busy, onError, onAction, onLogin, onShow, onFeedback, onFinish, onContinue }: StripProps) {
   const now = useNow(1000);
   const step = d.current ? stepLabel[d.current] : "";
   const disabled = busy !== undefined;
@@ -435,7 +475,7 @@ function StatusStrip({ detail: d, busy, onError, onAction, onLogin, onShow, onFe
     actions = (
       <>
         <CopyPush push={d.push} onError={onError} />
-        <button className="btn btn--primary btn--sm" disabled={disabled} title={t.finishHint} onClick={() => onAction({ type: "finish" })}>
+        <button className="btn btn--primary btn--sm" disabled={disabled} title={t.finishHint} onClick={onFinish}>
           <Icon name="check" size={12} />
           {t.finish}
         </button>
@@ -443,6 +483,18 @@ function StatusStrip({ detail: d, busy, onError, onAction, onLogin, onShow, onFe
     );
   } else if (d.status === "done") {
     icon = <StatusIcon state="done" size={15} />;
+    text = (
+      <>
+        <strong>{t.status.done}</strong>
+        <span className="faint">{t.doneNote}</span>
+      </>
+    );
+    actions = (
+      <button className="btn btn--primary btn--sm" disabled={disabled} title={vi.board.continueHint} onClick={onContinue}>
+        <Icon name="play" size={12} />
+        {vi.board.continue}
+      </button>
+    );
   }
 
   return (

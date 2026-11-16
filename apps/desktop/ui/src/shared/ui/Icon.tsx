@@ -19,6 +19,7 @@ const PATHS = {
   folder: <path d="M3.5 7.5a2 2 0 0 1 2-2h3.8l2 2h7.2a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />,
   file: <path d="M7 3.5h7l4 4v13H7zM14 3.5v4h4M9.5 12.5h6M9.5 16h6" />,
   check: <path d="M5 12.5l4.5 4.5L19 7.5" />,
+  chevron: <path d="M9.5 6l6 6-6 6" />,
   pause: <path d="M9 6.5v11M15 6.5v11" />,
   play: <path d="M8.5 6v12l9.5-6z" />,
   dot: <circle cx={12} cy={12} r={3} />,

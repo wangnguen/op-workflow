@@ -175,6 +175,46 @@ pub struct TaskCard {
     /// How the last "Lấy issue" went (kept across restarts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issues: Option<IssueStatus>,
+    /// "Đã xong" column: when the user marked it done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    /// "Đã xong" column: the push check made when it was marked done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_check: Option<PushCheck>,
+    /// "Đã xong" column: OpenProject still lists the task as open (not Resolved yet).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nx_open: bool,
+}
+
+/// Is the task branch on origin? Made by "Đã push xong" (`git fetch`, then local branch vs
+/// `origin/<branch>`). Read only: the app never pushes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushCheck {
+    pub branch: String,
+    /// origin has the branch and every local commit of it.
+    pub pushed: bool,
+    /// origin has the branch at all.
+    pub remote: bool,
+    /// Local commits origin does not have.
+    pub ahead: u32,
+    /// Commits on origin the local branch does not have.
+    pub behind: u32,
+    /// Files changed but not committed (only counted while the repo is on the task branch).
+    pub uncommitted: u32,
+    /// Short hash of the local branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// `git fetch` failed: the result compares with what origin had at the last fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_error: Option<String>,
+    /// The repo is on another branch right now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_branch: Option<String>,
+    pub checked_at: String,
+    /// The user marked the task done although the check said it was not pushed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forced: bool,
 }
 
 /// The last "Lấy issue" of a task: when, how many issues made it into the brief, or what failed.
@@ -1151,8 +1191,21 @@ pub enum FlowAction {
         #[serde(default)]
         issue: Option<u64>,
     },
-    /// The user pushed: the task leaves the board.
-    Finish,
+    /// The user pushed: the task moves to "Đã xong". Also allowed before the push summary (the
+    /// remaining steps are skipped), never while a step runs.
+    Finish {
+        /// The push check said "not pushed" and the user marks it done anyway.
+        #[serde(default)]
+        forced: bool,
+    },
+    /// "Làm tiếp" on a finished task (or one waiting for the push): `step` = run again from
+    /// there (`None` = carry on where it stopped); `note` goes to the next Viết code.
+    Reopen {
+        #[serde(default)]
+        step: Option<StepKind>,
+        #[serde(default)]
+        note: Option<String>,
+    },
     /// Turn auto-advance on/off for this task.
     SetAuto { on: bool },
 }
@@ -1246,6 +1299,9 @@ mod tests {
             flow_note: None,
             login: None,
             issues: None,
+            finished_at: None,
+            push_check: None,
+            nx_open: false,
         };
         let v = serde_json::to_value(&card).unwrap();
         assert_eq!(
@@ -1344,6 +1400,27 @@ mod tests {
         assert_eq!(a, FlowAction::RerunPush { issue: None });
         let a: FlowAction = serde_json::from_value(json!({"type": "setAuto", "on": true})).unwrap();
         assert_eq!(a, FlowAction::SetAuto { on: true });
+        // the old button sends no `forced`; "Làm tiếp" may leave out the step and the note
+        let a: FlowAction = serde_json::from_value(json!({"type": "finish"})).unwrap();
+        assert_eq!(a, FlowAction::Finish { forced: false });
+        let a: FlowAction = serde_json::from_value(json!({"type": "reopen"})).unwrap();
+        assert_eq!(
+            a,
+            FlowAction::Reopen {
+                step: None,
+                note: None
+            }
+        );
+        let a: FlowAction =
+            serde_json::from_value(json!({"type": "reopen", "step": "implement", "note": "thêm test"}))
+                .unwrap();
+        assert_eq!(
+            a,
+            FlowAction::Reopen {
+                step: Some(StepKind::Implement),
+                note: Some("thêm test".into())
+            }
+        );
         let d: FindingDecision = serde_json::from_value(json!({
             "wpId": 1, "fingerprint": "ab", "decision": "accept", "reason": "ok"
         }))

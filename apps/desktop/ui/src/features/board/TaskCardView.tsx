@@ -1,9 +1,10 @@
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { agentLabel, stepHint, stepLabel, stepStateLabel, vi } from "../../i18n/vi";
 import { getTaskDetail } from "../../ipc/client";
-import type { FlowAction, IssueStatus, Provider, TaskCard } from "../../ipc/types";
+import type { FlowAction, IssueStatus, Provider, PushCheck, TaskCard } from "../../ipc/types";
 import { CopyPush } from "../task/CopyPush";
 import type { TaskTab } from "../task/taskTabs";
-import { formatHourMinute, formatUsd } from "../../shared/format";
+import { formatHourMinute, formatRelative, formatUsd } from "../../shared/format";
 import { STEP_COUNT } from "../../shared/steps";
 import { Icon } from "../../shared/ui/Icon";
 import { StatusChip } from "../../shared/ui/StatusChip";
@@ -26,6 +27,14 @@ interface Props {
   onLogin?: (provider: Provider) => void;
   /** a copy button failed (no push summary, clipboard refused) */
   onError?: (message: string) => void;
+  /** "Đã push xong": the push check, then the task moves to Đã xong */
+  onFinish: (card: TaskCard) => void;
+  /** "Làm tiếp" on a finished task */
+  onContinue: (card: TaskCard) => void;
+  /** press on the card body: may become a drag to another column */
+  onDragStart?: (e: ReactPointerEvent<HTMLElement>, card: TaskCard) => void;
+  /** this card is being dragged (its ghost follows the pointer) */
+  dragging?: boolean;
 }
 
 const b = vi.board;
@@ -47,7 +56,8 @@ const beforeAnalyze = (card: TaskCard) =>
   (card.step?.kind === "intake" && card.step.state === "done") ||
   (card.step?.kind === "analyze" && card.step.state === "pending");
 
-function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssues, onOpen, onFlow, onLogin, onError }: Props) {
+function primaryAction(props: Props) {
+  const { card, onStart, onPause, onBrief, onIssues, readingIssues, onOpen, onFlow, onLogin, onError, onFinish, onContinue } = props;
   if (card.column === "inbox") {
     return (
       <button className="btn btn--primary btn--sm" onClick={() => onStart(card)}>
@@ -61,12 +71,23 @@ function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssue
       {f.open}
     </button>
   );
+  if (card.column === "done") {
+    return (
+      <>
+        {open("progress")}
+        <button className="btn btn--primary btn--sm" title={b.continueHint} onClick={() => onContinue(card)}>
+          <Icon name="play" size={12} />
+          {b.continue}
+        </button>
+      </>
+    );
+  }
   if (card.column === "awaitingPush") {
     return (
       <>
         {open("push")}
         <CopyPush load={() => getTaskDetail(card.wpId).then((d) => d.push)} onError={onError} />
-        <button className="btn btn--primary btn--sm" title={f.finishHint} onClick={() => onFlow(card, { type: "finish" })}>
+        <button className="btn btn--primary btn--sm" title={f.finishHint} onClick={() => onFinish(card)}>
           <Icon name="check" size={12} />
           {f.finish}
         </button>
@@ -197,12 +218,53 @@ function IssueLine({ status }: { status: IssueStatus }) {
   return <p className="card-issues">{b.issuesDoneAt(status.read, time)}</p>;
 }
 
+/** "Đã xong" card: when, where it stopped if before the push summary, and the push check. */
+function DoneLines({ card }: { card: TaskCard }) {
+  const step = card.step;
+  const early = step && step.kind !== "pushSummary";
+  const when = card.finishedAt ? formatRelative(card.finishedAt, Date.now()) : undefined;
+  const status = card.nxStatus.toLowerCase();
+  const nxOpen = card.nxOpen && !status.includes("resolved") && !status.includes("closed");
+  return (
+    <>
+      <div className="card-line card-line--done" title={card.finishedAt}>
+        <StatusIcon state="done" />
+        <span className="card-line-text">
+          {when ? b.finishedAt(when) : f.status.done}
+          {early && <span className="faint"> · {b.stoppedAt(step.index, stepLabel[step.kind])}</span>}
+        </span>
+      </div>
+      {card.pushCheck && <PushLine check={card.pushCheck} />}
+      {nxOpen && (
+        <p className="card-remind">
+          <Icon name="alert" size={12} />
+          {b.nxStillOpen(card.nxStatus)}
+        </p>
+      )}
+    </>
+  );
+}
+
+function PushLine({ check }: { check: PushCheck }) {
+  const ok = check.pushed && !check.forced;
+  return (
+    <p className={`card-push${ok ? "" : " card-push--warn"}`} title={check.fetchError}>
+      <Icon name={ok ? "cloud" : "alert"} size={12} />
+      {ok ? vi.push.linePushed(check.head) : vi.push.lineForced(check.ahead, check.remote)}
+    </p>
+  );
+}
+
 export function TaskCardView(props: Props) {
-  const { card } = props;
+  const { card, onDragStart, dragging } = props;
   const step = card.step;
   const waiting = step?.state === "waitingUser";
+  const done = card.column === "done";
   return (
-    <article className={`card card--${card.column}${waiting ? " card--waiting" : ""}`}>
+    <article
+      className={`card card--${card.column}${waiting ? " card--waiting" : ""}${dragging ? " is-drag-source" : ""}`}
+      onPointerDown={onDragStart && ((e) => onDragStart(e, card))}
+    >
       <span className="card-bar" aria-hidden="true" />
       <header className="card-top">
         <span className="card-mono" data-tone={projectTone(card.project)} title={card.project} aria-hidden="true">
@@ -224,7 +286,8 @@ export function TaskCardView(props: Props) {
         />
       </header>
 
-      {step && (
+      {done && <DoneLines card={card} />}
+      {step && !done && (
         <div className={`card-line card-line--${step.state}`} title={stepHint[step.kind]}>
           <StatusIcon state={step.state} />
           <span className="card-line-text">

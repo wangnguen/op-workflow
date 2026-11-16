@@ -1,0 +1,125 @@
+/* "Đã push xong" and "Làm tiếp": small sheets over the board or the task window */
+
+.flow-scrim {
+  z-index: 60;
+}
+.flow-sheet {
+  width: min(500px, calc(100vw - 32px));
+}
+.flow-body {
+  gap: 12px;
+}
+/* each block fades in (the check result replaces the "checking" line) */
+.flow-body > * {
+  animation: flow-in var(--dur-base) var(--ease-out);
+}
+@keyframes flow-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.flow-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.flow-line > .icon,
+.flow-line > svg {
+  flex: none;
+  margin-top: 2px;
+}
+.flow-line p {
+  margin: 0;
+}
+.flow-line--busy {
+  color: var(--text-dim);
+}
+.flow-line--ok strong {
+  color: var(--st-done);
+}
+.flow-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.flow-actions {
+  display: inline-flex;
+  flex: none;
+  gap: 8px;
+}
+.sheet-foot.flow-foot {
+  justify-content: flex-end;
+}
+.flow-fine {
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+/* Làm tiếp: one card per way back */
+.flow-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.flow-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--fill);
+  box-shadow: inset 0 0 0 1px transparent;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.flow-choice:hover {
+  background: var(--fill-strong);
+}
+.flow-choice.is-picked {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.flow-choice input[type="radio"] {
+  flex: none;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+.flow-choice-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+.flow-choice-text strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.flow-choice-text small {
+  font-size: 12px;
+  line-height: 1.45;
+}
+.flow-note {
+  width: 100%;
+  height: auto;
+  min-height: 62px;
+  margin-top: 6px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.45;
+  resize: vertical;
+}
+.flow-select {
+  width: fit-content;
+  min-width: 190px;
+  margin-top: 6px;
+}

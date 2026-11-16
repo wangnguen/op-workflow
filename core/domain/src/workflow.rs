@@ -129,6 +129,10 @@ pub enum WorkflowEvent {
     RedoPushSummary,
     Pause,
     Resume,
+    /// "Làm tiếp" on a finished (or stopped) task: run again from this step, one the task already
+    /// reached. Earlier steps keep their state, this one and the later ones start over. The
+    /// caller refuses it while a step process runs.
+    Reopen(StepKind),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +286,26 @@ impl Workflow {
             }
 
             (Phase::AwaitingPush, E::RedoPushSummary) => self.run(StepKind::PushSummary),
+
+            // `Running` here also means "ready to run": the caller checks no step process is
+            // running. Only a step the task already reached can be run again.
+            (phase, E::Reopen(step)) if phase != Phase::NotStarted => {
+                if step == StepKind::Intake || self.state_of(step) == StepState::Pending {
+                    return Err(DomainError::NotCurrentStep(step));
+                }
+                for later in StepKind::ALL.into_iter().filter(|s| s.index() >= step.index()) {
+                    self.set(later, StepState::Pending);
+                }
+                self.paused_from = None;
+                // review rounds count again from a step before the cross review; the cross
+                // review itself starts a fresh first round
+                if step.index() < StepKind::CrossReview.index() {
+                    self.round = 0;
+                } else if step == StepKind::CrossReview {
+                    self.round = 1;
+                }
+                self.run(step)
+            }
 
             (phase @ (Phase::Running(_) | Phase::Gate(_)), E::Pause) => {
                 self.paused_from = Some(phase);
@@ -536,6 +560,47 @@ mod tests {
         assert_eq!(wf.phase(), Phase::Paused);
         wf.apply(E::Resume).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::Intake));
+    }
+
+    #[test]
+    fn reopen_runs_again_from_a_step_and_resets_what_follows() {
+        let mut wf = started_to_review();
+        wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
+        wf.apply(clean_final()).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::PushSummary)).unwrap();
+        assert_eq!(wf.phase(), Phase::AwaitingPush);
+        assert_eq!(wf.round(), 1);
+
+        let mut back = wf.clone();
+        back.apply(E::Reopen(StepKind::Implement)).unwrap();
+        assert_eq!(back.phase(), Phase::Running(StepKind::Implement));
+        assert_eq!(back.state_of(StepKind::Analyze), StepState::Done);
+        assert_eq!(back.state_of(StepKind::Implement), StepState::Running);
+        for later in [
+            StepKind::ReviewLocal,
+            StepKind::CrossReview,
+            StepKind::PushSummary,
+        ] {
+            assert_eq!(back.state_of(later), StepState::Pending, "{later:?}");
+        }
+        assert_eq!(back.round(), 0);
+        // only steps already reached: the reviews after Viết code are pending again
+        assert!(back.clone().apply(E::Reopen(StepKind::FinalReview)).is_err());
+        assert!(back.clone().apply(E::Reopen(StepKind::Analyze)).is_ok());
+        // a clean first review never needed Sửa lỗi
+        assert!(wf.clone().apply(E::Reopen(StepKind::Fix)).is_err());
+
+        let mut cross = wf.clone();
+        cross.apply(E::Reopen(StepKind::CrossReview)).unwrap();
+        assert_eq!(
+            (cross.phase(), cross.round()),
+            (Phase::Running(StepKind::CrossReview), 1)
+        );
+        let mut push = wf.clone();
+        push.apply(E::Reopen(StepKind::PushSummary)).unwrap();
+        assert_eq!(push.state_of(StepKind::FinalReview), StepState::Done);
+        assert!(wf.clone().apply(E::Reopen(StepKind::Intake)).is_err());
+        assert!(Workflow::default().apply(E::Reopen(StepKind::Analyze)).is_err());
     }
 
     #[test]

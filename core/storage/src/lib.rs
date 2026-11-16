@@ -354,6 +354,17 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Tasks in one board column, most recently moved first, at most `limit`.
+    pub fn tasks_in(&self, column: &str, limit: usize) -> StorageResult<Vec<TaskRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM task WHERE column_name = ?1
+             ORDER BY updated_at DESC, wp_id LIMIT ?2"
+        ))?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map(params![column, limit], task_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Ids of the tasks in one board column (e.g. `done`).
     pub fn task_ids_in(&self, column: &str) -> StorageResult<Vec<u64>> {
         let mut stmt = self
@@ -733,6 +744,33 @@ mod tests {
                 Some("feature/187716 from development"),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn lists_a_column_newest_first() {
+        let store = Store::open_in_memory().unwrap();
+        for (id, at) in [
+            (1, "2026-11-13T08:00:00Z"),
+            (2, "2026-11-15T08:00:00Z"),
+            (3, "2026-11-14T08:00:00Z"),
+        ] {
+            store
+                .upsert_task(&TaskRow {
+                    wp_id: id,
+                    updated_at: at.into(),
+                    ..row("done")
+                })
+                .unwrap();
+        }
+        store.set_column(3, "active", "2026-11-16T08:00:00Z").unwrap();
+        let done: Vec<u64> = store
+            .tasks_in("done", 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.wp_id)
+            .collect();
+        assert_eq!(done, [2, 1]);
+        assert_eq!(store.tasks_in("done", 1).unwrap().len(), 1);
     }
 
     #[test]

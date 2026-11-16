@@ -14,12 +14,14 @@ import type {
   GateKind,
   GateView,
   LogLine,
+  PushCheck,
   PushView,
   RunSummary,
   StepKind,
   StepState,
   StepView,
   TaskCard,
+  TaskColumn,
   TaskDetail,
   ToolEvent,
 } from "./types";
@@ -250,6 +252,16 @@ interface Flow {
   started: string;
   /** the repo's allowBash */
   allow: string[];
+  /** "Đã xong": when, and where it stood before (for "Làm tiếp" without a step) */
+  finishedAt?: string;
+  before?: { phase: Flow["phase"]; gate?: GateKind };
+  /** "Làm tiếp → Viết code" note, used by the next Viết code */
+  note?: string;
+  /** the board shows this task from its flow (it was started, finished or sent back) */
+  moved?: boolean;
+  /** push checks made so far, and the last one */
+  checks: number;
+  check?: PushCheck;
 }
 
 const flows = new Map<number, Flow>();
@@ -259,7 +271,38 @@ const session = (id: number) => `6f1c2a0e-5b7d-4c1e-9a3f-${String(id).padStart(1
 const DEMO_ACTIVE_WP = 187716;
 /** wpId of the demo card waiting for the push (mock.ts). */
 const DEMO_PUSH_WP = 186196;
+/** Tasks in "Đã xong" when the preview opens: one pushed and Resolved, one marked done although
+ *  the check said "not pushed", still open on OpenProject. */
+const DONE_SEED = [
+  {
+    wpId: 185902,
+    title: "Đổi màu nút Lưu trong form hồ sơ",
+    project: "Web Platform",
+    repo: "acme-web",
+    nxStatus: "Resolved",
+    nxStatusColor: "#2f9e44",
+    hoursAgo: 3,
+    pushed: true,
+    nxOpen: false,
+  },
+  {
+    wpId: 185744,
+    title: "Sửa lỗi phân trang khi lọc theo ngày",
+    project: "Mobile App",
+    repo: "acme-api",
+    nxStatus: "In progress",
+    nxStatusColor: "#cc5de8",
+    hoursAgo: 26,
+    pushed: false,
+    nxOpen: true,
+  },
+] as const;
+/** Paused in the preview: back in Inbox although their flow is kept. */
+const paused = new Set<number>();
 const iso = (ms: number) => new Date(ms).toISOString();
+/** Branch of a mock task: the two demo cards of mock.ts keep their own names. */
+const branchOf = (f: { wpId: number; taskId: string }) =>
+  f.wpId === DEMO_ACTIVE_WP ? "feature/187716" : f.wpId === DEMO_PUSH_WP ? "feature/186196" : `f/${f.taskId}`;
 const agentOf = (step: StepKind): AgentKind => (step === "crossReview" ? "codex" : "claude");
 const settled = (f: FindingView) => f.state === "fixed" || f.state === "accepted" || f.state === "deferred";
 const toFix = (f: FindingView) => !settled(f) && (f.chosen === true || f.severity !== "low");
@@ -295,6 +338,7 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo"): Flow 
       history: [],
       started: iso(Date.now()),
       allow: [],
+      checks: 0,
     };
     if (wpId === DEMO_ACTIVE_WP) {
       // the animated demo task: open it where the demo shows a gate, at the plan review
@@ -330,6 +374,25 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo"): Flow 
       seedRun(f, "crossReview", 33, 160, "vòng 1: không thấy lỗi").round = 1;
       seedRun(f, "finalReview", 26, 126, "không thấy lỗi");
       seedRun(f, "pushSummary", 21, 14, "đã viết commit message + PR description");
+    }
+    const seed = DONE_SEED.find((d) => d.wpId === wpId);
+    if (seed) {
+      f.title = seed.title;
+      for (const s of STEP_ORDER) f.states[s] = "done";
+      for (const s of STEP_ORDER) if (COST[s]) f.costs[s] = COST[s];
+      f.plan = PLAN;
+      f.push = pushView();
+      f.current = "pushSummary";
+      f.phase = "done";
+      f.before = { phase: "awaitingPush" };
+      f.round = 1;
+      const at = Date.now() - seed.hoursAgo * 3_600_000;
+      f.started = iso(at - 50 * 60_000);
+      f.finishedAt = iso(at);
+      f.check = seedCheck(f, seed.pushed, at);
+      seedRun(f, "analyze", seed.hoursAgo * 60 + 48, 50, "plan: 1 file sẽ sửa");
+      seedRun(f, "implement", seed.hoursAgo * 60 + 44, 54, "1 file thay đổi (+6 −2)");
+      seedRun(f, "pushSummary", seed.hoursAgo * 60 + 4, 14, "đã viết commit message + PR description");
     }
     flows.set(wpId, f);
   }
@@ -434,6 +497,10 @@ function startRun(f: Flow): void {
   if (f.current === "fix") for (const x of f.findings) if (toFix(x)) x.state = "fixing";
   const how = [agentOf(f.current) === "codex" ? "Codex" : "Claude", MODEL[f.current], EFFORT[f.current], COMMAND[f.current]];
   log(f, "info", `Bắt đầu ${LABEL[f.current]} (${how.filter(Boolean).join(" · ")})`, f.current);
+  if (f.current === "implement" && f.note) {
+    log(f, "info", `Viết code nhận ghi chú của bạn: ${f.note}`, "implement");
+    f.note = undefined;
+  }
   beginRun(f, f.current);
 }
 
@@ -601,7 +668,7 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     title: f.title,
     project: "Web Platform",
     repo: "~/Desktop/acme-api",
-    branch: `f/${f.taskId}`,
+    branch: branchOf(f),
     base: "origin/development",
     status: status(f),
     current: f.current,
@@ -715,11 +782,58 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       goTo(f, "pushSummary");
       startRun(f);
       break;
-    case "finish":
-      if (f.phase !== "awaitingPush") throw fail("flow.notNow", "Lúc này chưa đánh dấu xong được");
+    case "finish": {
+      if (running) throw fail("step.running", "Bước này đang chạy. Bấm Dừng trước rồi mới đánh dấu xong.");
+      if (f.phase === "done") throw fail("flow.notNow", "Lúc này chưa đánh dấu xong được");
+      const atPush = f.phase === "awaitingPush";
+      const where = LABEL[f.current ?? "analyze"];
+      f.before = { phase: f.phase, gate: f.gate };
       f.phase = "done";
-      log(f, "ok", "Bạn đã push: task xong");
+      f.finishedAt = iso(Date.now());
+      f.moved = true;
+      paused.delete(wpId);
+      if (f.check && action.forced) f.check = { ...f.check, forced: true };
+      log(
+        f,
+        "ok",
+        !atPush
+          ? `Bạn đánh dấu xong ở bước ${where} (bỏ qua các bước còn lại)`
+          : action.forced
+            ? "Bạn đánh dấu xong khi app chưa thấy nhánh trên origin"
+            : "Bạn đã push: task xong",
+      );
       break;
+    }
+    case "reopen": {
+      if (running) throw fail("step.running", "Bước này đang chạy");
+      const step = action.step;
+      if (step && (step === "intake" || f.states[step] === "pending")) {
+        throw fail("flow.invalid", `Task chưa tới bước ${LABEL[step]} nên chưa chạy lại từ đó được`);
+      }
+      if (f.phase === "done") {
+        f.phase = f.before?.phase ?? "awaitingPush";
+        f.gate = f.before?.gate;
+      }
+      f.before = undefined;
+      f.finishedAt = undefined;
+      f.moved = true;
+      paused.delete(wpId);
+      const note = action.note?.trim();
+      if (note) f.note = note;
+      if (step) {
+        const from = STEP_ORDER.indexOf(step);
+        STEP_ORDER.forEach((s, i) => {
+          if (i >= from) f.states[s] = "pending";
+        });
+        if (from < STEP_ORDER.indexOf("crossReview")) f.round = 0;
+        else if (step === "crossReview") f.round = 1;
+        f.error = undefined;
+        goTo(f, step);
+      }
+      const text = step ? `Làm tiếp: chạy lại từ ${LABEL[step]}` : `Làm tiếp ở ${LABEL[f.current ?? "pushSummary"]}`;
+      log(f, "info", note ? `${text}, kèm ghi chú: ${note}` : text, step);
+      break;
+    }
     case "setAuto":
       f.auto = action.on;
       break;
@@ -820,8 +934,11 @@ export function mockFlowCard(wpId: number): Partial<TaskCard> | undefined {
   const state: StepState =
     f.phase === "running" ? "running" : f.phase === "ready" ? "pending" : f.phase === "gate" ? (f.gate === "error" ? "failed" : "waitingUser") : "done";
   const cost = Object.values(f.costs).reduce((a, b) => a + (b ?? 0), 0);
+  const column: TaskColumn = f.phase === "done" ? "done" : f.phase === "awaitingPush" ? "awaitingPush" : "active";
   const card: Partial<TaskCard> = {
-    column: f.phase === "awaitingPush" || f.phase === "done" ? "awaitingPush" : "active",
+    column,
+    finishedAt: f.phase === "done" ? f.finishedAt : undefined,
+    pushCheck: f.phase === "done" ? f.check : undefined,
     step: { kind, index: STEP_ORDER.indexOf(kind) + 1, state, since: f.runStarted ?? f.gateSince },
     costUsd: cost > 0 ? cost : undefined,
     gate: f.phase === "gate" ? f.gate : undefined,
@@ -860,7 +977,108 @@ export function mockFlowSystem(wpId: number): { steps: StepView[]; agents: Agent
   return { steps: steps(f), agents, findings: f.findings.map((x) => ({ ...x })), gate: gateView(f) };
 }
 
+/** What a seeded done task's check found when it was marked done. */
+function seedCheck(f: Flow, pushed: boolean, at: number): PushCheck {
+  return {
+    branch: `f/${f.taskId}`,
+    pushed,
+    remote: true,
+    ahead: pushed ? 0 : 1,
+    behind: 0,
+    uncommitted: 0,
+    head: pushed ? "a1b2c3d" : "9e8d7c6",
+    checkedAt: iso(at),
+    forced: !pushed,
+  };
+}
+
+function wantsPushed(): boolean {
+  return typeof location !== "undefined" && new URLSearchParams(location.search).has("pushed");
+}
+
+/** "Đã push xong" in the preview: the first check finds one commit not on origin yet and two
+ *  uncommitted files, "Kiểm tra lại" finds it pushed (`?pushed` = pushed from the start). */
+export function mockPushCheck(wpId: number): PushCheck {
+  const f = flowOf(wpId);
+  f.checks += 1;
+  const pushed = wantsPushed() || f.checks > 1;
+  f.check = {
+    branch: branchOf(f),
+    pushed,
+    remote: pushed,
+    ahead: pushed ? 0 : 1,
+    behind: 0,
+    uncommitted: pushed ? 0 : 2,
+    head: "3f2a9c1",
+    checkedAt: iso(Date.now()),
+  };
+  return f.check;
+}
+
+/** "Tạm dừng" in the preview: refused while a step runs, like the core. */
+export function mockPauseTask(wpId: number): null {
+  const f = flows.get(wpId);
+  if (f) tick(f);
+  if (f?.phase === "running" && f.current) {
+    throw fail("step.running", `${LABEL[f.current]} đang chạy. Bấm Dừng trước rồi mới tạm dừng task.`);
+  }
+  paused.add(wpId);
+  return null;
+}
+
+/** A task started from Inbox in the preview: it gets (or keeps) its flow and leaves Inbox. */
+export function mockStarted(wpId: number, title: string): void {
+  const f = flowOf(wpId, `WP-${wpId}`, title);
+  f.moved = true;
+  paused.delete(wpId);
+}
+
+/** The board card as the preview's moves left it: paused ones back in Inbox, started, finished
+ *  or reopened ones from their flow. */
+export function mockPlaceCard(card: TaskCard): TaskCard {
+  if (paused.has(card.wpId)) {
+    const { id, wpId, title, project, nxStatus, nxStatusColor, newComments, issues } = card;
+    return { id, wpId, title, project, nxStatus, nxStatusColor, newComments, issues, column: "inbox" };
+  }
+  const f = flows.get(card.wpId);
+  if (!f?.moved) return card;
+  const placed: TaskCard = { ...card, ...mockFlowCard(card.wpId) };
+  if (!placed.branch) placed.branch = `f/${f.taskId}`;
+  if (!placed.repo) placed.repo = "acme-api";
+  if (placed.column === "done") {
+    placed.agent = undefined;
+    placed.contextPct = undefined;
+  }
+  return placed;
+}
+
+/** Was this task moved on the preview board (started, paused, finished, sent back)? */
+export const mockMoved = (wpId: number): boolean => paused.has(wpId) || flows.get(wpId)?.moved === true;
+
+/** The "Đã xong" column of the preview (`?done=N` shows the first N, 0 = empty). */
+export function mockDoneCards(count?: number): TaskCard[] {
+  return DONE_SEED.slice(0, count ?? DONE_SEED.length).map((d) => {
+    const f = flowOf(d.wpId, `WP-${d.wpId}`, d.title);
+    const card: TaskCard = {
+      id: f.taskId,
+      wpId: d.wpId,
+      title: d.title,
+      project: d.project,
+      repo: d.repo,
+      branch: `f/${f.taskId}`,
+      nxStatus: d.nxStatus,
+      nxStatusColor: d.nxStatusColor,
+      column: "done",
+      newComments: 0,
+      nxOpen: d.nxOpen,
+      ...mockFlowCard(d.wpId),
+    };
+    return card;
+  });
+}
+
 /** Tests: forget every mock flow. */
 export function resetMockFlows(): void {
   flows.clear();
+  paused.clear();
 }

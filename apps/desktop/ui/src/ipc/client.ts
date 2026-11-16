@@ -24,6 +24,8 @@ import {
   mockAllowBash,
   mockDecideFinding,
   mockFlowAction,
+  mockPauseTask,
+  mockPushCheck,
   mockSaveBrief,
   mockStepChat,
   mockTaskDetail,
@@ -53,6 +55,7 @@ import type {
   IssueFetch,
   OrbitSnapshot,
   Provider,
+  PushCheck,
   RepoState,
   SettingsView,
   StartOptions,
@@ -126,7 +129,8 @@ export const deleteBranch = (request: DeleteBranchRequest): Promise<RepoState> =
 /** Creates (or switches to) the branch locally, writes brief.md, moves the task to "Đang làm". */
 export const startTask = (request: StartRequest): Promise<StartResult> =>
   call("start_task", () => mockStartTask(request), { request });
-export const pauseTask = (wpId: number): Promise<null> => call("pause_task", () => null, { wpId });
+/** Back to Inbox (branch, brief and workflow kept); refused while a step runs. */
+export const pauseTask = (wpId: number): Promise<null> => call("pause_task", () => mockPauseTask(wpId), { wpId });
 /** Reads the task's GitHub issues through the user's Chrome (Chrome asks Allow) into the brief. */
 export const fetchIssues = (wpId: number): Promise<IssueFetch> =>
   call("fetch_issues", () => mockFetchIssues(wpId), { wpId });
@@ -169,6 +173,13 @@ export const getStepChat = (wpId: number, runId?: number): Promise<ChatView> =>
 /** "Cho phép lệnh này": adds `rule` to the repo's allowBash in config.json. */
 export const allowBash = (wpId: number, rule: string): Promise<TaskDetail> =>
   call("allow_bash", () => mockAllowBash(wpId, rule), { wpId, rule });
+/** "Đã push xong": `git fetch` the task branch and compare it with `origin/<branch>` (read only). */
+export async function pushCheck(wpId: number): Promise<PushCheck> {
+  const check = await call("push_check", () => mockPushCheck(wpId), { wpId });
+  // the preview waits like a real fetch does, so the checking state can be seen
+  if (!isTauri()) await new Promise((r) => window.setTimeout(r, 700));
+  return check;
+}
 /** Continues a finished run's AI session in a console window in the task's repo. */
 export const openResume = (wpId: number, runId: number): Promise<null> =>
   call("open_resume", () => null, { wpId, runId });

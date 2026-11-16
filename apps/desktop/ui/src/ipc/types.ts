@@ -94,6 +94,37 @@ export interface TaskCard {
   login?: Provider;
   /** how the last "Lấy issue" went */
   issues?: IssueStatus;
+  /** "Đã xong" column: when the user marked it done */
+  finishedAt?: string;
+  /** "Đã xong" column: the push check made when it was marked done */
+  pushCheck?: PushCheck;
+  /** "Đã xong" column: OpenProject still lists the task as open (not Resolved yet) */
+  nxOpen?: boolean;
+}
+
+/** Is the task branch on origin? Made by "Đã push xong" (`git fetch`, then the local branch
+ *  against `origin/<branch>`). Read only: the app never pushes. */
+export interface PushCheck {
+  branch: string;
+  /** origin has the branch and every local commit of it */
+  pushed: boolean;
+  /** origin has the branch at all */
+  remote: boolean;
+  /** local commits origin does not have */
+  ahead: number;
+  /** commits on origin the local branch does not have */
+  behind: number;
+  /** files changed but not committed (counted only while the repo is on the task branch) */
+  uncommitted: number;
+  /** short hash of the local branch */
+  head?: string;
+  /** `git fetch` failed: the result compares with what origin had at the last fetch */
+  fetchError?: string;
+  /** the repo is on another branch right now */
+  otherBranch?: string;
+  checkedAt: string;
+  /** the user marked the task done although the check said it was not pushed */
+  forced?: boolean;
 }
 
 /** The last "Lấy issue" of a task: when, how many issues reached the brief, or what failed. */
@@ -751,7 +782,12 @@ export type FlowAction =
   | { type: "selfCodeDone" }
   | { type: "finishTriage" }
   | { type: "rerunPush"; issue?: number }
-  | { type: "finish" }
+  /** the task moves to "Đã xong"; also before the push summary (the steps left are skipped).
+   *  `forced`: the push check said "not pushed" and the user marks it done anyway */
+  | { type: "finish"; forced?: boolean }
+  /** "Làm tiếp": `step` = run again from there (absent = carry on where it stopped); `note`
+   *  goes into the next Viết code */
+  | { type: "reopen"; step?: StepKind; note?: string }
   | { type: "setAuto"; on: boolean };
 
 export type Decision = "fix" | "accept" | "defer" | "reset";
@@ -807,6 +843,7 @@ export interface Commands {
   step_chat: ChatView;
   allow_bash: TaskDetail;
   open_resume: null;
+  push_check: PushCheck;
 }
 
 export interface CommandArgs {
@@ -838,4 +875,5 @@ export interface CommandArgs {
   step_chat: { wpId: number; runId?: number };
   allow_bash: { wpId: number; rule: string };
   open_resume: { wpId: number; runId: number };
+  push_check: { wpId: number };
 }

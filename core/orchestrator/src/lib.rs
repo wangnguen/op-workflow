@@ -16,6 +16,7 @@ pub mod issues;
 pub mod live;
 pub mod models;
 pub mod os;
+pub mod pushcheck;
 pub mod selftest;
 pub mod start;
 pub mod steps;
@@ -32,9 +33,9 @@ use opw_domain::task::display_id;
 use opw_domain::view::{
     AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CommentsView, DataMode,
     DeleteBranchRequest, DiffView, FindingDecision, FlowAction, FlowStatus, InboxItem, IssueFetch,
-    IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, QuotaSnapshot, RepoState, SettingsView,
-    StartOptions, StartRequest, StartResult, StepChoiceRequest, StepRef, StepView, TaskCard, TaskColumn,
-    TaskDetail, TaskSystem, TasksDirChange, TodayStats, UpdateView,
+    IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, PushCheck, QuotaSnapshot, RepoState,
+    SettingsView, StartOptions, StartRequest, StartResult, StepChoiceRequest, StepRef, StepView, TaskCard,
+    TaskColumn, TaskDetail, TaskSystem, TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
@@ -53,6 +54,8 @@ pub(crate) const COLUMN_ACTIVE: &str = "active";
 const COLUMN_INBOX: &str = "inbox";
 /// The user pushed: the task leaves the board.
 const COLUMN_DONE: &str = "done";
+/// Finished tasks shown in the "Đã xong" column, most recent first.
+const DONE_SHOWN: usize = 40;
 /// "Hôm nay" on the bottom bar: the last 24 hours.
 const TODAY_HOURS: u32 = 24;
 /// `task_kv` id for values that belong to no task (quota levels already announced).
@@ -216,6 +219,9 @@ impl AppService {
             flow_note: None,
             login: None,
             issues: None,
+            finished_at: None,
+            push_check: None,
+            nx_open: false,
         }
     }
 
@@ -266,6 +272,9 @@ impl AppService {
                         flow_note: None,
                         login: None,
                         issues: None,
+                        finished_at: None,
+                        push_check: None,
+                        nx_open: false,
                     });
                     tasks.len() - 1
                 }
@@ -294,6 +303,7 @@ impl AppService {
                 }
             }
         }
+        tasks.extend(self.done_cards(&state, &config));
         self.fill_new_comments(&mut tasks, &state);
         let notice = self.inbox_notice(&state);
         let (cost_usd, tokens) = self
@@ -312,6 +322,60 @@ impl AppService {
             tasks_dir_offer: self.tasks_dir_offer(),
             unread_alerts: self.alerts.unread(),
         }
+    }
+
+    /// The "Đã xong" column: tasks the user marked done, with the push check made then, and a
+    /// reminder when OpenProject still lists the task as open.
+    fn done_cards(&self, state: &LiveState, config: &Config) -> Vec<TaskCard> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        let rows = store
+            .lock()
+            .ok()
+            .and_then(|s| s.tasks_in(COLUMN_DONE, DONE_SHOWN).ok())
+            .unwrap_or_default();
+        rows.iter()
+            .map(|row| {
+                let open = state
+                    .tasks
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|wp| wp.id == row.wp_id);
+                let mut card = TaskCard {
+                    id: row.display_id.clone(),
+                    wp_id: row.wp_id,
+                    title: open.map_or_else(|| row.title.clone(), |wp| wp.subject.clone()),
+                    project: row.project.clone(),
+                    repo: row.repo.as_deref().map(repo_name),
+                    branch: row.branch.clone(),
+                    nx_status: open.map_or_else(|| "—".into(), |wp| wp.status.clone()),
+                    nx_status_color: open.and_then(|wp| state.status_color(&wp.status)),
+                    column: TaskColumn::Done,
+                    step: None,
+                    agent: None,
+                    cost_usd: None,
+                    context_pct: None,
+                    new_comments: 0,
+                    gate: None,
+                    flow_note: None,
+                    login: None,
+                    issues: None,
+                    finished_at: Some(row.updated_at.clone()),
+                    push_check: store.lock().ok().and_then(|s| pushcheck::last(&s, row.wp_id)),
+                    nx_open: open.is_some(),
+                };
+                if let (Some(flow), Some(ctx)) = (&self.flow, self.ctx_for(row, config)) {
+                    if let Some(f) = flow.card(&ctx) {
+                        card.step = Some(f.step);
+                        card.cost_usd = f.cost_usd;
+                        card.finished_at = f.finished_at.or(card.finished_at);
+                    }
+                }
+                card
+            })
+            .collect()
     }
 
     /// "+N comment" on the cards: OpenProject comments newer than the last one seen, plus new
@@ -585,6 +649,15 @@ impl AppService {
             .store
             .as_ref()
             .ok_or_else(|| ApiError::new("storage", "Chưa mở được dữ liệu cục bộ"))?;
+        if let Some(step) = self.flow.as_ref().and_then(|f| f.running_step(wp_id)) {
+            return Err(ApiError::new(
+                "step.running",
+                format!(
+                    "{} đang chạy. Bấm Dừng trước rồi mới tạm dừng task.",
+                    flow::step_label(step)
+                ),
+            ));
+        }
         let now = opw_quota::now_rfc3339();
         let found = store
             .lock()
@@ -655,16 +728,37 @@ impl AppService {
     /// A workflow button: run, stop, retry, approve the plan, …
     pub fn flow_action(&self, wp_id: u64, action: FlowAction) -> Result<TaskDetail, ApiError> {
         let (ctx, flow) = self.task_ctx(wp_id)?;
-        let finish = action == FlowAction::Finish;
+        let forced = match action {
+            FlowAction::Finish { forced } => Some(forced),
+            _ => None,
+        };
+        let reopen = matches!(action, FlowAction::Reopen { .. });
         flow.act(ctx.clone(), action)?;
-        if finish {
-            if let Some(store) = &self.store {
-                if let Ok(store) = store.lock() {
-                    let _ = store.set_column(wp_id, COLUMN_DONE, &opw_quota::now_rfc3339());
+        let now = opw_quota::now_rfc3339();
+        if let Some(forced) = forced {
+            if let Some(store) = self.store.as_ref().and_then(|s| s.lock().ok()) {
+                let _ = store.set_column(wp_id, COLUMN_DONE, &now);
+                // the check shown on the "Đã xong" card says the user overrode it
+                if let Some(mut check) = pushcheck::last(&store, wp_id).filter(|_| forced) {
+                    check.forced = true;
+                    pushcheck::save(&store, wp_id, &check);
                 }
             }
             if let Ok(mut active) = self.active.lock() {
                 active.retain(|a| a.wp_id != wp_id);
+            }
+        }
+        if reopen {
+            if let Some(store) = self.store.as_ref().and_then(|s| s.lock().ok()) {
+                let _ = store.set_column(wp_id, COLUMN_ACTIVE, &now);
+            }
+            if let Ok(mut active) = self.active.lock() {
+                if !active.iter().any(|a| a.wp_id == wp_id) {
+                    let mut row = ctx.row.clone();
+                    row.column = COLUMN_ACTIVE.into();
+                    row.updated_at = now;
+                    active.insert(0, row);
+                }
             }
         }
         Ok(self.with_counts(flow.detail(&ctx)))
@@ -693,6 +787,34 @@ impl AppService {
     pub fn open_task_folder(&self, wp_id: u64) -> Result<(), ApiError> {
         let (ctx, _) = self.task_ctx(wp_id)?;
         os::open_folder(&ctx.task_dir).map_err(|e| ApiError::new("path.missing", e.to_string()))
+    }
+
+    /// "Đã push xong": `git fetch` the task branch and compare it with `origin/<branch>`. Read
+    /// only; network, so off the UI thread. The result is kept for the "Đã xong" card.
+    pub fn push_check(&self, wp_id: u64) -> Result<PushCheck, ApiError> {
+        let (ctx, _) = self.task_ctx(wp_id)?;
+        let repo = ctx
+            .row
+            .repo
+            .as_deref()
+            .map(opw_config::expand_home)
+            .filter(|p| p.is_dir())
+            .ok_or_else(|| {
+                ApiError::new(
+                    "repo.missing",
+                    "Không thấy thư mục repo của task (đã xoá hoặc đổi chỗ?)",
+                )
+            })?;
+        let branch = ctx
+            .row
+            .branch
+            .clone()
+            .ok_or_else(|| ApiError::new("task.branch", "Task chưa có nhánh"))?;
+        let check = pushcheck::check(&repo, &branch, &opw_quota::now_rfc3339());
+        if let Some(store) = self.store.as_ref().and_then(|s| s.lock().ok()) {
+            pushcheck::save(&store, wp_id, &check);
+        }
+        Ok(check)
     }
 
     /// The Chat tab: the transcript of one step run (`None` = the latest). Reads its raw log.
@@ -1498,10 +1620,47 @@ mod tests {
         assert_eq!(svc.save_brief(7, "  ").unwrap_err().code, "brief.empty");
         let d = svc.save_brief(7, "# [WP-7] t\n").unwrap();
         assert_eq!(d.brief.as_deref(), Some("# [WP-7] t\n"));
+        // done before the push summary: the remaining steps are skipped, the task leaves "Đang làm"
+        // and the last push check remembers the user overrode it
+        let check = PushCheck {
+            branch: "f/WP-7".into(),
+            pushed: false,
+            remote: false,
+            ahead: 2,
+            behind: 0,
+            uncommitted: 0,
+            head: None,
+            fetch_error: None,
+            other_branch: None,
+            checked_at: "2026-11-16T08:00:00Z".into(),
+            forced: false,
+        };
+        pushcheck::save(&svc.store.as_ref().unwrap().lock().unwrap(), 7, &check);
+        let d = svc.flow_action(7, FlowAction::Finish { forced: true }).unwrap();
+        assert_eq!(d.status, FlowStatus::Done);
+        assert!(svc.active.lock().unwrap().is_empty());
+        let saved = pushcheck::last(&svc.store.as_ref().unwrap().lock().unwrap(), 7).unwrap();
+        assert!(saved.forced && saved.ahead == 2);
         assert_eq!(
-            svc.flow_action(7, FlowAction::Finish).unwrap_err().code,
+            svc.flow_action(7, FlowAction::Finish { forced: false })
+                .unwrap_err()
+                .code,
             "flow.notNow"
         );
+        let d = svc
+            .flow_action(
+                7,
+                FlowAction::Reopen {
+                    step: None,
+                    note: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (d.status, d.current),
+            (FlowStatus::Ready, Some(StepKind::Analyze))
+        );
+        assert_eq!(svc.active.lock().unwrap()[0].wp_id, 7);
     }
 
     #[test]

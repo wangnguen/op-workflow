@@ -2,7 +2,9 @@
 //! Names and payloads must match `apps/desktop/ui/src/ipc/types.ts` (`Commands`).
 //! A step runs on its own thread in the core; these commands only start, stop or read it.
 
-use opw_domain::view::{ApiError, ChatView, CommentsView, DiffView, FindingDecision, FlowAction, TaskDetail};
+use opw_domain::view::{
+    ApiError, ChatView, CommentsView, DiffView, FindingDecision, FlowAction, PushCheck, TaskDetail,
+};
 use opw_orchestrator::AppService;
 use tauri::State;
 
@@ -86,4 +88,10 @@ pub fn allow_bash(wp_id: u64, rule: String, service: State<'_, AppService>) -> R
 #[tauri::command]
 pub fn open_resume(wp_id: u64, run_id: i64, service: State<'_, AppService>) -> Result<(), ApiError> {
     service.open_resume(wp_id, run_id)
+}
+
+/// "Đã push xong": `git fetch` the task branch and compare it with origin (read only).
+#[tauri::command(async)]
+pub fn push_check(wp_id: u64, service: State<'_, AppService>) -> Result<PushCheck, ApiError> {
+    service.push_check(wp_id)
 }

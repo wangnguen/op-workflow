@@ -80,6 +80,7 @@ fn main() {
             flow_api::step_chat,
             flow_api::allow_bash,
             flow_api::open_resume,
+            flow_api::push_check,
             alerts_api::alerts,
             alerts_api::mark_alerts_read,
             alerts_api::set_notify,

@@ -149,6 +149,8 @@ struct Saved {
     in_flight: bool,
     /// The user said the push is done.
     finished: bool,
+    /// What the user wrote with "Làm tiếp → quay lại Viết code"; goes into the next Viết code.
+    note: Option<String>,
 }
 
 #[derive(Debug)]
@@ -626,6 +628,8 @@ pub struct CardFlow {
     pub note: Option<String>,
     /// A failed step that needs this provider signed in again.
     pub login: Option<Provider>,
+    /// When the user marked it done ("Đã xong" column).
+    pub finished_at: Option<String>,
 }
 
 /// Orbit fields for one task in progress.
@@ -760,6 +764,15 @@ impl Flow {
             .is_some_and(|e| e.saved.finished)
     }
 
+    /// The step a task is running right now, if any.
+    pub fn running_step(&self, wp_id: u64) -> Option<StepKind> {
+        self.inner
+            .lock_tasks()
+            .get(&wp_id)
+            .and_then(|e| e.run.as_ref())
+            .map(|r| r.step)
+    }
+
     /// Stop the running step of a task, if any (pausing the task, closing the app).
     pub fn stop(&self, wp_id: u64) {
         if let Some(run) = self.inner.lock_tasks().get(&wp_id).and_then(|e| e.run.as_ref()) {
@@ -864,11 +877,12 @@ impl Flow {
         };
         let cost: f64 = runs.iter().filter_map(|r| r.cost_usd).sum();
         Some(CardFlow {
-            column: if matches!(status, FlowStatus::AwaitingPush | FlowStatus::Done) {
-                TaskColumn::AwaitingPush
-            } else {
-                TaskColumn::Active
+            column: match status {
+                FlowStatus::Done => TaskColumn::Done,
+                FlowStatus::AwaitingPush => TaskColumn::AwaitingPush,
+                _ => TaskColumn::Active,
             },
+            finished_at: entry.saved.finished.then(|| entry.saved.since.clone()).flatten(),
             step: StepRef {
                 kind,
                 index: kind.index(),
@@ -1492,13 +1506,65 @@ fn apply_action(
             }
             Ok(true)
         }
-        FlowAction::Finish => {
-            if phase != Phase::AwaitingPush {
+        FlowAction::Finish { forced } => {
+            if running {
+                return Err(ApiError::new(
+                    "step.running",
+                    "Bước này đang chạy. Bấm Dừng trước rồi mới đánh dấu xong.",
+                ));
+            }
+            if phase == Phase::NotStarted || entry.saved.finished {
                 return Err(not_now("đánh dấu xong"));
             }
             entry.saved.finished = true;
             entry.saved.since = Some(now());
-            push_log(entry, None, "ok", "Bạn đã push: task xong");
+            let text = match (phase == Phase::AwaitingPush, *forced) {
+                (true, false) => "Bạn đã push: task xong".to_owned(),
+                (true, true) => "Bạn đánh dấu xong khi app chưa thấy nhánh trên origin".to_owned(),
+                (false, _) => format!(
+                    "Bạn đánh dấu xong ở bước {} (bỏ qua các bước còn lại)",
+                    entry.saved.workflow.current_step().map_or("?", step_label)
+                ),
+            };
+            push_log(entry, None, "ok", &text);
+            Ok(false)
+        }
+        FlowAction::Reopen { step, note } => {
+            if running {
+                return Err(ApiError::new("step.running", "Bước này đang chạy"));
+            }
+            if phase == Phase::NotStarted {
+                return Err(not_now("làm tiếp"));
+            }
+            if let Some(step) = *step {
+                event(entry, E::Reopen(step))?;
+                // a fresh start of the review loop gets its full number of fixes again
+                if step.index() <= StepKind::CrossReview.index() {
+                    entry.saved.fixes = 0;
+                }
+                if step == StepKind::Analyze {
+                    entry.saved.feedback = None;
+                }
+            }
+            entry.saved.finished = false;
+            entry.saved.error = None;
+            entry.saved.since = Some(now());
+            let note = note.as_deref().map(str::trim).filter(|n| !n.is_empty());
+            if let Some(note) = note {
+                entry.saved.note = Some(note.to_owned());
+            }
+            let text = match *step {
+                Some(step) => format!("Làm tiếp: chạy lại từ {}", step_label(step)),
+                None => format!(
+                    "Làm tiếp ở {}",
+                    current_step(entry).map_or("bước đang dở", step_label)
+                ),
+            };
+            let text = match note {
+                Some(note) => format!("{text}, kèm ghi chú: {}", short(note)),
+                None => text,
+            };
+            push_log(entry, *step, "info", &text);
             Ok(false)
         }
         FlowAction::SetAuto { on } => {
@@ -2502,9 +2568,15 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         stdin,
         timeout,
     };
-    let (session, feedback, fixes, issue) = inner
+    let (session, feedback, fixes, issue, note) = inner
         .with_saved(wp_id, |s| {
-            (s.session.clone(), s.feedback.clone(), s.fixes, s.issue)
+            (
+                s.session.clone(),
+                s.feedback.clone(),
+                s.fixes,
+                s.issue,
+                s.note.clone(),
+            )
         })
         .unwrap_or_default();
     let set_session = |id: &str| {
@@ -2551,10 +2623,18 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .read(PLAN_FILE)
                 .ok_or_else(|| flow_error("plan.missing", "Không đọc được plan.md"))?;
             let allowed = ctx.repo_config().allow_bash;
-            let prompt = prompts::implement(&plan, session.is_none().then_some(brief.as_str()), &allowed);
+            let prompt = prompts::implement(
+                &plan,
+                session.is_none().then_some(brief.as_str()),
+                &allowed,
+                note.as_deref(),
+            );
             let args = cl(claude::code_args(session.as_deref(), budget, &allowed));
             let r = inner.run_claude(ctx, step, &job(Provider::Claude, args, Some(prompt)), claim)?;
             set_session(&r.session_id);
+            if note.is_some() {
+                inner.with_saved(wp_id, |s| s.note = None);
+            }
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Implement),
                 note: format!("{}{}", change_note(repo), denied_note(r.denials.len())),
@@ -3067,9 +3147,114 @@ mod tests {
         );
         assert!(jobs[6].stdin.as_deref().unwrap().contains("(#279)"));
 
-        let d = run(&flow, &ctx, FlowAction::Finish);
+        let d = run(&flow, &ctx, FlowAction::Finish { forced: false });
         assert_eq!(d.status, FlowStatus::Done);
         assert!(flow.is_finished(1));
+    }
+
+    #[test]
+    fn finished_tasks_carry_on_or_run_again_from_a_step() {
+        let Some(s) = setup() else { return };
+        let (flow, fake) = flow_with(&s, false, happy(CLEAN));
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx);
+
+        // done at the plan gate: the steps left are skipped; "Làm tiếp" comes back to the gate
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(d.status, FlowStatus::Gate, "{:?}", d.error);
+        let d = run(&flow, &ctx, FlowAction::Finish { forced: false });
+        assert_eq!(d.status, FlowStatus::Done);
+        assert!(d.log.last().unwrap().text.contains("bỏ qua các bước còn lại"));
+        let card = flow.card(&ctx).unwrap();
+        assert_eq!(card.column, TaskColumn::Done);
+        assert!(card.finished_at.is_some());
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::Reopen {
+                step: None,
+                note: None,
+            },
+        );
+        assert_eq!(
+            (d.status, d.gate.as_ref().map(|g| g.kind)),
+            (FlowStatus::Gate, Some(GateKind::PlanReview))
+        );
+        assert!(!flow.is_finished(1));
+        let card = flow.card(&ctx).unwrap();
+        assert_eq!((card.column, card.finished_at), (TaskColumn::Active, None));
+
+        // through to the push summary and done
+        let mut d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        for _ in 0..6 {
+            if d.status == FlowStatus::AwaitingPush {
+                break;
+            }
+            d = run(&flow, &ctx, FlowAction::Run);
+        }
+        assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
+        run(&flow, &ctx, FlowAction::Finish { forced: true });
+        // Nhận task cannot run again, and a refused "Làm tiếp" leaves the task done
+        let not_reached = flow
+            .act(
+                ctx.clone(),
+                FlowAction::Reopen {
+                    step: Some(StepKind::Intake),
+                    note: None,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(not_reached.code, "flow.invalid", "{not_reached:?}");
+        assert!(flow.is_finished(1));
+
+        // back to Viết code with a note: earlier steps stay done, the rest start over
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::Reopen {
+                step: Some(StepKind::Implement),
+                note: Some(" Thêm test cho org rỗng ".into()),
+            },
+        );
+        assert_eq!(
+            (d.status, d.current),
+            (FlowStatus::Ready, Some(StepKind::Implement))
+        );
+        let state = |d: &TaskDetail, k: StepKind| d.steps.iter().find(|s| s.kind == k).unwrap().state;
+        assert_eq!(state(&d, StepKind::Analyze), StepState::Done);
+        assert_eq!(state(&d, StepKind::PushSummary), StepState::Pending);
+        assert_eq!(d.round, 0);
+        assert!(
+            d.log
+                .last()
+                .unwrap()
+                .text
+                .contains("chạy lại từ Viết code, kèm ghi chú: Thêm test cho org rỗng")
+        );
+        assert_eq!(flow.card(&ctx).unwrap().column, TaskColumn::Active);
+
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(d.current, Some(StepKind::ReviewLocal), "{:?}", d.error);
+        let last = fake.jobs.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(kind(&last), "code");
+        assert!(
+            last.stdin
+                .as_deref()
+                .unwrap()
+                .contains("<user_note>\nThêm test cho org rỗng\n</user_note>")
+        );
+        // the note goes to one Viết code only
+        run(
+            &flow,
+            &ctx,
+            FlowAction::Reopen {
+                step: Some(StepKind::Implement),
+                note: None,
+            },
+        );
+        run(&flow, &ctx, FlowAction::Run);
+        let last = fake.jobs.lock().unwrap().last().cloned().unwrap();
+        assert!(!last.stdin.as_deref().unwrap().contains("user_note"));
     }
 
     #[test]
@@ -3199,10 +3384,22 @@ mod tests {
             flow.act(one.clone(), FlowAction::Run).unwrap_err().code,
             "step.running"
         );
+        // a running step has to be stopped before the task is marked done or sent back
+        for action in [
+            FlowAction::Finish { forced: true },
+            FlowAction::Reopen {
+                step: Some(StepKind::Analyze),
+                note: None,
+            },
+        ] {
+            assert_eq!(flow.act(one.clone(), action).unwrap_err().code, "step.running");
+        }
+        assert_eq!(flow.running_step(1), Some(StepKind::Analyze));
         flow.act(one.clone(), FlowAction::Stop).unwrap();
         let d = settle(&flow, &one);
         assert_eq!(d.error.unwrap().code, "step.stopped");
         assert_eq!(d.current, Some(StepKind::Analyze));
+        assert_eq!(flow.running_step(1), None);
     }
 
     #[test]

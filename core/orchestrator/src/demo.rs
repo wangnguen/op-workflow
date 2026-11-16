@@ -329,6 +329,9 @@ pub fn board(tick: u64) -> BoardSnapshot {
         flow_note: None,
         login: None,
         issues: None,
+        finished_at: None,
+        push_check: None,
+        nx_open: false,
     };
     let mut tasks = vec![
         inbox(188001, "Thêm bộ lọc danh sách user", "Web Platform", 2),
@@ -357,6 +360,9 @@ pub fn board(tick: u64) -> BoardSnapshot {
             flow_note: None,
             login: None,
             issues: None,
+            finished_at: None,
+            push_check: None,
+            nx_open: false,
         },
     ];
     if let Some(sys) = &system {
@@ -393,6 +399,9 @@ pub fn board(tick: u64) -> BoardSnapshot {
             flow_note: None,
             login: None,
             issues: None,
+            finished_at: None,
+            push_check: None,
+            nx_open: false,
         });
     }
     BoardSnapshot {

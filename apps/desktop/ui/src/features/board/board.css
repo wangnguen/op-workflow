@@ -1,10 +1,16 @@
+/* "Đã xong" folds to a strip; the tracks are written out one by one (no repeat()) so the
+   browser can animate between the two lists */
 .board {
   display: grid;
-  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) minmax(260px, 1fr) minmax(46px, 0fr);
   gap: 14px;
   height: 100%;
   padding: 14px;
   overflow: auto;
+  transition: grid-template-columns var(--dur-slow) var(--ease-out);
+}
+.board.is-done-open {
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) minmax(260px, 1fr) minmax(260px, 1fr);
 }
 
 .column {
@@ -20,6 +26,7 @@
   box-shadow: inset 0 0 0 1px rgba(255, 158, 69, 0.22);
 }
 .column-head {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -50,6 +57,149 @@
 }
 .column-head .faint {
   font-size: 11.5px;
+}
+
+/* ---------- Đã xong: folded strip, fold button at the same spot open or folded ---------- */
+
+.column--done {
+  overflow: hidden;
+}
+.column--done .column-head {
+  padding-right: 42px;
+}
+.column-head .column-fold {
+  position: absolute;
+  top: 8px;
+  right: 7px;
+}
+.column-fold .icon {
+  transition: transform var(--dur-base) var(--ease-out);
+}
+.column--done.is-folded .column-fold .icon {
+  transform: rotate(180deg);
+}
+.column--done.is-folded {
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.column--done.is-folded:hover {
+  background: var(--fill);
+}
+.column--done.is-folded .column-head {
+  flex: 1;
+  align-items: center;
+  padding: 46px 0 12px;
+  border-bottom: 0;
+}
+.column--done.is-folded h2 {
+  flex-direction: column-reverse;
+  gap: 10px;
+  white-space: nowrap;
+}
+.column--done.is-folded .column-title {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.14em;
+}
+.column--done h2,
+.column--done .column-hint,
+.column--done .column-body {
+  animation: column-in var(--dur-base) var(--ease-out);
+}
+@keyframes column-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ---------- drag and drop ---------- */
+
+.column {
+  transition:
+    outline-color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+/* outlines draw inside the column and never move the layout */
+.column.is-drop-ready {
+  outline: 1.5px dashed color-mix(in srgb, var(--accent) 40%, transparent);
+  outline-offset: -4px;
+}
+.column.is-drop-over {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--column));
+}
+.column.is-drop-no {
+  outline: 2px dashed color-mix(in srgb, var(--st-failed) 65%, transparent);
+  outline-offset: -3px;
+}
+.card {
+  cursor: grab;
+}
+.card.is-drag-source {
+  opacity: 0.35;
+}
+body.is-card-dragging,
+body.is-card-dragging * {
+  cursor: grabbing !important;
+  user-select: none;
+}
+/* the copy of the card that follows the pointer (useCardDrag) */
+.card.card-ghost {
+  position: fixed;
+  z-index: 70;
+  margin: 0;
+  pointer-events: none;
+  box-shadow: var(--shadow-pop);
+  will-change: transform;
+  transition: none;
+}
+.card.card-ghost.is-waiting {
+  opacity: 0.8;
+}
+.card.card-ghost.is-returning {
+  transition: transform 240ms var(--ease-out);
+}
+.card.card-ghost.is-dropped {
+  opacity: 0;
+  scale: 0.96;
+  transition:
+    opacity 160ms var(--ease-out),
+    scale 160ms var(--ease-out);
+}
+/* why a drop was refused, or what it did: floats over the board, nothing moves */
+.drop-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 48px;
+  z-index: 65;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 9px 14px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.45;
+  opacity: 0;
+  transform: translate(-50%, 8px);
+  pointer-events: none;
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+.drop-toast.is-shown {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+.drop-toast .icon {
+  flex: none;
+  color: var(--st-done);
+}
+.drop-toast--warn .icon {
+  color: var(--sev-medium);
 }
 .column-body {
   display: flex;
@@ -95,6 +245,12 @@
 }
 .card--awaitingPush .card-bar {
   background: var(--st-done);
+}
+.card--done .card-bar {
+  background: color-mix(in srgb, var(--st-done) 45%, var(--line-strong));
+}
+.card--done .card-title {
+  color: var(--text-dim);
 }
 .card--waiting {
   box-shadow: 0 0 0 1px rgba(255, 213, 79, 0.6), 0 0 22px rgba(255, 213, 79, 0.1);
@@ -260,6 +416,38 @@
 }
 .card-issues--error {
   color: color-mix(in srgb, var(--st-failed) 75%, var(--text));
+}
+/* Đã xong: the push check and the OpenProject reminder */
+.card-push {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--st-done);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.card-push .icon,
+.card-remind .icon {
+  flex: none;
+}
+.card-push--warn {
+  color: var(--sev-medium);
+}
+.card-remind {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--st-waiting-soft);
+  color: var(--st-waiting);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.card-remind .icon {
+  margin-top: 2px;
 }
 .card-agent {
   display: flex;

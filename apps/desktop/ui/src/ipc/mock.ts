@@ -38,7 +38,7 @@ import type {
   UpdateView,
 } from "./types";
 import { STEP_COUNT, STEP_ORDER } from "../shared/steps";
-import { mockFlowCard, mockFlowSystem, mockRegisterFlow } from "./mockFlow";
+import { mockDoneCards, mockFlowCard, mockFlowSystem, mockMoved, mockPlaceCard, mockRegisterFlow, mockStarted } from "./mockFlow";
 import { mockNewComments, mockNotify, mockUnreadAlerts } from "./mockTask";
 
 export const DEMO_FRAME_MS = 4000;
@@ -496,7 +496,7 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
       newComments: 0,
     },
   ];
-  if (f.active) {
+  if (f.active || mockMoved(SECOND.wpId)) {
     mockRegisterFlow(SECOND.wpId, SECOND.id, SECOND.title);
     tasks.push({
       id: SECOND.id,
@@ -513,12 +513,14 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
       ...mockFlowCard(SECOND.wpId),
     });
   }
+  tasks.push(...mockDoneCards(urlCount("done")));
   for (const t of tasks) {
     const status = mockIssueStatus.get(t.wpId);
     if (status) t.issues = status;
   }
   const board: BoardSnapshot = {
-    tasks,
+    // what the user did on the preview board (start, pause, finish, "Làm tiếp") wins over the demo
+    tasks: tasks.map(mockPlaceCard),
     activeTaskIds: f.active ? [ACTIVE_ID, SECOND.id] : [],
     quota: mockQuota(frameIndex, now),
     links: mockLinks(now),
@@ -837,6 +839,7 @@ export function mockStartTask(req: StartRequest): StartResult {
   if (repo && repo.dirty.length > 0) {
     throw { code: "repo.dirty", message: `Working tree có ${repo.dirty.length} file chưa commit.` };
   }
+  mockStarted(req.wpId, INBOX.find((i) => i.taskId === `WP-${req.wpId}`)?.title ?? `WP-${req.wpId}`);
   return {
     taskId: `WP-${req.wpId}`,
     branch: req.branch,
