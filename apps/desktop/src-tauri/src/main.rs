@@ -67,6 +67,7 @@ fn main() {
             settings_api::open_config,
             settings_api::reveal_path,
             settings_api::set_tasks_dir,
+            settings_api::set_step_choice,
             flow_api::task_detail,
             flow_api::flow_action,
             flow_api::decide_finding,

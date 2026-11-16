@@ -531,3 +531,31 @@
   accent-color: var(--accent);
   cursor: pointer;
 }
+
+/* ---------- Các bước AI ---------- */
+
+.set-step-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+.set-step-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11.5px;
+}
+.set-step-field--grow {
+  flex: 1;
+  min-width: 200px;
+}
+.set-step-field select {
+  height: 32px;
+  min-width: 140px;
+}
+.set-step-field .chip {
+  align-self: flex-start;
+  margin: 7px 0;
+}

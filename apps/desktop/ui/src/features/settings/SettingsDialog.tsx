@@ -22,6 +22,7 @@ import { linkProblem } from "../quota/quota";
 import { formatRelative } from "../../shared/format";
 import { Icon } from "../../shared/ui/Icon";
 import { PAGES, searchEntries, type PageKey } from "./pages";
+import { StepsPage } from "./StepsPage";
 import { ThemePicker } from "./ThemePicker";
 import "./settings.css";
 
@@ -68,6 +69,13 @@ const ICONS: Record<PageKey, ReactNode> = {
     </>
   ),
   quota: <path d="M4 16a8 8 0 1 1 16 0M12 16l4-5M4 16h2M18 16h2" className="icon-stroke" />,
+  steps: (
+    <>
+      <circle cx={6} cy={6} r={2} className="icon-stroke" />
+      <circle cx={6} cy={18} r={2} className="icon-stroke" />
+      <path d="M11 6h9M11 18h9M11 12h9M4 12h4" className="icon-stroke" />
+    </>
+  ),
   notify: <path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z M10 20a2 2 0 0 0 4 0" className="icon-stroke" />,
   about: (
     <>
@@ -508,6 +516,8 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                     </Row>
                   </>
                 )}
+
+                {page === "steps" && <StepsPage view={view} onSaved={setView} />}
 
                 {page === "quota" && (
                   <>

@@ -92,6 +92,15 @@ export interface TaskCard {
   flowNote?: string;
   /** the failed step needs this provider signed in again */
   login?: Provider;
+  /** how the last "Lấy issue" went */
+  issues?: IssueStatus;
+}
+
+/** The last "Lấy issue" of a task: when, how many issues reached the brief, or what failed. */
+export interface IssueStatus {
+  at: string;
+  read: number;
+  error?: string;
 }
 
 export interface TodayStats {
@@ -148,6 +157,36 @@ export interface SettingsView {
   tasksDirSuggested?: string;
   /** which Windows notifications are on */
   notify?: NotifySettings;
+  /** agent, model and effort of each AI step, with past cost and time */
+  steps?: StepSetting[];
+  /** models named in ~/.codex/config.toml (the first is Codex's default) */
+  codexModels?: string[];
+}
+
+/** One AI step in Settings → Các bước AI; absent model/effort = the CLI's default. */
+export interface StepSetting {
+  step: StepKind;
+  agent: AgentKind;
+  /** the agent of this step can be switched (cross-review only for now) */
+  agentChoice: boolean;
+  model?: string;
+  effort?: string;
+  /** effort the app passes when none is picked (push summary: "low") */
+  effortDefault?: string;
+  /** finished runs of this step over every task */
+  runs: number;
+  avgCostUsd?: number;
+  avgSeconds?: number;
+  /** model of the latest finished run */
+  lastModel?: string;
+}
+
+/** What the user picked for one step; absent = the machine's default. */
+export interface StepChoiceRequest {
+  step: StepKind;
+  agent?: AgentKind;
+  model?: string;
+  effort?: string;
 }
 
 /** Windows notifications by kind; the bell lists every alert either way. */
@@ -411,6 +450,9 @@ export interface StepView {
   costUsd?: number;
   /** review/fix round, starts at 1 */
   round?: number;
+  /** model and effort of the latest run (effort absent = the CLI's default) */
+  model?: string;
+  effort?: string;
 }
 
 export interface SubagentView {
@@ -526,6 +568,17 @@ export interface RunView {
   /** newest last */
   tools: ToolEvent[];
   contextTokens?: number;
+  /** model passed to the CLI, or the one it reported */
+  model?: string;
+  effort?: string;
+  /** what runs: /review-local of the repo or the app's own prompt */
+  command?: string;
+}
+
+/** What a review said about updating docs and tests. */
+export interface ReviewNote {
+  step: StepKind;
+  text: string;
 }
 
 export interface PushBlock {
@@ -570,6 +623,8 @@ export interface TaskDetail {
   brief?: string;
   plan?: string;
   findings: FindingView[];
+  /** docs/test judgement of the latest review of each kind */
+  reviewNotes?: ReviewNote[];
   push?: PushView;
   /** newest last */
   log: LogLine[];
@@ -639,6 +694,7 @@ export interface Commands {
   alerts: AlertView[];
   mark_alerts_read: null;
   set_notify: SettingsView;
+  set_step_choice: SettingsView;
 }
 
 export interface CommandArgs {
@@ -665,4 +721,5 @@ export interface CommandArgs {
   task_diff: { wpId: number; markSeen: boolean };
   mark_alerts_read: { ids: number[] };
   set_notify: { kind: NotifyKind; on: boolean };
+  set_step_choice: { choice: StepChoiceRequest };
 }

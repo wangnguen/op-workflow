@@ -172,6 +172,19 @@ pub struct TaskCard {
     /// The failed step needs this provider signed in again ("Đăng nhập" on the card).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<Provider>,
+    /// How the last "Lấy issue" went (kept across restarts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issues: Option<IssueStatus>,
+}
+
+/// The last "Lấy issue" of a task: when, how many issues made it into the brief, or what failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueStatus {
+    pub at: String,
+    pub read: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -216,7 +229,7 @@ pub enum DataMode {
 // ---------- settings ----------
 
 /// What the Settings dialog shows. Never contains the token itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsView {
     pub nx_base_url: String,
@@ -258,6 +271,52 @@ pub struct SettingsView {
     /// Which Windows notifications are on (`notify` in config).
     #[serde(default)]
     pub notify: NotifySettings,
+    /// Agent, model and effort of each AI step, with what past runs cost (Các bước AI).
+    #[serde(default)]
+    pub steps: Vec<StepSetting>,
+    /// Models named in `~/.codex/config.toml` (the first is Codex's default).
+    #[serde(default)]
+    pub codex_models: Vec<String>,
+}
+
+/// One AI step in Settings → Các bước AI. The app never picks a model or effort by itself:
+/// `None` means the CLI's default on this machine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepSetting {
+    pub step: StepKind,
+    pub agent: AgentKind,
+    /// The agent of this step can be switched (only cross-review for now).
+    pub agent_choice: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Effort used when none is picked, if the app passes one (push summary: `low`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_default: Option<String>,
+    /// Finished runs of this step over every task.
+    pub runs: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_seconds: Option<f64>,
+    /// Model of the latest finished run (what "theo máy" turned out to be).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_model: Option<String>,
+}
+
+/// Settings → Các bước AI: what the user picked for one step (`None` = the machine's default).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepChoiceRequest {
+    pub step: StepKind,
+    #[serde(default)]
+    pub agent: Option<AgentKind>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// Windows notifications by kind; the bell lists every alert either way.
@@ -650,6 +709,11 @@ pub struct StepView {
     pub cost_usd: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub round: Option<u8>,
+    /// Model and effort of the step's latest run (effort `None` = the CLI's default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -783,6 +847,22 @@ pub struct RunView {
     pub tools: Vec<ToolEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
+    /// Model passed to the CLI, or the one it reported; `None` until known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// What runs: `/review-local` of the repo or the app's own prompt (reviews, push summary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// What a review said about documentation and tests (the `/review-local` docs/test section).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewNote {
+    pub step: StepKind,
+    pub text: String,
 }
 
 /// One fenced block of the push summary (commit message, PR description, ...), copied as is.
@@ -850,6 +930,9 @@ pub struct TaskDetail {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
     pub findings: Vec<FindingView>,
+    /// Docs/test judgement of the latest review of each kind (Tự review, Review chốt, …).
+    #[serde(default)]
+    pub review_notes: Vec<ReviewNote>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push: Option<PushView>,
     /// Newest last.
@@ -979,6 +1062,7 @@ mod tests {
             gate: None,
             flow_note: None,
             login: None,
+            issues: None,
         };
         let v = serde_json::to_value(&card).unwrap();
         assert_eq!(
@@ -1082,5 +1166,22 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(d.decision, Decision::Accept);
+        let c: StepChoiceRequest = serde_json::from_value(json!({
+            "step": "finalReview", "model": "claude-sonnet-5-5"
+        }))
+        .unwrap();
+        assert_eq!(
+            (c.step, c.agent, c.model.as_deref(), c.effort),
+            (StepKind::FinalReview, None, Some("claude-sonnet-5-5"), None)
+        );
+        let status = IssueStatus {
+            at: "2026-11-14T10:40:00Z".into(),
+            read: 2,
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            json!({"at": "2026-11-14T10:40:00Z", "read": 2})
+        );
     }
 }

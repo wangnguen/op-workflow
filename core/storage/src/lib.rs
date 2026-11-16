@@ -87,6 +87,9 @@ const MIGRATIONS: &[&str] = &[
         updated_at  TEXT NOT NULL,
         PRIMARY KEY (wp_id, kind, key)
      );",
+    // 4: model and effort of each step run (Settings → Các bước AI; NULL = the CLI's default)
+    "ALTER TABLE step_run ADD COLUMN model TEXT;
+     ALTER TABLE step_run ADD COLUMN effort TEXT;",
 ];
 
 /// Schema version this build understands.
@@ -184,6 +187,10 @@ pub struct StepRunRow {
     pub tokens_out: Option<u64>,
     pub started_at: String,
     pub ended_at: Option<String>,
+    /// Model the run used (the CLI's answer when known, else the one passed).
+    pub model: Option<String>,
+    /// Effort passed to the CLI; `None` = its default.
+    pub effort: Option<String>,
 }
 
 /// How a step run ended.
@@ -195,6 +202,30 @@ pub struct StepRunEnd<'a> {
     pub tokens_in: Option<u64>,
     pub tokens_out: Option<u64>,
     pub ended_at: &'a str,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+}
+
+const STEP_RUN_COLUMNS: &str = "id, wp_id, step, agent, session_id, state, round, cost_usd, tokens_in, tokens_out, \
+                                started_at, ended_at, model, effort";
+
+fn step_run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunRow> {
+    Ok(StepRunRow {
+        id: r.get(0)?,
+        wp_id: u64::try_from(r.get::<_, i64>(1)?).unwrap_or_default(),
+        step: r.get(2)?,
+        agent: r.get(3)?,
+        session_id: r.get(4)?,
+        state: r.get(5)?,
+        round: r.get::<_, Option<i64>>(6)?.and_then(|v| u8::try_from(v).ok()),
+        cost_usd: r.get(7)?,
+        tokens_in: r.get::<_, Option<i64>>(8)?.and_then(|v| u64::try_from(v).ok()),
+        tokens_out: r.get::<_, Option<i64>>(9)?.and_then(|v| u64::try_from(v).ok()),
+        started_at: r.get(10)?,
+        ended_at: r.get(11)?,
+        model: r.get(12)?,
+        effort: r.get(13)?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,7 +514,7 @@ impl Store {
     pub fn end_step_run(&self, id: i64, end: &StepRunEnd<'_>) -> StorageResult<()> {
         self.conn.execute(
             "UPDATE step_run SET state = ?2, session_id = COALESCE(?3, session_id), cost_usd = ?4,
-               tokens_in = ?5, tokens_out = ?6, ended_at = ?7 WHERE id = ?1",
+               tokens_in = ?5, tokens_out = ?6, ended_at = ?7, model = ?8, effort = ?9 WHERE id = ?1",
             params![
                 id,
                 end.state,
@@ -491,7 +522,9 @@ impl Store {
                 end.cost_usd,
                 opt_u64(end.tokens_in),
                 opt_u64(end.tokens_out),
-                end.ended_at
+                end.ended_at,
+                end.model,
+                end.effort
             ],
         )?;
         Ok(())
@@ -507,27 +540,19 @@ impl Store {
 
     /// Step runs of one task, oldest first.
     pub fn step_runs(&self, wp_id: u64) -> StorageResult<Vec<StepRunRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, wp_id, step, agent, session_id, state, round, cost_usd, tokens_in, tokens_out,
-                    started_at, ended_at
-             FROM step_run WHERE wp_id = ?1 ORDER BY id",
-        )?;
-        let rows = stmt.query_map([id_param(wp_id)], |r| {
-            Ok(StepRunRow {
-                id: r.get(0)?,
-                wp_id: u64::try_from(r.get::<_, i64>(1)?).unwrap_or_default(),
-                step: r.get(2)?,
-                agent: r.get(3)?,
-                session_id: r.get(4)?,
-                state: r.get(5)?,
-                round: r.get::<_, Option<i64>>(6)?.and_then(|v| u8::try_from(v).ok()),
-                cost_usd: r.get(7)?,
-                tokens_in: r.get::<_, Option<i64>>(8)?.and_then(|v| u64::try_from(v).ok()),
-                tokens_out: r.get::<_, Option<i64>>(9)?.and_then(|v| u64::try_from(v).ok()),
-                started_at: r.get(10)?,
-                ended_at: r.get(11)?,
-            })
-        })?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {STEP_RUN_COLUMNS} FROM step_run WHERE wp_id = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map([id_param(wp_id)], step_run_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Finished step runs of every task, oldest first (Settings shows cost and time per step).
+    pub fn done_step_runs(&self) -> StorageResult<Vec<StepRunRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {STEP_RUN_COLUMNS} FROM step_run WHERE state = 'done' AND ended_at IS NOT NULL ORDER BY id"
+        ))?;
+        let rows = stmt.query_map([], step_run_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -713,14 +738,21 @@ mod tests {
                     tokens_in: Some(1000),
                     tokens_out: Some(200),
                     ended_at: "2026-11-14T08:05:00Z",
+                    model: Some("claude-opus-5-5"),
+                    effort: None,
                 },
             )
             .unwrap();
         assert_eq!(store.fail_unfinished_runs("2026-11-14T10:00:00Z").unwrap(), 1);
         let runs = store.step_runs(187716).unwrap();
         assert_eq!(runs[0].session_id.as_deref(), Some("s-1"));
+        assert_eq!(runs[0].model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(runs[0].effort, None);
         assert_eq!(runs[1].id, open);
         assert_eq!(runs[1].state, "failed");
+        let done = store.done_step_runs().unwrap();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].step, "analyze");
         let (cost, tokens) = store.usage_since("2026-11-14T00:00:00Z").unwrap();
         assert!((cost - 0.5).abs() < 1e-9);
         assert_eq!(tokens, 1200);

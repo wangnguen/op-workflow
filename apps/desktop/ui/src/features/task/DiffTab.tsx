@@ -116,8 +116,8 @@ export function DiffTab({ detail: d }: { detail: TaskDetail }) {
               <button key={f.path} className="diff-file-link" title={f.path} onClick={() => jump(f.path)}>
                 <span className={`diff-dot diff-dot--${f.change}`} aria-hidden="true" />
                 <span className="diff-file-name">
-                  <span className="faint">{dirOf(f.path)}</span>
-                  {baseName(f.path)}
+                  <span>{baseName(f.path)}</span>
+                  {dirOf(f.path) && <span className="faint diff-file-dir">{dirOf(f.path)}</span>}
                 </span>
                 {f.changed && <span className="diff-changed" title={t.changedHint} />}
               </button>

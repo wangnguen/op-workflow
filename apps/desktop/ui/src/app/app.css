@@ -233,6 +233,7 @@
   line-height: 15px;
   text-align: center;
 }
+/* fixed height: switching Chưa đọc / Tất cả does not move the note or resize the popover */
 .bell-pop {
   position: absolute;
   top: calc(100% + 8px);
@@ -242,7 +243,7 @@
   flex-direction: column;
   gap: 8px;
   width: 360px;
-  max-height: min(520px, 70vh);
+  height: min(460px, 70vh);
   padding: 14px;
   border-radius: 12px;
   background: var(--overlay);
@@ -264,8 +265,15 @@
   margin: 0;
   font-size: 12px;
 }
+.bell-empty {
+  flex: 1;
+}
+.bell-note {
+  margin-top: auto;
+}
 .bell-list {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 2px;
   min-height: 0;

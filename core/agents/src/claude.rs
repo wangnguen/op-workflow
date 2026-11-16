@@ -2,14 +2,23 @@
 
 use serde_json::Value;
 
-use crate::{AgentsError, AgentsResult};
+use crate::{AgentsError, AgentsResult, ModelChoice};
 
 /// git subcommands an AI process may never run (defence in depth on top of the env guard).
 pub const DISALLOWED_GIT: &str = "Bash(git push *) Bash(git commit *) Bash(git merge *) Bash(git rebase *) \
                                   Bash(git reset *) Bash(git clean *) Bash(git tag *) Bash(gh pr *)";
 
 /// Longest tool detail kept for the log (a file path, a pattern, the first line of a command).
-const TOOL_DETAIL_MAX: usize = 90;
+/// Long enough for a real path or command; the UI wraps it instead of cutting it.
+pub const TOOL_DETAIL_MAX: usize = 300;
+
+/// Asked of every review the app reads (`/review-local` and the app's own prompt), on top of
+/// the repo's command, so it costs no extra turn.
+pub const REVIEW_LANGUAGE: &str = "Write the title, detail and suggestion of every finding in Vietnamese, \
+     whatever language the rest of your answer uses. Keep code, identifiers, file paths, error \
+     messages and quoted text exactly as they are. If you judge whether documentation or tests \
+     need updating, put that judgement, in Vietnamese, in a `notes` string field next to \
+     `findings` in the json block.";
 
 /// The final `result` line of a headless run.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -214,6 +223,23 @@ fn stream_json(mut args: Vec<String>) -> Vec<String> {
     args
 }
 
+/// Add `--model` / `--effort` when the user picked them for this step (before the output flags).
+pub fn with_model(mut args: Vec<String>, choice: &ModelChoice) -> Vec<String> {
+    let at = args
+        .iter()
+        .position(|a| a == "--output-format")
+        .unwrap_or(args.len());
+    let mut flags = Vec::new();
+    if let Some(m) = &choice.model {
+        flags.extend(["--model".to_owned(), m.clone()]);
+    }
+    if let Some(e) = &choice.effort {
+        flags.extend(["--effort".to_owned(), e.clone()]);
+    }
+    args.splice(at..at, flags);
+    args
+}
+
 /// [2] Analyze: read only. `--restricted` also drops Bash/WebFetch and the user's settings
 /// files; the prompt (brief + plan template) comes on stdin.
 pub fn analyze_args(budget_usd: f64) -> Vec<String> {
@@ -283,7 +309,8 @@ pub fn review_local_args(base: &str, budget_usd: f64) -> Vec<String> {
         "Non-interactive run. The base branch for this task is {base}: wherever the command uses \
          development, use {base} instead. The changes are not committed yet: review the working \
          tree against {base} (git diff {base}, plus untracked files from git status). End with \
-         one json block: {{findings:[{{severity,file,line,title,detail,suggestion}}]}}"
+         one json block: {{findings:[{{severity,file,line,title,detail,suggestion}}], notes}}\n\
+         {REVIEW_LANGUAGE}"
     );
     let mut args = strings(&[
         "-p",
@@ -330,13 +357,15 @@ fn issue_note(issue: Option<u64>) -> String {
     }
 }
 
-/// Flags shared by both push-summary forms: light, no session kept, git read only.
+/// Effort of the push summary when the user has not picked one (what the app always used).
+pub const PUSH_SUMMARY_EFFORT: &str = "low";
+
+/// Flags shared by both push-summary forms: no session kept, git read only. The effort comes
+/// from [`with_model`] (the user's pick, else [`PUSH_SUMMARY_EFFORT`]).
 fn push_flags(budget_usd: f64) -> Vec<String> {
     strings(&[
         "--strict-mcp-config",
         "--no-session-persistence",
-        "--effort",
-        "low",
         // Without --tools the child loads every tool on the machine (~39k extra tokens, §9).
         "--tools",
         "Bash",
@@ -462,6 +491,8 @@ mod tests {
         let args = review_local_args("origin/master", 3.0);
         let i = args.iter().position(|a| a == "--append-system-prompt").unwrap();
         assert!(args[i + 1].contains("origin/master"));
+        // findings in Vietnamese and the docs/test judgement, asked in the same turn
+        assert!(args[i + 1].contains("in Vietnamese") && args[i + 1].contains("`notes`"));
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "--disallowedTools" && w[1] == "Skill")
@@ -489,6 +520,29 @@ mod tests {
         let push = push_summary_args(None, 1.0);
         assert!(push.windows(2).any(|w| w[0] == "--tools" && w[1] == "Bash"));
         assert_eq!(push[1], "/push-summary");
+    }
+
+    #[test]
+    fn model_and_effort_flags_only_when_picked() {
+        let plain = review_args(3.0);
+        assert_eq!(with_model(plain.clone(), &ModelChoice::default()), plain);
+        let args = with_model(
+            review_args(3.0),
+            &ModelChoice::new(Some("claude-sonnet-5-5"), Some("high")),
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--model" && w[1] == "claude-sonnet-5-5")
+        );
+        assert!(args.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"));
+        assert_eq!(args.last().map(String::as_str), Some("--verbose"));
+        let effort_only = with_model(
+            push_summary_default_args(1.0),
+            &ModelChoice::new(None, Some("low")),
+        );
+        assert!(!effort_only.contains(&"--model".to_owned()));
+        assert_eq!(effort_only.iter().filter(|a| *a == "--effort").count(), 1);
+        assert!(ModelChoice::new(Some(" "), None).model.is_none());
     }
 
     #[test]

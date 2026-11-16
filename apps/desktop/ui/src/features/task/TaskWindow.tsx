@@ -20,11 +20,14 @@ import {
   saveBrief,
 } from "../../ipc/client";
 import type { Decision, FindingView, FlowAction, TaskDetail } from "../../ipc/types";
+import { copyText } from "../../shared/clipboard";
 import { formatClock, formatDuration, formatUsd } from "../../shared/format";
 import { usePolling, useNow } from "../../shared/hooks";
 import { CommentsTab } from "./CommentsTab";
+import { CopyPush } from "./CopyPush";
 import { DiffTab } from "./DiffTab";
 import { Markdown } from "../../shared/Markdown";
+import { modelText } from "../../shared/models";
 import { Icon } from "../../shared/ui/Icon";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
@@ -178,6 +181,7 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
             <StatusStrip
               detail={d}
               busy={busy}
+              onError={setError}
               onAction={act}
               onLogin={(p) => run("login", () => openLogin(p))}
               onShow={setTab}
@@ -235,12 +239,15 @@ function StepBar({ detail: d }: { detail: TaskDetail }) {
         <li
           key={s.kind}
           className={`task-step task-step--${s.state}${s.kind === d.current ? " is-current" : ""}`}
-          title={`${stepHint[s.kind]}${s.costUsd ? ` · ${formatUsd(s.costUsd)}` : ""}`}
+          title={[stepHint[s.kind], s.costUsd ? formatUsd(s.costUsd) : "", s.model ? `${t.model}: ${s.model}${s.effort ? ` · ${s.effort}` : ""}` : ""]
+            .filter(Boolean)
+            .join(" · ")}
         >
           <StatusIcon state={s.state} />
           <span>
             {s.index}. {stepLabel[s.kind]}
             {s.round ? <span className="faint"> · {vi.orbit.round(s.round)}</span> : null}
+            <small className="task-step-model">{modelText(s.model, s.effort) || "\u00a0"}</small>
           </span>
         </li>
       ))}
@@ -251,13 +258,14 @@ function StepBar({ detail: d }: { detail: TaskDetail }) {
 interface StripProps {
   detail: TaskDetail;
   busy?: string;
+  onError: (message: string) => void;
   onAction: (a: FlowAction) => void;
   onLogin: (p: "claude" | "codex") => void;
   onShow: (tab: TaskTab) => void;
   onFeedback: () => void;
 }
 
-function StatusStrip({ detail: d, busy, onAction, onLogin, onShow, onFeedback }: StripProps) {
+function StatusStrip({ detail: d, busy, onError, onAction, onLogin, onShow, onFeedback }: StripProps) {
   const now = useNow(1000);
   const step = d.current ? stepLabel[d.current] : "";
   const disabled = busy !== undefined;
@@ -285,13 +293,15 @@ function StatusStrip({ detail: d, busy, onAction, onLogin, onShow, onFeedback }:
   } else if (d.status === "running" && d.running) {
     const r = d.running;
     const last = r.tools[r.tools.length - 1];
+    const how = [modelText(r.model, r.effort), r.command].filter(Boolean).join(" · ");
     icon = <StatusIcon state="running" size={15} />;
     text = (
       <>
         <strong>
           <span className={`chip chip--${r.agent}`}>{agentLabel[r.agent]}</span> {t.running(stepLabel[r.step].toLowerCase())}
+          {how && <span className="faint task-status-how"> · {how}</span>}
         </strong>
-        <span className="faint">
+        <span className="faint task-status-tool" title={last?.name}>
           {formatDuration(now - Date.parse(r.startedAt))}
           {last && (
             <>
@@ -388,9 +398,7 @@ function StatusStrip({ detail: d, busy, onAction, onLogin, onShow, onFeedback }:
     );
     actions = (
       <>
-        <button className="btn btn--sm" onClick={() => onShow("push")}>
-          {t.copyPush}
-        </button>
+        <CopyPush push={d.push} onError={onError} />
         <button className="btn btn--primary btn--sm" disabled={disabled} title={t.finishHint} onClick={() => onAction({ type: "finish" })}>
           <Icon name="check" size={12} />
           {t.finish}
@@ -528,10 +536,33 @@ interface FindingsProps {
   onAction: (a: FlowAction) => void;
 }
 
+function ReviewNotes({ detail: d }: { detail: TaskDetail }) {
+  const notes = d.reviewNotes ?? [];
+  if (notes.length === 0) return null;
+  return (
+    <section className="task-notes" aria-label={t.reviewNotes}>
+      <h4 title={t.reviewNotesHint}>{t.reviewNotes}</h4>
+      {notes.map((n) => (
+        <div key={n.step} className="task-note">
+          <span className="faint">{stepLabel[n.step]}</span>
+          <Markdown text={n.text} className="task-md" />
+        </div>
+      ))}
+    </section>
+  );
+}
+
 function FindingsTab({ detail: d, busy, onDecide, onAction }: FindingsProps) {
   const [accepting, setAccepting] = useState<string>();
   const [reason, setReason] = useState("");
-  if (d.findings.length === 0) return <p className="dim">{t.noFindings}</p>;
+  if (d.findings.length === 0) {
+    return (
+      <div className="task-pane">
+        <p className="dim">{t.noFindings}</p>
+        <ReviewNotes detail={d} />
+      </div>
+    );
+  }
   const triage = d.gate?.kind === "mediumTriage";
   const counts = findingCounts(d.findings, triage);
   const locked = d.status === "running";
@@ -637,6 +668,7 @@ function FindingsTab({ detail: d, busy, onDecide, onAction }: FindingsProps) {
           );
         })}
       </ul>
+      <ReviewNotes detail={d} />
     </div>
   );
 }
@@ -644,19 +676,28 @@ function FindingsTab({ detail: d, busy, onDecide, onAction }: FindingsProps) {
 function PushTab({ detail: d, busy, onAction }: { detail: TaskDetail; busy?: string; onAction: (a: FlowAction) => void }) {
   const [issue, setIssue] = useState("");
   const [copied, setCopied] = useState<number>();
+  const [copyError, setCopyError] = useState<string>();
   useEffect(() => {
     setIssue(d.push?.issue ? String(d.push.issue) : "");
   }, [d.push?.issue]);
   if (!d.push) return <p className="dim">{t.noPush}</p>;
   const copy = (text: string, i: number) => {
-    void navigator.clipboard?.writeText(text).then(() => {
-      setCopied(i);
-      window.setTimeout(() => setCopied((c) => (c === i ? undefined : c)), 1500);
-    });
+    setCopyError(undefined);
+    copyText(text)
+      .then(() => {
+        setCopied(i);
+        window.setTimeout(() => setCopied((c) => (c === i ? undefined : c)), 1500);
+      })
+      .catch(() => setCopyError(t.copyFailed));
   };
   const number = Number.parseInt(issue, 10);
   return (
     <div className="task-pane">
+      <p className="note">
+        <Icon name="info" size={13} />
+        {t.pushTabNote}
+      </p>
+      {copyError && <p className="note note--error">{copyError}</p>}
       <div className="task-push-issue">
         <label>
           {t.issue}{" "}

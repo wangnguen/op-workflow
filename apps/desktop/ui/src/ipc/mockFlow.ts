@@ -35,13 +35,17 @@ const LABEL: Record<StepKind, string> = {
   fix: "Sửa lỗi",
   crossReview: "Review chéo",
   finalReview: "Review chốt",
-  pushSummary: "Chuẩn bị push",
+  pushSummary: "Push summary",
 };
 
 const TOOLS: Record<StepKind, string[]> = {
   intake: [],
   analyze: ["Grep orgId", "Read api/src/routes/files.ts", "Read api/src/services/org.ts"],
-  implement: ["Read api/src/routes/files.ts", "Edit api/src/routes/files.ts", "Bash npx tsc --noEmit"],
+  implement: [
+    "Read api/src/routes/files.ts",
+    "Edit api/src/routes/files.ts",
+    "Bash npx tsc --noEmit -p api/tsconfig.json && npx eslint api/src/routes/files.ts api/src/services/org.ts --max-warnings 0",
+  ],
   reviewLocal: ["Bash git diff origin/development", "Read api/src/routes/files.ts"],
   fix: ["Edit api/src/routes/files.ts", "Bash npx tsc --noEmit"],
   crossReview: ["Shell git merge-base origin/development HEAD", "Shell git diff 3f2a9c1"],
@@ -58,6 +62,29 @@ const COST: Record<StepKind, number> = {
   crossReview: 0,
   finalReview: 0.58,
   pushSummary: 0.21,
+};
+
+/** Model each mock step "ran" with (what Settings → Các bước AI would pass, or the CLI's default). */
+const MODEL: Record<StepKind, string | undefined> = {
+  intake: undefined,
+  analyze: "claude-opus-5-5",
+  implement: "claude-opus-5-5",
+  reviewLocal: "claude-opus-5-5",
+  fix: "claude-opus-5-5",
+  crossReview: "gpt-6.1-sol",
+  finalReview: "claude-opus-5-5",
+  pushSummary: "claude-opus-5-5",
+};
+const EFFORT: Partial<Record<StepKind, string>> = { pushSummary: "low" };
+const COMMAND: Partial<Record<StepKind, string>> = {
+  reviewLocal: "/review-local của repo",
+  crossReview: "codex exec, chỉ đọc",
+  finalReview: "/review-local của repo",
+  pushSummary: "/push-summary của repo",
+};
+const NOTES: Partial<Record<StepKind, string>> = {
+  reviewLocal: "- README: không cần cập nhật.\n- Test: nên thêm ca user chưa có org vào `api/test/files.test.ts`.",
+  finalReview: "- Test: đã có ca user chưa có org; nên thêm ca org bị xoá giữa chừng.",
 };
 
 const PLAN = `## Nguyên nhân
@@ -161,11 +188,14 @@ interface Flow {
   log: LogLine[];
   costs: Partial<Record<StepKind, number>>;
   failFirst: boolean;
+  notes: Partial<Record<StepKind, string>>;
 }
 
 const flows = new Map<number, Flow>();
 /** wpId of the animated demo task in mock.ts. */
 const DEMO_ACTIVE_WP = 187716;
+/** wpId of the demo card waiting for the push (mock.ts). */
+const DEMO_PUSH_WP = 186196;
 const iso = (ms: number) => new Date(ms).toISOString();
 const agentOf = (step: StepKind): AgentKind => (step === "crossReview" ? "codex" : "claude");
 const settled = (f: FindingView) => f.state === "fixed" || f.state === "accepted" || f.state === "deferred";
@@ -198,6 +228,7 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo"): Flow 
       log: [{ at: iso(Date.now()), kind: "info", text: "Đã nhận task: tạo nhánh và brief xong" }],
       costs: {},
       failFirst: wantsError(),
+      notes: {},
     };
     if (wpId === DEMO_ACTIVE_WP) {
       // the animated demo task: open it where the demo shows a gate, at the plan review
@@ -205,6 +236,18 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo"): Flow 
       f.states.analyze = "waitingUser";
       f.plan = PLAN;
       toGate(f, "planReview", "analyze");
+    }
+    if (wpId === DEMO_PUSH_WP) {
+      // the demo card in "Chờ bạn push": every step done, the push summary written
+      f.title = "Sửa thông báo lỗi khi token Box hết hạn";
+      for (const s of STEP_ORDER) f.states[s] = "done";
+      for (const s of STEP_ORDER) if (COST[s]) f.costs[s] = COST[s];
+      for (const s of STEP_ORDER) if (s !== "intake") f.runs[s] = 1;
+      f.plan = PLAN;
+      f.push = pushView();
+      f.notes = { ...NOTES };
+      f.current = "pushSummary";
+      f.phase = "awaitingPush";
     }
     flows.set(wpId, f);
   }
@@ -244,7 +287,8 @@ function startRun(f: Flow): void {
   f.runEnds = Date.now() + MOCK_STEP_MS;
   // like the engine: what the fix takes is "being fixed" until the next review
   if (f.current === "fix") for (const x of f.findings) if (toFix(x)) x.state = "fixing";
-  log(f, "info", `Bắt đầu ${LABEL[f.current]} (${agentOf(f.current) === "codex" ? "Codex" : "Claude"})`, f.current);
+  const how = [agentOf(f.current) === "codex" ? "Codex" : "Claude", MODEL[f.current], EFFORT[f.current], COMMAND[f.current]];
+  log(f, "info", `Bắt đầu ${LABEL[f.current]} (${how.filter(Boolean).join(" · ")})`, f.current);
 }
 
 function merge(f: Flow, step: "reviewLocal" | "crossReview" | "finalReview", found: Omit<FindingView, "state">[]): void {
@@ -300,8 +344,7 @@ function complete(f: Flow): void {
       done(`${f.findings.filter((x) => x.state === "fixing").length} lỗi`);
       return;
     case "pushSummary":
-      f.push = { issue: 456, text: PUSH, blocks: [] };
-      f.push.blocks = [...PUSH.matchAll(/### (.+)\n```\w*\n([\s\S]*?)\n```/g)].map((m) => ({ label: m[1] ?? "", text: m[2] ?? "" }));
+      f.push = pushView();
       f.states.pushSummary = "done";
       f.current = "pushSummary";
       f.phase = "awaitingPush";
@@ -312,6 +355,7 @@ function complete(f: Flow): void {
     case "finalReview": {
       const found = REVIEWS[step][Math.min(n - 1, REVIEWS[step].length - 1)] ?? [];
       merge(f, step, found);
+      if (NOTES[step]) f.notes[step] = NOTES[step];
       const blocking = f.findings.filter(toFix).length;
       f.states[step] = "done";
       done(`báo ${found.length} lỗi; cần sửa ${blocking}`);
@@ -361,6 +405,10 @@ function steps(f: Flow): StepView[] {
     const view: StepView = { kind, index: i + 1, state };
     const cost = f.costs[kind];
     if (cost) view.costUsd = cost;
+    if ((f.runs[kind] ?? 0) > 0 || (cost && MODEL[kind]) || (f.phase === "running" && f.current === kind)) {
+      view.model = MODEL[kind];
+      view.effort = EFFORT[kind];
+    }
     if (kind === "crossReview" && f.round > 0) view.round = f.round;
     return view;
   });
@@ -405,18 +453,33 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     brief: f.brief,
     plan: f.plan,
     findings: f.findings.map((x) => ({ ...x })),
+    reviewNotes: STEP_ORDER.filter((s) => f.notes[s]).map((s) => ({ step: s, text: f.notes[s] ?? "" })),
     push: f.push,
     log: [...f.log, ...tools(f).map((t) => ({ at: t.at, kind: "tool" as const, text: t.name, step: f.current }))],
     costUsd: Object.values(f.costs).reduce((a, b) => a + (b ?? 0), 0),
     newComments: mockNewComments(wpId),
   };
   if (f.phase === "running" && f.current && f.runStarted) {
-    detail.running = { step: f.current, agent: agentOf(f.current), startedAt: f.runStarted, tools: tools(f), contextTokens: 182_000 };
+    detail.running = {
+      step: f.current,
+      agent: agentOf(f.current),
+      startedAt: f.runStarted,
+      tools: tools(f),
+      contextTokens: 182_000,
+      model: MODEL[f.current],
+      effort: EFFORT[f.current],
+      command: COMMAND[f.current],
+    };
   }
   return detail;
 }
 
 const fail = (code: string, message: string) => ({ code, message });
+
+function pushView(): PushView {
+  const blocks = [...PUSH.matchAll(/### (.+)\n```\w*\n([\s\S]*?)\n```/g)].map((m) => ({ label: m[1] ?? "", text: m[2] ?? "" }));
+  return { issue: 456, text: PUSH, blocks };
+}
 
 export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
   const f = flowOf(wpId);

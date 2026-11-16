@@ -51,6 +51,44 @@ pub fn cross_review_args(schema_file: &str, output_file: &str) -> Vec<String> {
     .collect()
 }
 
+/// Add `-m <model>` and `-c model_reasoning_effort="<effort>"` right after `exec` when the user
+/// picked them for this step; otherwise Codex uses `~/.codex/config.toml`.
+pub fn with_model(mut args: Vec<String>, choice: &crate::ModelChoice) -> Vec<String> {
+    let at = usize::from(args.first().is_some_and(|a| a == "exec"));
+    let mut flags = Vec::new();
+    if let Some(m) = &choice.model {
+        flags.extend(["-m".to_owned(), m.clone()]);
+    }
+    if let Some(e) = &choice.effort {
+        flags.extend(["-c".to_owned(), format!("model_reasoning_effort=\"{e}\"")]);
+    }
+    args.splice(at..at, flags);
+    args
+}
+
+/// Models named in `~/.codex/config.toml` (top level and profiles), for the Settings list.
+pub fn configured_models(toml: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in toml.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "model" {
+            continue;
+        }
+        let v = value
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches(['"', '\'']);
+        if !v.is_empty() && !out.iter().any(|m| m == v) {
+            out.push(v.to_owned());
+        }
+    }
+    out
+}
+
 /// Events the app cares about from one `codex exec --json` line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexEvent {
@@ -88,9 +126,10 @@ pub fn parse_line(line: &str) -> crate::AgentsResult<CodexEvent> {
             thread_id: str_at("/thread_id"),
         },
         "item.started" | "item.completed" => match str_at("/item/type").as_str() {
-            "command_execution" if kind == "item.started" => {
-                CodexEvent::Command(crate::claude::short(&str_at("/item/command"), 90))
-            }
+            "command_execution" if kind == "item.started" => CodexEvent::Command(crate::claude::short(
+                &str_at("/item/command"),
+                crate::claude::TOOL_DETAIL_MAX,
+            )),
             "agent_message" if kind == "item.completed" => CodexEvent::Message(str_at("/item/text")),
             other => CodexEvent::Other(format!("{kind}:{other}")),
         },
@@ -153,6 +192,20 @@ mod tests {
                 .any(|w| w[0] == "-c" && w[1] == "memories.use_memories=false")
         );
         assert_eq!(args.last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
+    fn model_flags_go_after_exec_and_models_come_from_config() {
+        let plain = cross_review_args("s.json", "o.json");
+        assert_eq!(with_model(plain.clone(), &crate::ModelChoice::default()), plain);
+        let args = with_model(plain, &crate::ModelChoice::new(Some("gpt-x"), Some("high")));
+        assert_eq!(
+            &args[..5],
+            ["exec", "-m", "gpt-x", "-c", "model_reasoning_effort=\"high\""]
+        );
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+        let toml = "model = \"gpt-a\" # main\nmodel_reasoning_effort = \"xhigh\"\n[profiles.fast]\nmodel = 'gpt-b'\n[x]\nmodel = \"gpt-a\"\n";
+        assert_eq!(configured_models(toml), ["gpt-a", "gpt-b"]);
     }
 
     #[test]

@@ -3,11 +3,28 @@
 
 use opw_browser::{BrowserError, IssueError, IssueRead};
 use opw_context::{BriefIssue, BriefIssueComment, ISSUE_HEADING, render_issue_section};
-use opw_domain::view::ApiError;
+use opw_domain::view::{ApiError, IssueStatus};
+use opw_storage::Store;
 use opw_tracker::{IssueHost, extract_issue_links};
 
 /// Each read is one tab in the user's Chrome; keep it to the issues the task is about.
 pub const MAX_ISSUES: usize = 3;
+
+/// `task_kv` kind of the last "Lấy issue" outcome (shown on the card).
+const STATUS: &str = "issue.status";
+
+/// Remember how the last "Lấy issue" went.
+pub fn save_status(store: &Store, wp_id: u64, status: &IssueStatus) {
+    if let Ok(json) = serde_json::to_string(status) {
+        let _ = store.kv_set(wp_id, STATUS, "", &json, &status.at);
+    }
+}
+
+/// The last "Lấy issue" of a task, if any.
+pub fn status(store: &Store, wp_id: u64) -> Option<IssueStatus> {
+    let json = store.kv_get(wp_id, STATUS, "").ok().flatten()?;
+    serde_json::from_str(&json).ok()
+}
 
 /// GitHub issue links of the task: everything in the brief above `## Từ issue` (description,
 /// OpenProject comments, the link list). Links inside issue text are not followed.
@@ -151,5 +168,26 @@ mod tests {
             "issue.failed"
         );
         assert_eq!(browser_error(BrowserError::NotEnabled).code, "browser.notEnabled");
+    }
+
+    #[test]
+    fn the_last_fetch_outcome_is_kept_per_task() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(status(&store, 7), None);
+        let ok = IssueStatus {
+            at: "2026-11-14T10:40:00Z".into(),
+            read: 2,
+            error: None,
+        };
+        save_status(&store, 7, &ok);
+        assert_eq!(status(&store, 7), Some(ok));
+        let failed = IssueStatus {
+            at: "2026-11-14T10:45:00Z".into(),
+            read: 0,
+            error: Some("Chrome đang tắt".into()),
+        };
+        save_status(&store, 7, &failed);
+        assert_eq!(status(&store, 7), Some(failed));
+        assert_eq!(status(&store, 8), None);
     }
 }

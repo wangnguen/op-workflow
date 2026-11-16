@@ -924,6 +924,12 @@
   display: grid;
   gap: 3px;
 }
+/* long paths and commands wrap instead of being cut */
+.dp-tools li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .dp-gate {
   padding: 12px;
   border-radius: var(--radius);

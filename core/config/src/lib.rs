@@ -133,6 +133,11 @@ pub struct RepoConfig {
 pub struct StepConfig {
     /// `claude` or `codex` (cross-review only for now).
     pub agent: Option<String>,
+    /// Model the user picked in Settings (`claude-sonnet-5-5`, a Codex model). `None` = whatever
+    /// the CLI on this machine uses; the app never picks one by itself.
+    pub model: Option<String>,
+    /// `low` … `max` (Claude `--effort`) or Codex `model_reasoning_effort`. `None` = the machine's.
+    pub effort: Option<String>,
     pub max_budget_usd: Option<f64>,
     /// Cross-review ⇄ fix rounds before the final review.
     pub max_rounds: Option<u8>,
@@ -151,7 +156,38 @@ pub struct StepsConfig {
     pub review_local: StepConfig,
     pub fix: StepConfig,
     pub cross_review: StepConfig,
+    /// Model and effort of the final review. Its budget and timeout fall back to `reviewLocal`
+    /// (both used to share that section).
+    pub final_review: StepConfig,
     pub push_summary: StepConfig,
+}
+
+/// What the user picked for one step in Settings → Các bước AI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StepChoice<'a> {
+    /// `analyze`, `reviewLocal`, … (the key under `steps`).
+    pub step: &'a str,
+    pub agent: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+}
+
+/// Write `steps.<step>.agent/model/effort`; `None` removes the key (back to the machine's
+/// default). Budget, timeout and other keys stay.
+pub fn save_step_choice(path: &Path, c: &StepChoice<'_>) -> ConfigResult<()> {
+    edit_file(path, |root| {
+        let step = object_at(object_at(root, "steps"), c.step);
+        for (key, value) in [("agent", c.agent), ("model", c.model), ("effort", c.effort)] {
+            match value.map(str::trim).filter(|v| !v.is_empty()) {
+                Some(v) => {
+                    step.insert(key.into(), Value::String(v.to_owned()));
+                }
+                None => {
+                    step.remove(key);
+                }
+            }
+        }
+    })
 }
 
 /// New-version check against the public GitHub Releases of the app (read-only GET).
@@ -489,6 +525,56 @@ mod tests {
         assert_eq!(cfg.steps.fix, StepConfig::default());
         assert_eq!(cfg.repos["~/code/web"].allow_bash, ["npm run lint *"]);
         assert!(!Config::from_value(&Value::Null).steps.auto_advance);
+    }
+
+    #[test]
+    fn step_choices_are_saved_and_cleared_without_touching_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"steps":{"autoAdvance":true,"fix":{"maxBudgetUsd":3,"model":"old"}}}"#,
+        )
+        .unwrap();
+        save_step_choice(
+            &path,
+            &StepChoice {
+                step: "fix",
+                agent: None,
+                model: Some("claude-sonnet-5-5"),
+                effort: Some("high"),
+            },
+        )
+        .unwrap();
+        save_step_choice(
+            &path,
+            &StepChoice {
+                step: "finalReview",
+                agent: None,
+                model: Some(" "),
+                effort: Some("low"),
+            },
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.steps.auto_advance);
+        assert_eq!(cfg.steps.fix.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(cfg.steps.fix.effort.as_deref(), Some("high"));
+        assert_eq!(cfg.steps.fix.max_budget_usd, Some(3.0));
+        assert_eq!(cfg.steps.final_review.model, None);
+        assert_eq!(cfg.steps.final_review.effort.as_deref(), Some("low"));
+
+        save_step_choice(
+            &path,
+            &StepChoice {
+                step: "fix",
+                ..StepChoice::default()
+            },
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!((cfg.steps.fix.model, cfg.steps.fix.effort), (None, None));
+        assert_eq!(cfg.steps.fix.max_budget_usd, Some(3.0));
     }
 
     #[test]

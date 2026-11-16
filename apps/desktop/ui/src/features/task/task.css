@@ -21,9 +21,10 @@
   border-bottom: 1px solid var(--line);
   list-style: none;
 }
+/* the icon sits on the first line (step name), not in the middle of name + model */
 .task-step {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 5px;
   min-width: 0;
   padding: 5px 6px;
@@ -34,6 +35,8 @@
 }
 .task-step > .status-icon {
   flex-shrink: 0;
+  /* 13px icon centred in the 14.4px first line */
+  margin-top: 1px;
 }
 /* long names wrap to a second line instead of being cut */
 .task-step > span {
@@ -47,6 +50,13 @@
   background: var(--fill);
   color: var(--text);
   font-weight: 600;
+}
+/* model · effort of the step's last run; the line is always there so the bar keeps its height */
+.task-step-model {
+  display: block;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 400;
 }
 
 /* ---------- status strip ---------- */
@@ -549,14 +559,17 @@
 .diff-file-link:hover {
   background: var(--fill);
 }
+/* name first, folder under it; both wrap instead of being cut */
 .diff-file-name {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl;
-  text-align: left;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+}
+.diff-file-dir {
+  font-size: 11px;
 }
 .diff-dot {
   flex-shrink: 0;
@@ -708,4 +721,47 @@
   border-left: 3px solid var(--sev-muted);
   border-radius: var(--radius-xs);
   background: var(--bg);
+}
+
+/* ---------- copy buttons, docs/test notes ---------- */
+
+/* "Copy commit" and "Đã copy" share one grid cell, so the button keeps its width */
+.copy-label {
+  display: inline-grid;
+}
+.copy-label > span {
+  grid-area: 1 / 1;
+}
+.copy-label > .is-off {
+  visibility: hidden;
+}
+.btn.is-copied {
+  color: var(--st-done);
+}
+.task-status-how {
+  font-weight: 400;
+}
+/* one line, so the strip keeps its height while tools change; the full text is in the tooltip
+   and the Log tab */
+.task-status-tool {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-notes {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+.task-notes h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+.task-note + .task-note {
+  margin-top: 8px;
+}
+.task-note > .faint {
+  font-size: 11px;
 }

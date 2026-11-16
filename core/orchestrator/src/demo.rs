@@ -246,6 +246,8 @@ fn active_system(frame: u64) -> Option<TaskSystem> {
             ended_at: None,
             cost_usd: (wf.state_of(kind) == StepState::Done).then_some(0.12),
             round: (kind == StepKind::CrossReview).then_some(wf.round().max(1)),
+            model: None,
+            effort: None,
         })
         .collect();
     let gate_view = gate.map(|kind| GateView {
@@ -326,6 +328,7 @@ pub fn board(tick: u64) -> BoardSnapshot {
         gate: None,
         flow_note: None,
         login: None,
+        issues: None,
     };
     let mut tasks = vec![
         inbox(188001, "Thêm bộ lọc danh sách user", "Web Platform", 2),
@@ -353,6 +356,7 @@ pub fn board(tick: u64) -> BoardSnapshot {
             gate: None,
             flow_note: None,
             login: None,
+            issues: None,
         },
     ];
     if let Some(sys) = &system {
@@ -388,6 +392,7 @@ pub fn board(tick: u64) -> BoardSnapshot {
             gate: None,
             flow_note: None,
             login: None,
+            issues: None,
         });
     }
     BoardSnapshot {

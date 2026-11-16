@@ -122,11 +122,12 @@ pub fn findings_from_json(v: &Value) -> Option<Vec<RawFinding>> {
 
 /// The last JSON object in `text` that has a `findings` array: fenced blocks first (last one
 /// wins), then a bare `{"findings": …}` object.
-fn last_findings_json(text: &str) -> Option<Vec<RawFinding>> {
+fn last_findings_value(text: &str) -> Option<Value> {
+    let has_findings = |v: &Value| v.get("findings").is_some_and(Value::is_array);
     for block in fenced_blocks(text).iter().rev() {
         if let Ok(v) = serde_json::from_str::<Value>(block.body.trim()) {
-            if let Some(found) = findings_from_json(&v) {
-                return Some(found);
+            if has_findings(&v) {
+                return Some(v);
             }
         }
     }
@@ -135,8 +136,81 @@ fn last_findings_json(text: &str) -> Option<Vec<RawFinding>> {
     let starts: Vec<usize> = BARE.find_iter(text).map(|m| m.start()).collect();
     starts.iter().rev().find_map(|&at| {
         let mut stream = serde_json::Deserializer::from_str(&text[at..]).into_iter::<Value>();
-        stream.next()?.ok().as_ref().and_then(findings_from_json)
+        stream.next()?.ok().filter(has_findings)
     })
+}
+
+fn last_findings_json(text: &str) -> Option<Vec<RawFinding>> {
+    findings_from_json(&last_findings_value(text)?)
+}
+
+/// Longest docs/test note kept from a review.
+const NOTES_MAX_CHARS: usize = 3000;
+
+/// Headings of the "do docs or tests need updating?" part of a review (`/review-local` writes
+/// it in Japanese, e.g. `ドキュメント・テスト更新判定`).
+static NOTES_HEADING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)ドキュメント|テスト更新|\bdocs?\b|documentation|tài liệu|cập nhật test")
+        .expect("valid regex")
+});
+
+/// The reviewer's judgement on documentation and tests: the `notes` field of the json block,
+/// else a markdown section whose heading names docs or tests. `None` when there is none.
+pub fn review_notes(text: &str) -> Option<String> {
+    let from_json = last_findings_value(text).and_then(|v| match v.get("notes")? {
+        Value::String(s) => Some(s.trim().to_owned()),
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|s| format!("- {}", s.trim()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => None,
+    });
+    let notes = from_json
+        .filter(|n| !n.is_empty())
+        .or_else(|| notes_section(text))?;
+    Some(if notes.chars().count() > NOTES_MAX_CHARS {
+        let cut: String = notes.chars().take(NOTES_MAX_CHARS).collect();
+        format!("{cut}\n[…]")
+    } else {
+        notes
+    })
+}
+
+/// Body of the first markdown heading that names docs/tests, up to the next heading of the same
+/// or a higher level (fenced blocks are skipped: the json block is not part of it).
+fn notes_section(text: &str) -> Option<String> {
+    let level = |line: &str| {
+        let t = line.trim_start();
+        let n = t.chars().take_while(|c| *c == '#').count();
+        (n > 0 && t[n..].starts_with(' ')).then_some(n)
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| level(l).is_some() && NOTES_HEADING.is_match(l))?;
+    let depth = level(lines[start]).unwrap_or(1);
+    let mut body = Vec::new();
+    let mut in_fence = false;
+    for line in &lines[start + 1..] {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if level(line).is_some_and(|l| l <= depth) {
+            break;
+        }
+        body.push(*line);
+    }
+    let body = body.join("\n").trim().to_owned();
+    (!body.is_empty()).then_some(body)
 }
 
 static MARKER: LazyLock<Regex> =
@@ -269,6 +343,21 @@ mod tests {
         assert_eq!(blocks[1].heading, "PR description");
         assert_eq!(blocks[1].lang, "markdown");
         assert_eq!(blocks[2].body, "unclosed");
+    }
+
+    #[test]
+    fn docs_and_test_notes_come_from_json_or_their_section() {
+        let json = "x\n```json\n{\"findings\":[],\"notes\":\"Cần cập nhật README\"}\n```";
+        assert_eq!(review_notes(json).as_deref(), Some("Cần cập nhật README"));
+        let list = "{\"findings\":[],\"notes\":[\"README\",\"test e2e\"]}";
+        assert_eq!(review_notes(list).as_deref(), Some("- README\n- test e2e"));
+        let ja = "## レビュー結果\n- 🟠 a.ts:1 x\n## ドキュメント・テスト更新判定\n- README: 不要\n- テスト: 追加推奨\n### 補足\nok\n## まとめ\nend\n```json\n{\"findings\":[]}\n```";
+        assert_eq!(
+            review_notes(ja).as_deref(),
+            Some("- README: 不要\n- テスト: 追加推奨\n### 補足\nok")
+        );
+        assert_eq!(review_notes("## Kết quả\nKhông có lỗi nào."), None);
+        assert_eq!(review_notes("{\"findings\":[],\"notes\":\"  \"}"), None);
     }
 
     #[test]

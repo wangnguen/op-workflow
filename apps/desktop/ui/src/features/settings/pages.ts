@@ -1,7 +1,7 @@
 // Settings pages and the search index over their rows (pure, easy to test).
-import { vi } from "../../i18n/vi";
+import { stepLabel, vi } from "../../i18n/vi";
 
-export const PAGES = ["connection", "repos", "quota", "notify", "appearance", "about"] as const;
+export const PAGES = ["connection", "repos", "steps", "quota", "notify", "appearance", "about"] as const;
 export type PageKey = (typeof PAGES)[number];
 
 export interface SettingEntry {
@@ -23,6 +23,14 @@ export const ENTRIES: SettingEntry[] = [
   { page: "connection", id: "github", label: t.githubSection, keywords: "github issue chrome đọc remote debugging allow trình duyệt browser" },
   { page: "repos", id: "workspaces", label: t.workspaces, keywords: "workspace thư mục folder desktop quét scan" },
   { page: "repos", id: "config", label: t.editConfig, keywords: "config json cấu hình repo branch mẫu template" },
+  ...(["analyze", "implement", "reviewLocal", "fix", "crossReview", "finalReview", "pushSummary"] as const).map(
+    (step): SettingEntry => ({
+      page: "steps",
+      id: `step:${step}`,
+      label: stepLabel[step],
+      keywords: "model effort agent claude codex opus sonnet haiku fable giá price chi phí cost bước step",
+    }),
+  ),
   { page: "quota", id: "claude", label: `${t.claudeQuota} · ${t.quotaSection}`, keywords: "quota hạn mức limit claude probe" },
   { page: "quota", id: "codex", label: `${t.codexQuota} · ${t.quotaSection}`, keywords: "quota hạn mức limit codex app-server" },
   { page: "notify", id: "notifyComments", label: vi.notify.comments, keywords: "thông báo notification toast comment test failed reopened" },

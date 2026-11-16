@@ -121,6 +121,13 @@ pub fn now_rfc3339() -> String {
     OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default()
 }
 
+/// Seconds from `from` to `to` (both RFC 3339); `None` when either does not parse.
+pub fn seconds_between(from: &str, to: &str) -> Option<f64> {
+    let a = OffsetDateTime::parse(from, &Rfc3339).ok()?;
+    let b = OffsetDateTime::parse(to, &Rfc3339).ok()?;
+    Some((b - a).as_seconds_f64())
+}
+
 /// `hours` ago, in the same UTC form as [`now_rfc3339`] (so the strings compare in time order).
 pub fn hours_ago_rfc3339(hours: u32) -> String {
     (OffsetDateTime::now_utc() - time::Duration::hours(i64::from(hours)))
@@ -178,6 +185,13 @@ fn num(v: Option<&Value>) -> Option<f64> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn seconds_between_rfc3339_stamps() {
+        let s = seconds_between("2026-11-14T08:00:00Z", "2026-11-14T08:01:35.5Z").unwrap();
+        assert!((s - 95.5).abs() < 1e-6);
+        assert_eq!(seconds_between("x", "2026-11-14T08:00:00Z"), None);
+    }
 
     const AT: &str = "2026-11-13T08:00:00Z";
 

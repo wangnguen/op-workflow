@@ -74,3 +74,8 @@ export function formatClock(iso: string): string {
   const ss = String(d.getSeconds()).padStart(2, "0");
   return `${hh}:${mm}:${ss}`;
 }
+
+/** "17:40" in local time. */
+export function formatHourMinute(iso: string): string {
+  return formatClock(iso).slice(0, 5);
+}

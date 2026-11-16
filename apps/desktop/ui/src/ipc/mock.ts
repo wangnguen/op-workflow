@@ -12,6 +12,7 @@ import type {
   GateKind,
   InboxItem,
   IssueFetch,
+  IssueStatus,
   LinkStatus,
   OrbitSnapshot,
   Provider,
@@ -23,7 +24,9 @@ import type {
   StartOptions,
   StartRequest,
   StartResult,
+  StepChoiceRequest,
   StepKind,
+  StepSetting,
   StepState,
   StepView,
   SubagentView,
@@ -508,6 +511,10 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
       ...mockFlowCard(SECOND.wpId),
     });
   }
+  for (const t of tasks) {
+    const status = mockIssueStatus.get(t.wpId);
+    if (status) t.issues = status;
+  }
   const board: BoardSnapshot = {
     tasks,
     activeTaskIds: f.active ? [ACTIVE_ID, SECOND.id] : [],
@@ -544,7 +551,50 @@ export function mockSettings(): SettingsView {
     tasksDirChosen: mockTasksDir !== undefined,
     tasksDirSuggested: MOCK_DESKTOP_TASKS,
     notify: mockNotify(),
+    steps: mockStepSettings(),
+    codexModels: ["gpt-6.1-sol"],
   };
+}
+
+/** Past runs the preview shows next to each step: [runs, avg cost, avg seconds]. */
+const MOCK_STEP_HISTORY: Partial<Record<StepKind, [number, number | undefined, number]>> = {
+  analyze: [3, 0.24, 52],
+  implement: [2, 0.49, 54],
+  reviewLocal: [3, 0.55, 95],
+  fix: [2, 0.31, 40],
+  crossReview: [3, undefined, 280],
+  finalReview: [2, 0.62, 126],
+  pushSummary: [2, 0.09, 14],
+};
+const mockPicks: Partial<Record<StepKind, Omit<StepChoiceRequest, "step">>> = {};
+
+function mockStepSettings(): StepSetting[] {
+  return STEP_ORDER.filter((s) => s !== "intake").map((step) => {
+    const pick = mockPicks[step] ?? {};
+    const agent: AgentKind = step === "crossReview" ? (pick.agent ?? "codex") : "claude";
+    const [runs, avgCostUsd, avgSeconds] = MOCK_STEP_HISTORY[step] ?? [0, undefined, 0];
+    return {
+      step,
+      agent,
+      agentChoice: step === "crossReview",
+      model: pick.model,
+      effort: pick.effort,
+      effortDefault: step === "pushSummary" && agent === "claude" ? "low" : undefined,
+      runs,
+      avgCostUsd,
+      avgSeconds: runs > 0 ? avgSeconds : undefined,
+      lastModel: runs > 0 ? (agent === "codex" ? "gpt-6.1-sol" : "claude-opus-5-5") : undefined,
+    };
+  });
+}
+
+/** Browser preview: remembers the pick in memory only. */
+export function mockSetStepChoice(choice: StepChoiceRequest): SettingsView {
+  if (choice.model && !/^[A-Za-z0-9._:/[\]-]+$/.test(choice.model)) {
+    throw { code: "step.choice", message: `Tên model không hợp lệ: ${choice.model}` };
+  }
+  mockPicks[choice.step] = { agent: choice.agent, model: choice.model, effort: choice.effort };
+  return mockSettings();
 }
 
 const MOCK_DESKTOP_TASKS = "C:/Users/me/Desktop/op-workflow-tasks";
@@ -562,8 +612,17 @@ export const mockTasksDirOffer = (): string | undefined =>
     ? MOCK_DESKTOP_TASKS
     : undefined;
 
+const mockIssueStatus = new Map<number, IssueStatus>();
+
+/** `?issueError` in the preview URL makes "Lấy issue" fail, to see the red state. */
 export function mockFetchIssues(wpId: number): IssueFetch {
-  void wpId;
+  const at = new Date().toISOString();
+  if (typeof location !== "undefined" && new URLSearchParams(location.search).has("issueError")) {
+    const message = "Chrome chưa bật cho phép kết nối (chrome://inspect/#remote-debugging)";
+    mockIssueStatus.set(wpId, { at, read: 0, error: message });
+    throw { code: "browser.notEnabled", message };
+  }
+  mockIssueStatus.set(wpId, { at, read: 1 });
   return { read: 1, warnings: [] };
 }
 

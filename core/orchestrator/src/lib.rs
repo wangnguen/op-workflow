@@ -16,6 +16,7 @@ pub mod live;
 pub mod os;
 pub mod selftest;
 pub mod start;
+pub mod steps;
 pub mod tray;
 pub mod updater;
 
@@ -28,9 +29,10 @@ use opw_context::BriefComment;
 use opw_domain::task::display_id;
 use opw_domain::view::{
     AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, CommentsView, DataMode, DeleteBranchRequest,
-    DiffView, FindingDecision, FlowAction, FlowStatus, InboxItem, IssueFetch, NotifyKind, OrbitSnapshot,
-    ProjectMemory, Provider, QuotaSnapshot, RepoState, SettingsView, StartOptions, StartRequest, StartResult,
-    StepRef, StepView, TaskCard, TaskColumn, TaskDetail, TaskSystem, TasksDirChange, TodayStats, UpdateView,
+    DiffView, FindingDecision, FlowAction, FlowStatus, InboxItem, IssueFetch, IssueStatus, NotifyKind,
+    OrbitSnapshot, ProjectMemory, Provider, QuotaSnapshot, RepoState, SettingsView, StartOptions,
+    StartRequest, StartResult, StepChoiceRequest, StepRef, StepView, TaskCard, TaskColumn, TaskDetail,
+    TaskSystem, TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
@@ -208,6 +210,7 @@ impl AppService {
             gate: None,
             flow_note: None,
             login: None,
+            issues: None,
         }
     }
 
@@ -257,6 +260,7 @@ impl AppService {
                         gate: None,
                         flow_note: None,
                         login: None,
+                        issues: None,
                     });
                     tasks.len() - 1
                 }
@@ -314,6 +318,7 @@ impl AppService {
         for card in cards {
             let cached = state.comments.get(&card.wp_id).map(Vec::as_slice);
             card.new_comments = comments::new_count(&store, card.wp_id, cached);
+            card.issues = issues::status(&store, card.wp_id);
         }
     }
 
@@ -377,6 +382,8 @@ impl AppService {
                             ended_at: intake.then(|| row.updated_at.clone()),
                             cost_usd: None,
                             round: None,
+                            model: None,
+                            effort: None,
                         }
                     })
                     .collect(),
@@ -755,6 +762,19 @@ impl AppService {
     /// Allow) and rewrite the brief's `## Từ issue`. Only reads; waits up to ~2 minutes for the
     /// user and the pages, so run it off the UI thread.
     pub fn fetch_issues(&self, wp_id: u64) -> Result<IssueFetch, ApiError> {
+        let result = self.read_issues(wp_id);
+        if let Some(store) = self.store.as_ref().and_then(|s| s.lock().ok()) {
+            let status = IssueStatus {
+                at: opw_quota::now_rfc3339(),
+                read: result.as_ref().map_or(0, |r| r.read),
+                error: result.as_ref().err().map(|e| e.message.clone()),
+            };
+            issues::save_status(&store, wp_id, &status);
+        }
+        result
+    }
+
+    fn read_issues(&self, wp_id: u64) -> Result<IssueFetch, ApiError> {
         let file = self.brief_file(wp_id)?;
         let missing = |_| ApiError::new("brief.missing", "Chưa có brief: bấm Bắt đầu cho task này trước");
         let brief = std::fs::read_to_string(&file).map_err(missing)?;
@@ -1166,7 +1186,42 @@ impl AppService {
             tasks_dir_chosen: config.tasks_dir.is_some(),
             tasks_dir_suggested: folders::desktop_suggestion().map(|p| p.to_string_lossy().into_owned()),
             notify: config.notify,
+            steps: steps::settings(&config, &self.done_step_runs()),
+            codex_models: steps::codex_models(),
         }
+    }
+
+    fn done_step_runs(&self) -> Vec<opw_storage::StepRunRow> {
+        self.store
+            .as_ref()
+            .and_then(|s| s.lock().ok()?.done_step_runs().ok())
+            .unwrap_or_default()
+    }
+
+    /// Settings → Các bước AI: agent, model and effort of one step (`None` = the machine's).
+    pub fn set_step_choice(&self, req: &StepChoiceRequest) -> Result<SettingsView, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
+        let config = self.config();
+        let agent = steps::validate(req, &config)?;
+        let agent_key = (req.step == StepKind::CrossReview).then_some(match agent {
+            opw_domain::view::AgentKind::Codex => "codex",
+            _ => "claude",
+        });
+        opw_config::save_step_choice(
+            path,
+            &opw_config::StepChoice {
+                step: flow::step_key(req.step),
+                agent: agent_key,
+                model: req.model.as_deref(),
+                effort: req.effort.as_deref(),
+            },
+        )
+        .map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        Ok(self.settings())
     }
 
     /// Show a folder or file from Settings in Explorer. Only paths Settings itself lists are

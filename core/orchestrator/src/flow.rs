@@ -16,18 +16,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use opw_agents::ModelChoice;
 use opw_agents::claude::{self, ClaudeEvent, RunResult};
 use opw_agents::codex::{self, CodexEvent};
 use opw_agents::env::Account;
 use opw_agents::run::{RunOutcome, RunSpec};
 use opw_agents::text::{self, RawFinding};
-use opw_config::{Config, RepoConfig, StepConfig};
+use opw_config::{Config, RepoConfig, StepConfig, StepsConfig};
 use opw_context::prompts::{self, FixItem};
 use opw_domain::finding::{GateAction, GatePolicy, Severity, fingerprint};
 use opw_domain::view::{
     AgentKind, AgentView, AlertKind, ApiError, Decision, FindingDecision, FindingView, FlowAction, FlowError,
-    FlowStatus, GateKind, GateView, LogLine, Provider, PushBlock, PushView, QuotaSnapshot, RunView,
-    SessionStatus, StepRef, StepView, TaskColumn, TaskDetail, ToolEvent,
+    FlowStatus, GateKind, GateView, LogLine, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote,
+    RunView, SessionStatus, StepRef, StepView, TaskColumn, TaskDetail, ToolEvent,
 };
 use opw_domain::workflow::{Phase, StepKind, StepState, Workflow, WorkflowEvent};
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
@@ -158,6 +159,10 @@ struct Running {
     stop: Arc<AtomicBool>,
     tools: VecDeque<ToolEvent>,
     context: Option<u64>,
+    /// Passed to the CLI, or what Claude reported in its `init` line.
+    model: Option<String>,
+    effort: Option<String>,
+    command: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -218,7 +223,7 @@ impl TaskCtx {
     }
 }
 
-fn agent_for(step: StepKind, config: &Config) -> AgentKind {
+pub fn agent_for(step: StepKind, config: &Config) -> AgentKind {
     match step {
         StepKind::CrossReview if config.steps.cross_review.agent.as_deref() == Some("claude") => {
             AgentKind::Claude
@@ -256,8 +261,65 @@ pub fn step_label(step: StepKind) -> &'static str {
         StepKind::Fix => "Sửa lỗi",
         StepKind::CrossReview => "Review chéo",
         StepKind::FinalReview => "Review chốt",
-        StepKind::PushSummary => "Chuẩn bị push",
+        StepKind::PushSummary => "Push summary",
     }
+}
+
+/// The `steps.<step>` section of a step (intake has none).
+pub fn step_config(step: StepKind, steps: &StepsConfig) -> Option<&StepConfig> {
+    Some(match step {
+        StepKind::Intake => return None,
+        StepKind::Analyze => &steps.analyze,
+        StepKind::Implement => &steps.implement,
+        StepKind::ReviewLocal => &steps.review_local,
+        StepKind::Fix => &steps.fix,
+        StepKind::CrossReview => &steps.cross_review,
+        StepKind::FinalReview => &steps.final_review,
+        StepKind::PushSummary => &steps.push_summary,
+    })
+}
+
+/// Model and effort to pass for a step: only what the user picked in Settings. The one value
+/// the app adds is the push summary's `--effort low`, which it always used.
+pub fn model_choice(step: StepKind, config: &Config) -> ModelChoice {
+    let mut choice = step_config(step, &config.steps)
+        .map(|c| ModelChoice::new(c.model.as_deref(), c.effort.as_deref()))
+        .unwrap_or_default();
+    if let Some(effort) = default_effort(step, config) {
+        choice.effort.get_or_insert_with(|| effort.to_owned());
+    }
+    choice
+}
+
+/// Effort the app passes when the user picked none (push summary on Claude only).
+pub fn default_effort(step: StepKind, config: &Config) -> Option<&'static str> {
+    (step == StepKind::PushSummary && agent_for(step, config) == AgentKind::Claude)
+        .then_some(claude::PUSH_SUMMARY_EFFORT)
+}
+
+/// What a review or push-summary step runs, for the status line and the log.
+fn command_label(step: StepKind, agent: AgentKind, repo: Option<&Path>) -> Option<String> {
+    let has = |name: &str| repo.is_some_and(|r| r.join(".claude").join("commands").join(name).is_file());
+    Some(match step {
+        StepKind::ReviewLocal | StepKind::FinalReview if has("review-local.md") => {
+            "/review-local của repo".into()
+        }
+        StepKind::ReviewLocal | StepKind::FinalReview => "prompt review của app".into(),
+        StepKind::CrossReview if agent == AgentKind::Codex => "codex exec, chỉ đọc".into(),
+        StepKind::CrossReview => "prompt review của app".into(),
+        StepKind::PushSummary if has("push-summary.md") => "/push-summary của repo".into(),
+        StepKind::PushSummary => "prompt push summary của app".into(),
+        _ => return None,
+    })
+}
+
+/// `claude-opus-5-5 · high` for the log; empty parts left out.
+fn model_text(model: Option<&str>, effort: Option<&str>) -> String {
+    [model, effort]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn agent_name(agent: AgentKind) -> &'static str {
@@ -281,14 +343,25 @@ fn limits(step: StepKind, config: &Config) -> (f64, Duration, &'static str) {
     let (cfg, budget, minutes, key): (&StepConfig, f64, u32, &str) = match step {
         StepKind::Analyze => (&steps.analyze, 1.5, 20, "analyze"),
         StepKind::Implement => (&steps.implement, 5.0, 60, "implement"),
-        StepKind::ReviewLocal | StepKind::FinalReview => (&steps.review_local, 3.0, 30, "reviewLocal"),
+        StepKind::ReviewLocal => (&steps.review_local, 3.0, 30, "reviewLocal"),
+        StepKind::FinalReview => (&steps.final_review, 3.0, 30, "finalReview"),
         StepKind::Fix => (&steps.fix, 2.0, 45, "fix"),
         StepKind::CrossReview => (&steps.cross_review, 3.0, 30, "crossReview"),
         StepKind::PushSummary => (&steps.push_summary, 1.0, 10, "pushSummary"),
         StepKind::Intake => (&steps.analyze, 0.0, 1, "intake"),
     };
-    let budget = cfg.max_budget_usd.filter(|b| *b > 0.0).unwrap_or(budget);
-    let minutes = cfg.timeout_min.filter(|m| *m > 0).unwrap_or(minutes);
+    // the final review used to share `reviewLocal`; its limits still apply when unset
+    let shared = (step == StepKind::FinalReview).then_some(&steps.review_local);
+    let budget = cfg
+        .max_budget_usd
+        .or_else(|| shared.and_then(|c| c.max_budget_usd))
+        .filter(|b| *b > 0.0)
+        .unwrap_or(budget);
+    let minutes = cfg
+        .timeout_min
+        .or_else(|| shared.and_then(|c| c.timeout_min))
+        .filter(|m| *m > 0)
+        .unwrap_or(minutes);
     (budget, Duration::from_secs(u64::from(minutes) * 60), key)
 }
 
@@ -564,6 +637,7 @@ struct Claim {
     step: StepKind,
     agent: AgentKind,
     stop: Arc<AtomicBool>,
+    choice: ModelChoice,
 }
 
 /// What a step produced: the event for the state machine and a line for the log.
@@ -892,6 +966,9 @@ impl Flow {
                 started_at: r.started_at.clone(),
                 tools: r.tools.iter().cloned().collect(),
                 context_tokens: r.context,
+                model: r.model.clone(),
+                effort: r.effort.clone(),
+                command: r.command.clone(),
             }),
             round: entry.saved.workflow.round(),
             max_rounds: entry.saved.workflow.max_rounds(),
@@ -899,6 +976,7 @@ impl Flow {
             brief: ctx.read(BRIEF_FILE),
             plan: ctx.read(PLAN_FILE),
             findings: findings.iter().map(finding_view).collect(),
+            review_notes: review_notes(ctx),
             push,
             log: entry.log.iter().cloned().collect(),
             cost_usd: runs.iter().filter_map(|r| r.cost_usd).sum(),
@@ -1236,9 +1314,54 @@ fn step_views(entry: &Entry, runs: &[StepRunRow], intake_at: &str) -> Vec<StepVi
                     .or_else(|| intake.then(|| intake_at.to_owned())),
                 cost_usd: (cost > 0.0).then_some(cost),
                 round: (kind == StepKind::CrossReview && wf.round() > 0).then(|| wf.round()),
+                model: match &entry.run {
+                    Some(r) if r.step == kind => r.model.clone(),
+                    _ => last.and_then(|r| r.model.clone()),
+                },
+                effort: match &entry.run {
+                    Some(r) if r.step == kind => r.effort.clone(),
+                    _ => last.and_then(|r| r.effort.clone()),
+                },
             }
         })
         .collect()
+}
+
+fn notes_file(step: StepKind) -> String {
+    format!("notes-{}.md", step_key(step))
+}
+
+/// Docs/test notes of the latest review of each kind, in workflow order.
+fn review_notes(ctx: &TaskCtx) -> Vec<ReviewNote> {
+    [
+        StepKind::ReviewLocal,
+        StepKind::CrossReview,
+        StepKind::FinalReview,
+    ]
+    .into_iter()
+    .filter_map(|step| {
+        let text = std::fs::read_to_string(ctx.task_dir.join(REVIEW_DIR).join(notes_file(step))).ok()?;
+        let text = text.trim();
+        (!text.is_empty()).then(|| ReviewNote {
+            step,
+            text: text.to_owned(),
+        })
+    })
+    .collect()
+}
+
+/// Keep what a review said about docs and tests; a review without it clears the old note.
+fn save_review_notes(ctx: &TaskCtx, step: StepKind, answer: &str) {
+    let file = ctx.task_dir.join(REVIEW_DIR).join(notes_file(step));
+    match text::review_notes(answer) {
+        Some(notes) => {
+            let _ = std::fs::create_dir_all(ctx.task_dir.join(REVIEW_DIR));
+            let _ = std::fs::write(&file, format!("{notes}\n"));
+        }
+        None => {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
 }
 
 fn gate_message(kind: GateKind, entry: &Entry, findings: &[FindingRow], config: &Config) -> String {
@@ -1441,6 +1564,8 @@ impl Inner {
             return Err(not_now("chạy bước tiếp"));
         };
         let agent = ctx.agent_for(step);
+        let choice = model_choice(step, &ctx.config);
+        let command = command_label(step, agent, ctx.repo().as_deref());
         let stop = Arc::new(AtomicBool::new(false));
         entry.run = Some(Running {
             step,
@@ -1451,17 +1576,31 @@ impl Inner {
             stop: stop.clone(),
             tools: VecDeque::new(),
             context: None,
+            model: choice.model.clone(),
+            effort: choice.effort.clone(),
+            command: command.clone(),
         });
         entry.saved.in_flight = true;
         entry.saved.error = None;
-        let text = format!("Bắt đầu {} ({})", step_label(step), agent_name(agent));
+        let how = [
+            Some(agent_name(agent).to_owned()),
+            Some(model_text(choice.model.as_deref(), choice.effort.as_deref())).filter(|m| !m.is_empty()),
+            command,
+        ];
+        let how: Vec<String> = how.into_iter().flatten().collect();
+        let text = format!("Bắt đầu {} ({})", step_label(step), how.join(" · "));
         push_log(entry, Some(step), "info", &text);
         self.persist(ctx.row.wp_id, entry);
         drop(tasks);
         if let Ok(store) = self.store.lock() {
             let _ = store.log_event(&now(), Some(ctx.row.wp_id), "flow.info", Some(&text));
         }
-        Ok(Claim { step, agent, stop })
+        Ok(Claim {
+            step,
+            agent,
+            stop,
+            choice,
+        })
     }
 
     /// Record how a step ended and move the state machine. Returns `true` when the next step
@@ -1553,6 +1692,16 @@ impl Inner {
         }
     }
 
+    /// Claude named its model in the `init` line: show it when the user picked none.
+    fn on_model(&self, wp_id: u64, model: &str) {
+        if model.is_empty() {
+            return;
+        }
+        if let Some(run) = self.lock_tasks().get_mut(&wp_id).and_then(|e| e.run.as_mut()) {
+            run.model.get_or_insert_with(|| model.to_owned());
+        }
+    }
+
     fn on_context(&self, wp_id: u64, tokens: u64) {
         if let Some(run) = self.lock_tasks().get_mut(&wp_id).and_then(|e| e.run.as_mut()) {
             run.context = Some(tokens);
@@ -1579,8 +1728,9 @@ impl Inner {
         ctx: &TaskCtx,
         step: StepKind,
         job: &Job,
-        stop: &AtomicBool,
+        claim: &Claim,
     ) -> Result<RunResult, FlowError> {
+        let stop: &AtomicBool = &claim.stop;
         use std::io::Write;
         let wp_id = ctx.row.wp_id;
         let (budget, timeout, key) = limits(step, &ctx.config);
@@ -1592,13 +1742,20 @@ impl Inner {
         let mut raw = self.raw_log(ctx, step);
         let mut result: Option<RunResult> = None;
         let mut session = String::new();
+        let mut used_model = String::new();
         let mut on_line = |line: &str| {
             if let Some(f) = raw.as_mut() {
                 let _ = writeln!(f, "{line}");
             }
             for event in claude::parse_line(line).unwrap_or_default() {
                 match event {
-                    ClaudeEvent::Init { session_id, .. } => session = session_id,
+                    ClaudeEvent::Init {
+                        session_id, model, ..
+                    } => {
+                        session = session_id;
+                        self.on_model(wp_id, &model);
+                        used_model = model;
+                    }
                     ClaudeEvent::ToolUse { name, detail } => self.on_tool(wp_id, step, &name, &detail),
                     ClaudeEvent::Context(tokens) => self.on_context(wp_id, tokens),
                     ClaudeEvent::RateLimit(v) => self.on_rate_limit(&v),
@@ -1625,6 +1782,10 @@ impl Inner {
                     tokens_in: r.map(|r| r.tokens_in),
                     tokens_out: r.map(|r| r.tokens_out),
                     ended_at: &now(),
+                    model: Some(used_model.as_str())
+                        .filter(|m| !m.is_empty())
+                        .or(claim.choice.model.as_deref()),
+                    effort: claim.choice.effort.as_deref(),
                 },
             );
         }
@@ -1683,8 +1844,9 @@ impl Inner {
         ctx: &TaskCtx,
         step: StepKind,
         job: &Job,
-        stop: &AtomicBool,
+        claim: &Claim,
     ) -> Result<String, FlowError> {
+        let stop: &AtomicBool = &claim.stop;
         use std::io::Write;
         let wp_id = ctx.row.wp_id;
         let (_, timeout, key) = limits(step, &ctx.config);
@@ -1725,6 +1887,8 @@ impl Inner {
                     tokens_in: Some(tokens_in),
                     tokens_out: Some(tokens_out),
                     ended_at: &now(),
+                    model: claim.choice.model.as_deref(),
+                    effort: claim.choice.effort.as_deref(),
                 },
             );
         }
@@ -1953,6 +2117,8 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         }
     };
     let policy = &ctx.config.gate;
+    // the user's model / effort for this step (nothing when they left it to the machine)
+    let cl = |args: Vec<String>| claude::with_model(args, &claim.choice);
     match step {
         StepKind::Intake => Ok(Done {
             event: E::StepSucceeded(StepKind::Intake),
@@ -1965,8 +2131,8 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             let r = inner.run_claude(
                 ctx,
                 step,
-                &job(Provider::Claude, claude::analyze_args(budget), Some(prompt)),
-                &claim.stop,
+                &job(Provider::Claude, cl(claude::analyze_args(budget)), Some(prompt)),
+                claim,
             )?;
             let plan = r.text.trim();
             if plan.is_empty() {
@@ -1987,8 +2153,12 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .read(PLAN_FILE)
                 .ok_or_else(|| flow_error("plan.missing", "Không đọc được plan.md"))?;
             let prompt = prompts::implement(&plan, session.is_none().then_some(brief.as_str()));
-            let args = claude::code_args(session.as_deref(), budget, &ctx.repo_config().allow_bash);
-            let r = inner.run_claude(ctx, step, &job(Provider::Claude, args, Some(prompt)), &claim.stop)?;
+            let args = cl(claude::code_args(
+                session.as_deref(),
+                budget,
+                &ctx.repo_config().allow_bash,
+            ));
+            let r = inner.run_claude(ctx, step, &job(Provider::Claude, args, Some(prompt)), claim)?;
             set_session(&r.session_id);
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Implement),
@@ -2010,8 +2180,9 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     "claude",
                 )
             };
-            let r = inner.run_claude(ctx, step, &job(Provider::Claude, args, stdin), &claim.stop)?;
+            let r = inner.run_claude(ctx, step, &job(Provider::Claude, cl(args), stdin), claim)?;
             let raw = text::findings_from_text(&r.text).ok_or_else(unreadable_review)?;
+            save_review_notes(ctx, step, &r.text);
             let findings = inner.merge(ctx, step, 0, source, &raw)?;
             let (event, note) = review_event(step, &findings, policy, raw.len());
             Ok(Done {
@@ -2056,12 +2227,16 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     suggestion: f.suggestion.clone().unwrap_or_default(),
                 })
                 .collect();
-            let args = claude::code_args(session.as_deref(), budget, &ctx.repo_config().allow_bash);
+            let args = cl(claude::code_args(
+                session.as_deref(),
+                budget,
+                &ctx.repo_config().allow_bash,
+            ));
             let r = inner.run_claude(
                 ctx,
                 step,
                 &job(Provider::Claude, args, Some(prompts::fix(&list))),
-                &claim.stop,
+                claim,
             )?;
             set_session(&r.session_id);
             inner.with_saved(wp_id, |s| s.fixes += 1);
@@ -2080,12 +2255,15 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     .map_err(|e| flow_error("task.write", e.to_string()))?;
                 let out = dir.join(format!("codex-r{round}.json"));
                 let _ = std::fs::remove_file(&out);
-                let args = codex::cross_review_args(&schema.to_string_lossy(), &out.to_string_lossy());
+                let args = codex::with_model(
+                    codex::cross_review_args(&schema.to_string_lossy(), &out.to_string_lossy()),
+                    &claim.choice,
+                );
                 let answer = inner.run_codex(
                     ctx,
                     step,
                     &job(Provider::Codex, args, Some(prompts::cross_review(&base, &brief))),
-                    &claim.stop,
+                    claim,
                 )?;
                 let text = std::fs::read_to_string(&out).unwrap_or(answer);
                 let raw = serde_json::from_str::<serde_json::Value>(text.trim())
@@ -2093,16 +2271,18 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     .and_then(|v| text::findings_from_json(&v))
                     .or_else(|| text::findings_from_text(&text))
                     .ok_or_else(unreadable_review)?;
+                save_review_notes(ctx, step, &text);
                 (raw, "codex", None)
             } else {
                 let stdin = Some(prompts::review(&base, &brief));
                 let r = inner.run_claude(
                     ctx,
                     step,
-                    &job(Provider::Claude, claude::review_args(budget), stdin),
-                    &claim.stop,
+                    &job(Provider::Claude, cl(claude::review_args(budget)), stdin),
+                    claim,
                 )?;
                 let raw = text::findings_from_text(&r.text).ok_or_else(unreadable_review)?;
+                save_review_notes(ctx, step, &r.text);
                 (raw, "claude", Some(r.cost_usd))
             };
             let findings = inner.merge(ctx, step, round, source, &raw)?;
@@ -2135,7 +2315,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     Some(prompts::push_summary(&base, issue)),
                 )
             };
-            let r = inner.run_claude(ctx, step, &job(Provider::Claude, args, stdin), &claim.stop)?;
+            let r = inner.run_claude(ctx, step, &job(Provider::Claude, cl(args), stdin), claim)?;
             if r.text.trim().is_empty() {
                 return Err(flow_error(
                     "push.empty",
@@ -2681,6 +2861,77 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn picked_models_reach_the_cli_and_review_notes_are_kept() {
+        let Some(s) = setup() else { return };
+        let notes = "```json\n{\"findings\":[],\"notes\":\"Cần thêm test cho org rỗng\"}\n```";
+        let (flow, fake) = flow_with(&s, false, happy(notes));
+        let mut config = Config::default();
+        config.steps.auto_advance = true;
+        config.steps.implement.model = Some("claude-sonnet-5-5".into());
+        config.steps.implement.effort = Some("high".into());
+        config.steps.cross_review.model = Some("gpt-x".into());
+        let ctx = s.ctx(1, &config);
+        flow.started(&ctx);
+        let d = run(&flow, &ctx, FlowAction::Run);
+        // nothing picked for analyze: no flag, and the model Claude reported is shown
+        assert_eq!(d.steps[1].model.as_deref(), Some("m"));
+        assert_eq!(d.steps[1].effort, None);
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
+
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let flag = |job: &Job, name: &str| job.args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone());
+        assert_eq!(flag(&jobs[0], "--model"), None);
+        assert_eq!(flag(&jobs[1], "--model").as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(flag(&jobs[1], "--effort").as_deref(), Some("high"));
+        assert_eq!(flag(&jobs[2], "--model"), None);
+        assert_eq!(flag(&jobs[4], "-m").as_deref(), Some("gpt-x"));
+        let push = jobs.last().unwrap();
+        assert_eq!(flag(push, "--effort").as_deref(), Some("low"));
+
+        let implement = &d.steps[StepKind::Implement.index() as usize - 1];
+        assert_eq!(implement.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(implement.effort.as_deref(), Some("high"));
+        assert_eq!(
+            d.review_notes,
+            [ReviewNote {
+                step: StepKind::FinalReview,
+                text: "Cần thêm test cho org rỗng".into()
+            }]
+        );
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text == "Bắt đầu Tự review (Claude · prompt review của app)"),
+            "{:?}",
+            d.log
+        );
+        assert_eq!(step_label(StepKind::PushSummary), "Push summary");
+    }
+
+    #[test]
+    fn final_review_limits_fall_back_to_review_local() {
+        let mut config = Config::default();
+        config.steps.review_local.max_budget_usd = Some(4.0);
+        assert_eq!(limits(StepKind::FinalReview, &config).0, 4.0);
+        config.steps.final_review.max_budget_usd = Some(2.0);
+        assert_eq!(
+            limits(StepKind::FinalReview, &config),
+            (2.0, Duration::from_secs(1800), "finalReview")
+        );
+        assert_eq!(
+            model_choice(StepKind::PushSummary, &config).effort.as_deref(),
+            Some("low")
+        );
+        config.steps.push_summary.effort = Some("medium".into());
+        assert_eq!(
+            model_choice(StepKind::PushSummary, &config).effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(model_choice(StepKind::Analyze, &config), ModelChoice::default());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Settings commands: OpenProject token (kept in Windows Credential Manager) and manual refresh.
 //! Names and payloads must match `apps/desktop/ui/src/ipc/types.ts` (`Commands`).
 
-use opw_domain::view::{ApiError, SettingsView, TasksDirChange};
+use opw_domain::view::{ApiError, SettingsView, StepChoiceRequest, TasksDirChange};
 use opw_orchestrator::AppService;
 use tauri::State;
 
@@ -50,4 +50,13 @@ pub fn set_tasks_dir(
     dir: Option<String>,
 ) -> Result<TasksDirChange, ApiError> {
     service.set_tasks_dir(dir.as_deref())
+}
+
+/// Settings → Các bước AI: agent, model and effort of one step (written to config.json).
+#[tauri::command]
+pub fn set_step_choice(
+    service: State<'_, AppService>,
+    choice: StepChoiceRequest,
+) -> Result<SettingsView, ApiError> {
+    service.set_step_choice(&choice)
 }

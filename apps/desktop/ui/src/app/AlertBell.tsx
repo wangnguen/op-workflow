@@ -4,6 +4,8 @@ import { getAlerts, markAlertsRead } from "../ipc/client";
 import type { AlertView } from "../ipc/types";
 import { formatRelative } from "../shared/format";
 import { useDismiss } from "../shared/hooks";
+import { SegmentedControl } from "../shared/ui/SegmentedControl";
+import { visibleAlerts, type AlertFilter } from "./alerts";
 
 const t = vi.alerts;
 
@@ -25,6 +27,7 @@ interface Props {
 export function AlertBell({ unread, needsYou, now, onOpenTask, onOpenQuota, onChanged }: Props) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<AlertView[]>([]);
+  const [filter, setFilter] = useState<AlertFilter>("unread");
   const ref = useRef<HTMLDivElement>(null);
   useDismiss(ref, open, () => setOpen(false));
 
@@ -33,6 +36,8 @@ export function AlertBell({ unread, needsYou, now, onOpenTask, onOpenQuota, onCh
       setOpen(false);
       return;
     }
+    // open on what needs reading; with nothing unread, show the whole session
+    setFilter(unread > 0 ? "unread" : "all");
     setOpen(true);
     void getAlerts().then(setItems);
   };
@@ -53,6 +58,8 @@ export function AlertBell({ unread, needsYou, now, onOpenTask, onOpenQuota, onCh
       });
   };
 
+  const unreadItems = items.filter((a) => !a.read).length;
+  const shown = visibleAlerts(items, filter);
   const label = unread > 0 ? vi.topbar.notificationsUnread(unread) : vi.topbar.notifications;
   return (
     <div className="bell" ref={ref}>
@@ -66,15 +73,25 @@ export function AlertBell({ unread, needsYou, now, onOpenTask, onOpenQuota, onCh
         <div className="bell-pop" role="dialog" aria-label={t.title}>
           <header>
             <h3>{t.title}</h3>
-            <button className="btn btn--ghost btn--sm" disabled={!items.some((a) => !a.read)} onClick={readAll}>
+            <button className="btn btn--ghost btn--sm" disabled={unreadItems === 0} onClick={readAll}>
               {t.markAll}
             </button>
           </header>
-          {items.length === 0 ? (
-            <p className="dim bell-empty">{t.empty}</p>
+          <SegmentedControl
+            options={[
+              { value: "unread", label: t.unread, count: unreadItems > 0 ? unreadItems : undefined },
+              { value: "all", label: t.all, count: items.length > 0 ? items.length : undefined },
+            ]}
+            value={filter}
+            onChange={setFilter}
+            label={t.filterLabel}
+            fill
+          />
+          {shown.length === 0 ? (
+            <p className="dim bell-empty">{filter === "unread" && items.length > 0 ? t.emptyUnread : t.empty}</p>
           ) : (
             <ul className="bell-list">
-              {items.map((a) => (
+              {shown.map((a) => (
                 <li key={a.id}>
                   <button className={`bell-item bell-item--${a.kind}${a.read ? "" : " is-unread"}`} onClick={() => pick(a)}>
                     <span className="bell-item-top">

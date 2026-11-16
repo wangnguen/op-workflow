@@ -13,6 +13,7 @@ import {
   mockRepoState,
   mockSaveToken,
   mockSetTasksDir,
+  mockSetStepChoice,
   mockSettings,
   mockStartOptions,
   mockStartTask,
@@ -48,6 +49,7 @@ import type {
   StartOptions,
   StartRequest,
   StartResult,
+  StepChoiceRequest,
   TaskDetail,
   TasksDirChange,
   UpdateView,
@@ -76,6 +78,9 @@ export const refreshNow = (): Promise<null> => call("refresh_now", () => null);
 export const revealPath = (path: string): Promise<null> => call("reveal_path", () => null, { path });
 /** Shows config.json in Explorer. */
 export const openConfig = (): Promise<null> => call("open_config", () => null);
+/** Settings → Các bước AI: agent, model and effort of one step (absent = the machine's default). */
+export const setStepChoice = (choice: StepChoiceRequest): Promise<SettingsView> =>
+  call("set_step_choice", () => mockSetStepChoice(choice), { choice });
 
 // ---------- Claude / Codex connection ----------
 

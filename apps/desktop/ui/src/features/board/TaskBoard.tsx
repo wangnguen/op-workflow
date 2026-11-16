@@ -103,6 +103,7 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
                     onOpen={(c, tab) => setOpened({ wpId: c.wpId, tab })}
                     onFlow={(c, action) => run(flowAction(c.wpId, action))}
                     onLogin={(p) => run(openLogin(p))}
+                    onError={(text) => start.setFlash({ kind: "warn", text })}
                   />
                 ))}
               </div>

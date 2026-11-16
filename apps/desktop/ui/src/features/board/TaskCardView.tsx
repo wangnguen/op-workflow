@@ -1,7 +1,9 @@
 import { agentLabel, stepHint, stepLabel, stepStateLabel, vi } from "../../i18n/vi";
-import type { FlowAction, Provider, TaskCard } from "../../ipc/types";
+import { getTaskDetail } from "../../ipc/client";
+import type { FlowAction, IssueStatus, Provider, TaskCard } from "../../ipc/types";
+import { CopyPush } from "../task/CopyPush";
 import type { TaskTab } from "../task/taskTabs";
-import { formatUsd } from "../../shared/format";
+import { formatHourMinute, formatUsd } from "../../shared/format";
 import { STEP_COUNT } from "../../shared/steps";
 import { Icon } from "../../shared/ui/Icon";
 import { StatusChip } from "../../shared/ui/StatusChip";
@@ -22,6 +24,8 @@ interface Props {
   onFlow: (card: TaskCard, action: FlowAction) => void;
   /** open `claude auth login` / `codex login` for a step that failed signed out */
   onLogin?: (provider: Provider) => void;
+  /** a copy button failed (no push summary, clipboard refused) */
+  onError?: (message: string) => void;
 }
 
 const b = vi.board;
@@ -43,7 +47,7 @@ const beforeAnalyze = (card: TaskCard) =>
   (card.step?.kind === "intake" && card.step.state === "done") ||
   (card.step?.kind === "analyze" && card.step.state === "pending");
 
-function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssues, onOpen, onFlow, onLogin }: Props) {
+function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssues, onOpen, onFlow, onLogin, onError }: Props) {
   if (card.column === "inbox") {
     return (
       <button className="btn btn--primary btn--sm" onClick={() => onStart(card)}>
@@ -60,9 +64,8 @@ function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssue
   if (card.column === "awaitingPush") {
     return (
       <>
-        <button className="btn btn--sm" onClick={() => onOpen(card, "push")}>
-          {b.copy}
-        </button>
+        {open("push")}
+        <CopyPush load={() => getTaskDetail(card.wpId).then((d) => d.push)} onError={onError} />
         <button className="btn btn--primary btn--sm" title={f.finishHint} onClick={() => onFlow(card, { type: "finish" })}>
           <Icon name="check" size={12} />
           {f.finish}
@@ -155,7 +158,7 @@ function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssue
             onClick={() => onIssues(card)}
           >
             <Icon name="refresh" size={12} className={readingIssues ? "is-spinning" : undefined} />
-            {b.issues}
+            {card.issues ? b.issuesAgain : b.issues}
           </button>
         )}
         {onBrief && (
@@ -179,6 +182,19 @@ function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssue
       {open()}
     </>
   );
+}
+
+/** How the last "Lấy issue" went: "Đã lấy 2 issue · 17:40", or the error in red. */
+function IssueLine({ status }: { status: IssueStatus }) {
+  const time = formatHourMinute(status.at);
+  if (status.error) {
+    return (
+      <p className="card-issues card-issues--error" title={status.error}>
+        <strong>{b.issuesFailedAt(time)}</strong> {status.error}
+      </p>
+    );
+  }
+  return <p className="card-issues">{b.issuesDoneAt(status.read, time)}</p>;
 }
 
 export function TaskCardView(props: Props) {
@@ -245,6 +261,7 @@ export function TaskCardView(props: Props) {
       ) : (
         beforeAnalyze(card) && <p className="card-note">{b.nextStep}</p>
       )}
+      {card.issues && card.column === "active" && beforeAnalyze(card) && <IssueLine status={card.issues} />}
 
       {(card.agent || card.costUsd !== undefined) && (
         <div className="card-agent">
