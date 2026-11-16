@@ -17,18 +17,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use opw_agents::ModelChoice;
-use opw_agents::claude::{self, ClaudeEvent, RunResult};
+use opw_agents::claude::{self, ClaudeEvent, Denial, RunResult};
 use opw_agents::codex::{self, CodexEvent};
 use opw_agents::env::Account;
 use opw_agents::run::{RunOutcome, RunSpec};
 use opw_agents::text::{self, RawFinding};
+use opw_agents::transcript;
 use opw_config::{Config, RepoConfig, StepConfig, StepsConfig};
 use opw_context::prompts::{self, FixItem};
 use opw_domain::finding::{GateAction, GatePolicy, Severity, fingerprint};
 use opw_domain::view::{
-    AgentKind, AgentView, AlertKind, ApiError, Decision, FindingDecision, FindingView, FlowAction, FlowError,
-    FlowStatus, GateKind, GateView, LogLine, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote,
-    RunView, SessionStatus, StepRef, StepView, TaskColumn, TaskDetail, ToolEvent,
+    AgentKind, AgentView, AlertKind, ApiError, ChatItem, ChatKind, ChatView, Decision, FindingDecision,
+    FindingView, FlowAction, FlowError, FlowStatus, GateKind, GateView, LogLine, Provider, PushBlock,
+    PushView, QuotaSnapshot, ReviewNote, RunState, RunSummary, RunView, SessionStatus, StepRef, StepView,
+    TaskColumn, TaskDetail, ToolEvent,
 };
 use opw_domain::workflow::{Phase, StepKind, StepState, Workflow, WorkflowEvent};
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
@@ -163,6 +165,8 @@ struct Running {
     model: Option<String>,
     effort: Option<String>,
     command: Option<String>,
+    /// Row of this run in `step_run`, once the process started.
+    run_id: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -640,10 +644,12 @@ struct Claim {
     choice: ModelChoice,
 }
 
-/// What a step produced: the event for the state machine and a line for the log.
+/// What a step produced: the event for the state machine, one line about the result (the
+/// Tiến trình tab and the log) and what it cost.
 struct Done {
     event: WorkflowEvent,
     note: String,
+    cost: Option<f64>,
 }
 
 impl Flow {
@@ -979,10 +985,99 @@ impl Flow {
             review_notes: review_notes(ctx),
             push,
             log: entry.log.iter().cloned().collect(),
+            runs: {
+                let allowed = ctx.repo_config().allow_bash;
+                runs.iter()
+                    .filter_map(|r| {
+                        run_summary(
+                            r,
+                            entry.run.as_ref(),
+                            self.inner.runs_dir.as_deref(),
+                            &ctx.row.display_id,
+                            &allowed,
+                        )
+                    })
+                    .collect()
+            },
             cost_usd: runs.iter().filter_map(|r| r.cost_usd).sum(),
             // the facade fills this from OpenProject and the last issue read
             new_comments: 0,
         }
+    }
+
+    /// The Chat tab: the transcript of one run (`None` = the latest). Reads the run's raw log;
+    /// call it off the UI thread.
+    pub fn chat(&self, ctx: &TaskCtx, run_id: Option<i64>) -> Result<ChatView, ApiError> {
+        let runs = self.inner.runs(ctx.row.wp_id);
+        let row = match run_id {
+            Some(id) => runs.iter().find(|r| r.id == id),
+            None => runs.last(),
+        }
+        .ok_or_else(|| ApiError::new("run.missing", "Chưa có lần chạy nào"))?;
+        let summary = {
+            let tasks = self.inner.lock_tasks();
+            let live = tasks.get(&ctx.row.wp_id).and_then(|e| e.run.as_ref());
+            run_summary(
+                row,
+                live,
+                self.inner.runs_dir.as_deref(),
+                &ctx.row.display_id,
+                &ctx.repo_config().allow_bash,
+            )
+        }
+        .ok_or_else(|| ApiError::new("run.missing", "Không đọc được lần chạy này"))?;
+        let text = log_path(row, self.inner.runs_dir.as_deref(), &ctx.row.display_id)
+            .and_then(|p| std::fs::read_to_string(p).ok());
+        let t = transcript::read(
+            text.as_deref().unwrap_or_default(),
+            summary.agent == AgentKind::Codex,
+        );
+        Ok(ChatView {
+            run: summary,
+            items: t.items.into_iter().map(chat_item).collect(),
+            dropped: u32::try_from(t.dropped).unwrap_or(u32::MAX),
+            missing: text.is_none(),
+        })
+    }
+
+    /// Repo, CLI and session id to continue a finished run in a terminal.
+    pub fn resume_target(&self, ctx: &TaskCtx, run_id: i64) -> Result<(PathBuf, Provider, String), ApiError> {
+        let runs = self.inner.runs(ctx.row.wp_id);
+        let row = runs
+            .iter()
+            .find(|r| r.id == run_id)
+            .ok_or_else(|| ApiError::new("run.missing", "Không thấy lần chạy này"))?;
+        if self
+            .inner
+            .lock_tasks()
+            .get(&ctx.row.wp_id)
+            .is_some_and(|e| e.run.is_some())
+        {
+            return Err(ApiError::new(
+                "step.running",
+                "Task đang chạy một bước. Chờ bước đó xong rồi mở tiếp trong terminal.",
+            ));
+        }
+        let step = step_from_key(&row.step)
+            .ok_or_else(|| ApiError::new("run.missing", "Không đọc được lần chạy này"))?;
+        let agent = agent_of_row(row);
+        let session = row
+            .session_id
+            .clone()
+            .filter(|_| resume_command(step, agent, row.session_id.as_deref()).is_some())
+            .ok_or_else(|| {
+                ApiError::new(
+                    "run.noSession",
+                    "Lần chạy này không lưu phiên nên không mở tiếp được",
+                )
+            })?;
+        let repo = ctx.repo().filter(|p| p.is_dir()).ok_or_else(|| {
+            ApiError::new(
+                "repo.missing",
+                "Không thấy thư mục repo của task (đã xoá hoặc đổi chỗ?)",
+            )
+        })?;
+        Ok((repo, provider_of(agent), session))
     }
 
     /// Cost and tokens of every step run since `since` (the bottom bar's "today").
@@ -1004,6 +1099,235 @@ fn new_saved(ctx: &TaskCtx) -> Saved {
         workflow,
         since: Some(now()),
         ..Saved::default()
+    }
+}
+
+fn agent_of_row(row: &StepRunRow) -> AgentKind {
+    if row.agent.as_deref() == Some("codex") {
+        AgentKind::Codex
+    } else {
+        AgentKind::Claude
+    }
+}
+
+/// `claude --resume <id>` / `codex resume <id>` for a run whose session the CLI kept. The push
+/// summary runs with `--no-session-persistence`, so it has none. Only plain ids are used (the
+/// command goes into a console window).
+fn resume_command(step: StepKind, agent: AgentKind, session: Option<&str>) -> Option<String> {
+    let id = session.filter(|s| {
+        !s.is_empty() && s.len() <= 80 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })?;
+    match agent {
+        AgentKind::Codex => Some(format!("codex resume {id}")),
+        _ if step == StepKind::PushSummary => None,
+        _ => Some(format!("claude --resume {id}")),
+    }
+}
+
+/// Refused calls as stored (`[{"tool":"Bash","input":"…"}]`).
+fn denials_json(denials: &[Denial]) -> Option<String> {
+    (!denials.is_empty()).then(|| {
+        serde_json::Value::Array(
+            denials
+                .iter()
+                .map(|d| serde_json::json!({ "tool": d.tool, "input": d.input }))
+                .collect(),
+        )
+        .to_string()
+    })
+}
+
+fn stored_denials(json: Option<&str>) -> Vec<(String, String)> {
+    let Some(v) = json.and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()) else {
+        return Vec::new();
+    };
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .map(|d| {
+            let s = |k: &str| {
+                d.get(k)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            (s("tool"), s("input"))
+        })
+        .collect()
+}
+
+/// One row of the Tiến trình tab. `live` is the run in progress, if any (its model is known
+/// before the row has it).
+/// The run's raw log, if it is still there. Runs from before migration 5 have no `log_file`:
+/// their log is the file of the same step named after the moment it was created, right after
+/// the run started (`<runs>/<task>/<2026-11-14T10-27-41-…>-<step>.jsonl`).
+fn log_path(row: &StepRunRow, runs_dir: Option<&Path>, task: &str) -> Option<PathBuf> {
+    let dir = runs_dir?;
+    if let Some(file) = row.log_file.as_deref() {
+        let p = dir.join(file);
+        return p.is_file().then_some(p);
+    }
+    let folder = dir.join(task);
+    let suffix = format!("-{}.jsonl", row.step);
+    let mut names: Vec<String> = std::fs::read_dir(&folder)
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.is_ascii() && n.len() > 19 && n.ends_with(&suffix))
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .find(|n| {
+            // "2026-11-14T10-27-41" → "2026-11-14T10:27:41Z"
+            let stamp = format!("{}{}Z", &n[..11], n[11..19].replace('-', ":"));
+            opw_quota::seconds_between(&row.started_at, &stamp).is_some_and(|s| (-1.0..=5.0).contains(&s))
+        })
+        .map(|n| folder.join(n))
+}
+
+fn run_summary(
+    row: &StepRunRow,
+    live: Option<&Running>,
+    runs_dir: Option<&Path>,
+    task: &str,
+    allowed: &[String],
+) -> Option<RunSummary> {
+    let step = step_from_key(&row.step)?;
+    let agent = agent_of_row(row);
+    let live = live.filter(|r| r.run_id == Some(row.id));
+    let state = match row.state.as_str() {
+        "done" => RunState::Done,
+        "running" => RunState::Running,
+        _ => RunState::Failed,
+    };
+    Some(RunSummary {
+        id: row.id,
+        step,
+        agent,
+        state,
+        started_at: row.started_at.clone(),
+        ended_at: row.ended_at.clone(),
+        cost_usd: row.cost_usd,
+        tokens_in: row.tokens_in,
+        tokens_out: row.tokens_out,
+        model: live.and_then(|r| r.model.clone()).or_else(|| row.model.clone()),
+        effort: live.and_then(|r| r.effort.clone()).or_else(|| row.effort.clone()),
+        round: row.round,
+        note: row.note.clone(),
+        denials: stored_denials(row.denials.as_deref())
+            .into_iter()
+            .map(|(tool, input)| crate::allow::denied_call(&tool, &input, allowed))
+            .collect(),
+        has_chat: log_path(row, runs_dir, task).is_some(),
+        resume: (state != RunState::Running)
+            .then(|| resume_command(step, agent, row.session_id.as_deref()))
+            .flatten(),
+    })
+}
+
+fn chat_item(i: transcript::Item) -> ChatItem {
+    use transcript::ItemKind as K;
+    ChatItem {
+        kind: match i.kind {
+            K::Prompt => ChatKind::Prompt,
+            K::Text => ChatKind::Text,
+            K::Thinking => ChatKind::Thinking,
+            K::Tool => ChatKind::Tool,
+            K::End => ChatKind::End,
+            K::Error => ChatKind::Error,
+        },
+        text: i.text,
+        tool: i.tool,
+        output: i.output,
+        output_cut: u32::try_from(i.output_cut).unwrap_or(u32::MAX),
+        failed: i.failed,
+        denied: i.denied,
+    }
+}
+
+/// What the app asked: the stdin prompt, or the `-p` command plus its added instructions.
+fn prompt_of(job: &Job) -> String {
+    if let Some(stdin) = &job.stdin {
+        return stdin.clone();
+    }
+    let after = |flag: &str| job.args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone());
+    let head = after("-p").filter(|a| !a.starts_with("--")).unwrap_or_default();
+    match after("--append-system-prompt") {
+        Some(extra) if !head.is_empty() => format!("{head}\n\n{extra}"),
+        Some(extra) => extra,
+        None => head,
+    }
+}
+
+/// "plan: 3 file sẽ sửa, 2 câu hỏi" from the sections `prompts::analyze` asks for.
+fn plan_note(plan: &str) -> String {
+    let section = |title: &str| -> Vec<&str> {
+        let mut lines = plan
+            .lines()
+            .skip_while(|l| !(l.trim_start().starts_with("## ") && l.contains(title)));
+        lines.next();
+        lines.take_while(|l| !l.trim_start().starts_with("## ")).collect()
+    };
+    // top-level list items only (sub-bullets are details of a file)
+    let files = section("File sẽ sửa")
+        .iter()
+        .filter(|l| l.starts_with(['-', '*', '+']) || l.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .count();
+    let questions = section("câu hỏi")
+        .iter()
+        .filter(|l| l.contains('?') || l.contains('？'))
+        .count();
+    let mut parts = Vec::new();
+    if files > 0 {
+        parts.push(format!("{files} file sẽ sửa"));
+    }
+    if questions > 0 {
+        parts.push(format!("{questions} câu hỏi"));
+    }
+    if parts.is_empty() {
+        "đã viết plan.md".into()
+    } else {
+        format!("plan: {}", parts.join(", "))
+    }
+}
+
+/// "4 file thay đổi (+120 −8)": the whole working tree against HEAD (the AI never commits).
+fn change_note(repo: &Path) -> String {
+    let git = Git::new(repo);
+    let (mut files, mut added, mut removed) = (0_usize, 0_u64, 0_u64);
+    for line in git
+        .run(&["diff", "HEAD", "--numstat", "--no-ext-diff"])
+        .unwrap_or_default()
+        .lines()
+    {
+        let mut cols = line.split('\t');
+        let (Some(a), Some(r)) = (cols.next(), cols.next()) else {
+            continue;
+        };
+        files += 1;
+        added += a.parse::<u64>().unwrap_or(0);
+        removed += r.parse::<u64>().unwrap_or(0);
+    }
+    files += git
+        .run(&["ls-files", "--others", "--exclude-standard"])
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    if files == 0 {
+        "không có file nào thay đổi".into()
+    } else {
+        format!("{files} file thay đổi (+{added} −{removed})")
+    }
+}
+
+/// ", 1 lệnh bị chặn" when the CLI refused tool calls.
+fn denied_note(n: usize) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        format!(", {n} lệnh bị chặn")
     }
 }
 
@@ -1217,7 +1541,7 @@ fn stop_alert(ctx: &TaskCtx, step: StepKind, entry: &Entry, text: &str) -> Optio
                 .error
                 .as_ref()
                 .map_or_else(|| text.to_owned(), |e| e.message.clone()),
-            "log",
+            "progress",
         ),
         Phase::Gate(GateKind::PlanReview) => (
             AlertKind::Gate,
@@ -1249,7 +1573,7 @@ fn stop_alert(ctx: &TaskCtx, step: StepKind, entry: &Entry, text: &str) -> Optio
                 AlertKind::StepDone,
                 title_of(&format!("{} xong", step_label(step))),
                 format!("Bước tiếp: {}. Bấm Chạy khi bạn sẵn sàng.", step_label(next)),
-                "log",
+                "progress",
             )
         }
         _ => return None,
@@ -1538,6 +1862,16 @@ impl Inner {
     /// Mark the current step as running. Refuses while another task runs a step in the same repo.
     fn claim(&self, ctx: &TaskCtx) -> Result<Claim, ApiError> {
         let mut tasks = self.lock_tasks();
+        let (claim, text) = self.claim_in(&mut tasks, ctx)?;
+        drop(tasks);
+        if let Ok(store) = self.store.lock() {
+            let _ = store.log_event(&now(), Some(ctx.row.wp_id), "flow.info", Some(&text));
+        }
+        Ok(claim)
+    }
+
+    /// [`Inner::claim`] with the tasks lock already held; also returns the log line to keep.
+    fn claim_in(&self, tasks: &mut HashMap<u64, Entry>, ctx: &TaskCtx) -> Result<(Claim, String), ApiError> {
         let repo = ctx.row.repo.clone();
         if let Some(repo) = repo.as_deref() {
             let busy = tasks.iter().find_map(|(id, e)| {
@@ -1579,6 +1913,7 @@ impl Inner {
             model: choice.model.clone(),
             effort: choice.effort.clone(),
             command: command.clone(),
+            run_id: None,
         });
         entry.saved.in_flight = true;
         entry.saved.error = None;
@@ -1591,29 +1926,34 @@ impl Inner {
         let text = format!("Bắt đầu {} ({})", step_label(step), how.join(" · "));
         push_log(entry, Some(step), "info", &text);
         self.persist(ctx.row.wp_id, entry);
-        drop(tasks);
-        if let Ok(store) = self.store.lock() {
-            let _ = store.log_event(&now(), Some(ctx.row.wp_id), "flow.info", Some(&text));
-        }
-        Ok(Claim {
-            step,
-            agent,
-            stop,
-            choice,
-        })
+        Ok((
+            Claim {
+                step,
+                agent,
+                stop,
+                choice,
+            },
+            text,
+        ))
     }
 
-    /// Record how a step ended and move the state machine. Returns `true` when the next step
-    /// should run right away (auto-advance).
-    fn finish(&self, ctx: &TaskCtx, step: StepKind, result: Result<Done, FlowError>) -> bool {
+    /// Record how a step ended and move the state machine. With auto-advance on, the next step
+    /// is claimed under the same lock, so the task never shows "ready" between two steps.
+    /// `None` = stop here; `Some(Err)` = the next step could not start.
+    fn finish(
+        &self,
+        ctx: &TaskCtx,
+        step: StepKind,
+        result: Result<Done, FlowError>,
+    ) -> Option<Result<Claim, ApiError>> {
         let wp_id = ctx.row.wp_id;
         let mut tasks = self.lock_tasks();
-        let Some(entry) = tasks.get_mut(&wp_id) else {
-            return false;
-        };
-        entry.run = None;
+        let entry = tasks.get_mut(&wp_id)?;
+        let run_id = entry.run.take().and_then(|r| r.run_id);
         entry.saved.in_flight = false;
         entry.saved.since = Some(now());
+        // `note` goes on the run's row (Tiến trình), `text` into the log
+        let mut note = String::new();
         let (kind, text) = match result {
             Ok(done) => match entry.saved.workflow.apply(done.event) {
                 Ok(()) => {
@@ -1621,12 +1961,15 @@ impl Inner {
                     if step == StepKind::Analyze {
                         entry.saved.feedback = None;
                     }
-                    ("ok", format!("{} xong: {}", step_label(step), done.note))
+                    note.clone_from(&done.note);
+                    let cost = done.cost.map(|c| format!(" ({})", usd(c))).unwrap_or_default();
+                    ("ok", format!("{} xong: {}{cost}", step_label(step), done.note))
                 }
                 Err(e) => {
                     let err = flow_error("flow.invalid", e.to_string());
                     let _ = entry.saved.workflow.apply(WorkflowEvent::StepFailed(step));
                     let text = err.message.clone();
+                    note = short(&err.message);
                     entry.saved.error = Some(err);
                     ("error", text)
                 }
@@ -1634,6 +1977,7 @@ impl Inner {
             Err(err) => {
                 let _ = entry.saved.workflow.apply(WorkflowEvent::StepFailed(step));
                 let text = format!("{} lỗi: {}", step_label(step), err.message);
+                note = short(&err.message);
                 entry.saved.error = Some(err);
                 if step == StepKind::Fix {
                     // what was being fixed is open again
@@ -1657,6 +2001,7 @@ impl Inner {
             && ctx.auto(&entry.saved)
             && matches!(entry.saved.workflow.phase(), Phase::Running(_));
         let alert = (!go_on).then(|| stop_alert(ctx, step, entry, &text)).flatten();
+        let next = go_on.then(|| self.claim_in(&mut tasks, ctx));
         drop(tasks);
         if let Some(alert) = alert {
             let sink = self.alert_sink.lock().ok().and_then(|s| s.clone());
@@ -1666,8 +2011,14 @@ impl Inner {
         }
         if let Ok(store) = self.store.lock() {
             let _ = store.log_event(&now(), Some(wp_id), &format!("flow.{kind}"), Some(&text));
+            if let Some(id) = run_id.filter(|_| !note.is_empty()) {
+                let _ = store.set_step_run_note(id, &note);
+            }
+            if let Some(Ok((_, started))) = &next {
+                let _ = store.log_event(&now(), Some(wp_id), "flow.info", Some(started));
+            }
         }
-        go_on
+        next.map(|n| n.map(|(claim, _)| claim))
     }
 
     fn on_tool(&self, wp_id: u64, step: StepKind, name: &str, detail: &str) {
@@ -1715,11 +2066,41 @@ impl Inner {
         }
     }
 
-    fn raw_log(&self, ctx: &TaskCtx, step: StepKind) -> Option<std::fs::File> {
-        let dir = self.runs_dir.as_ref()?.join(&ctx.row.display_id);
-        std::fs::create_dir_all(&dir).ok()?;
+    /// Create the run's raw log, starting with the prompt the app sends (the Chat tab shows it);
+    /// returns the file and its name relative to the runs folder.
+    fn open_log(&self, ctx: &TaskCtx, step: StepKind, job: &Job) -> (Option<std::fs::File>, Option<String>) {
+        use std::io::Write;
+        let Some(runs) = self.runs_dir.as_ref() else {
+            return (None, None);
+        };
         let stamp = now().replace([':', '.'], "-");
-        std::fs::File::create(dir.join(format!("{stamp}-{}.jsonl", step_key(step)))).ok()
+        let name = format!("{}/{stamp}-{}.jsonl", ctx.row.display_id, step_key(step));
+        let path = runs.join(&name);
+        let file = path
+            .parent()
+            .and_then(|d| std::fs::create_dir_all(d).ok())
+            .and_then(|()| std::fs::File::create(&path).ok());
+        match file {
+            Some(mut f) => {
+                let _ = writeln!(f, "{}", transcript::prompt_line(&prompt_of(job)));
+                (Some(f), Some(name))
+            }
+            None => (None, None),
+        }
+    }
+
+    /// Start the run's `step_run` row and remember its id on the running step.
+    fn begin_run(&self, ctx: &TaskCtx, step: StepKind, agent: &str, log: Option<&str>) -> Option<i64> {
+        let wp_id = ctx.row.wp_id;
+        let round = (step == StepKind::CrossReview).then(|| self.round_of(wp_id));
+        let id = self.store.lock().ok().and_then(|s| {
+            s.begin_step_run(wp_id, step_key(step), agent, round, &now(), log)
+                .ok()
+        });
+        if let Some(run) = self.lock_tasks().get_mut(&wp_id).and_then(|e| e.run.as_mut()) {
+            run.run_id = id;
+        }
+        id
     }
 
     /// Run Claude for one step; the final `result` line comes back.
@@ -1734,12 +2115,8 @@ impl Inner {
         use std::io::Write;
         let wp_id = ctx.row.wp_id;
         let (budget, timeout, key) = limits(step, &ctx.config);
-        let round = (step == StepKind::CrossReview).then(|| self.round_of(wp_id));
-        let run_id = self.store.lock().ok().and_then(|s| {
-            s.begin_step_run(wp_id, step_key(step), "claude", round, &now())
-                .ok()
-        });
-        let mut raw = self.raw_log(ctx, step);
+        let (mut raw, log) = self.open_log(ctx, step, job);
+        let run_id = self.begin_run(ctx, step, "claude", log.as_deref());
         let mut result: Option<RunResult> = None;
         let mut session = String::new();
         let mut used_model = String::new();
@@ -1786,6 +2163,7 @@ impl Inner {
                         .filter(|m| !m.is_empty())
                         .or(claim.choice.model.as_deref()),
                     effort: claim.choice.effort.as_deref(),
+                    denials: r.and_then(|r| denials_json(&r.denials)).as_deref(),
                 },
             );
         }
@@ -1795,7 +2173,7 @@ impl Inner {
                     wp_id,
                     Some(step),
                     "info",
-                    &format!("Bị từ chối (ngoài allowlist): {d}"),
+                    &format!("Bị từ chối (ngoài allowlist): {}", d.line()),
                     false,
                 );
             }
@@ -1850,12 +2228,9 @@ impl Inner {
         use std::io::Write;
         let wp_id = ctx.row.wp_id;
         let (_, timeout, key) = limits(step, &ctx.config);
-        let round = (step == StepKind::CrossReview).then(|| self.round_of(wp_id));
-        let run_id = self.store.lock().ok().and_then(|s| {
-            s.begin_step_run(wp_id, step_key(step), "codex", round, &now())
-                .ok()
-        });
-        let mut raw = self.raw_log(ctx, step);
+        let (mut raw, log) = self.open_log(ctx, step, job);
+        let run_id = self.begin_run(ctx, step, "codex", log.as_deref());
+        let mut thread = String::new();
         let mut last = String::new();
         let mut failed: Option<String> = None;
         let (mut tokens_in, mut tokens_out) = (0_u64, 0_u64);
@@ -1864,6 +2239,7 @@ impl Inner {
                 let _ = writeln!(f, "{line}");
             }
             match codex::parse_line(line) {
+                Ok(CodexEvent::Started { thread_id }) => thread = thread_id,
                 Ok(CodexEvent::Command(cmd)) => self.on_tool(wp_id, step, "Shell", &cmd),
                 Ok(CodexEvent::Message(m)) => last = m,
                 Ok(CodexEvent::Usage { input, output, .. }) => {
@@ -1882,13 +2258,14 @@ impl Inner {
                 id,
                 &StepRunEnd {
                     state: if ok { "done" } else { "failed" },
-                    session_id: None,
+                    session_id: Some(thread.as_str()).filter(|t| !t.is_empty()),
                     cost_usd: None,
                     tokens_in: Some(tokens_in),
                     tokens_out: Some(tokens_out),
                     ended_at: &now(),
                     model: claim.choice.model.as_deref(),
                     effort: claim.choice.effort.as_deref(),
+                    denials: None,
                 },
             );
         }
@@ -2015,7 +2392,7 @@ fn review_event(
     step: StepKind,
     findings: &[FindingRow],
     policy: &GatePolicy,
-    reported: usize,
+    raw: &[RawFinding],
 ) -> (WorkflowEvent, String) {
     let open = findings.iter().filter(|f| !settled(&f.state)).count();
     let blocking = findings.iter().filter(|f| to_fix(f, policy)).count();
@@ -2040,10 +2417,29 @@ fn review_event(
         StepKind::CrossReview => WorkflowEvent::CrossReviewFinished { blocking },
         _ => WorkflowEvent::ReviewLocalFinished { blocking },
     };
-    (
-        event,
-        format!("báo {reported} lỗi; còn mở {open}, cần sửa {blocking}"),
-    )
+    let mut by_severity = Vec::new();
+    for sev in ["critical", "high", "medium", "low"] {
+        let n = raw
+            .iter()
+            .filter(|r| severity_of(&r.severity) == severity_of(sev))
+            .count();
+        if n > 0 {
+            by_severity.push(format!("{n} {sev}"));
+        }
+    }
+    let found = if raw.is_empty() {
+        "không thấy lỗi".to_owned()
+    } else {
+        format!("báo {} lỗi ({})", raw.len(), by_severity.join(", "))
+    };
+    let note = if blocking > 0 {
+        format!("{found}, cần sửa {blocking}")
+    } else if open > 0 {
+        format!("{found}, còn mở {open}")
+    } else {
+        found
+    };
+    (event, note)
 }
 
 /// Check the repo, run the step, check the repo again.
@@ -2123,6 +2519,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         StepKind::Intake => Ok(Done {
             event: E::StepSucceeded(StepKind::Intake),
             note: String::new(),
+            cost: None,
         }),
         StepKind::Analyze => {
             let previous_plan = ctx.read(PLAN_FILE);
@@ -2145,24 +2542,23 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             set_session(&r.session_id);
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Analyze),
-                note: format!("plan.md, {}", usd(r.cost_usd)),
+                note: plan_note(plan),
+                cost: Some(r.cost_usd),
             })
         }
         StepKind::Implement => {
             let plan = ctx
                 .read(PLAN_FILE)
                 .ok_or_else(|| flow_error("plan.missing", "Không đọc được plan.md"))?;
-            let prompt = prompts::implement(&plan, session.is_none().then_some(brief.as_str()));
-            let args = cl(claude::code_args(
-                session.as_deref(),
-                budget,
-                &ctx.repo_config().allow_bash,
-            ));
+            let allowed = ctx.repo_config().allow_bash;
+            let prompt = prompts::implement(&plan, session.is_none().then_some(brief.as_str()), &allowed);
+            let args = cl(claude::code_args(session.as_deref(), budget, &allowed));
             let r = inner.run_claude(ctx, step, &job(Provider::Claude, args, Some(prompt)), claim)?;
             set_session(&r.session_id);
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Implement),
-                note: usd(r.cost_usd),
+                note: format!("{}{}", change_note(repo), denied_note(r.denials.len())),
+                cost: Some(r.cost_usd),
             })
         }
         StepKind::ReviewLocal | StepKind::FinalReview => {
@@ -2184,10 +2580,11 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             let raw = text::findings_from_text(&r.text).ok_or_else(unreadable_review)?;
             save_review_notes(ctx, step, &r.text);
             let findings = inner.merge(ctx, step, 0, source, &raw)?;
-            let (event, note) = review_event(step, &findings, policy, raw.len());
+            let (event, note) = review_event(step, &findings, policy, &raw);
             Ok(Done {
                 event,
-                note: format!("{note}, {}", usd(r.cost_usd)),
+                note,
+                cost: Some(r.cost_usd),
             })
         }
         StepKind::Fix => {
@@ -2206,6 +2603,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 return Ok(Done {
                     event: E::StepSucceeded(StepKind::Fix),
                     note: "không còn lỗi cần sửa".into(),
+                    cost: None,
                 });
             }
             if let Ok(store) = inner.store.lock() {
@@ -2227,22 +2625,25 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     suggestion: f.suggestion.clone().unwrap_or_default(),
                 })
                 .collect();
-            let args = cl(claude::code_args(
-                session.as_deref(),
-                budget,
-                &ctx.repo_config().allow_bash,
-            ));
+            let allowed = ctx.repo_config().allow_bash;
+            let args = cl(claude::code_args(session.as_deref(), budget, &allowed));
             let r = inner.run_claude(
                 ctx,
                 step,
-                &job(Provider::Claude, args, Some(prompts::fix(&list))),
+                &job(Provider::Claude, args, Some(prompts::fix(&list, &allowed))),
                 claim,
             )?;
             set_session(&r.session_id);
             inner.with_saved(wp_id, |s| s.fixes += 1);
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Fix),
-                note: format!("{} lỗi, {}", list.len(), usd(r.cost_usd)),
+                note: format!(
+                    "xử lý {} lỗi; {}{}",
+                    list.len(),
+                    change_note(repo),
+                    denied_note(r.denials.len())
+                ),
+                cost: Some(r.cost_usd),
             })
         }
         StepKind::CrossReview => {
@@ -2286,13 +2687,11 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 (raw, "claude", Some(r.cost_usd))
             };
             let findings = inner.merge(ctx, step, round, source, &raw)?;
-            let (event, note) = review_event(step, &findings, policy, raw.len());
+            let (event, note) = review_event(step, &findings, policy, &raw);
             Ok(Done {
                 event,
-                note: match cost {
-                    Some(c) => format!("vòng {round}: {note}, {}", usd(c)),
-                    None => format!("vòng {round}: {note}"),
-                },
+                note: format!("vòng {round}: {note}"),
+                cost,
             })
         }
         StepKind::PushSummary => {
@@ -2325,7 +2724,8 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             write_task_file(ctx, PUSH_FILE, &r.text)?;
             Ok(Done {
                 event: E::StepSucceeded(StepKind::PushSummary),
-                note: format!("commit message + PR description, {}", usd(r.cost_usd)),
+                note: "đã viết commit message + PR description".into(),
+                cost: Some(r.cost_usd),
             })
         }
     }
@@ -2337,12 +2737,10 @@ fn worker(inner: &Arc<Inner>, ctx: &TaskCtx, first: Claim) {
     loop {
         let step = claim.step;
         let result = execute(inner, ctx, &claim);
-        if !inner.finish(ctx, step, result) {
-            return;
-        }
-        match inner.claim(ctx) {
-            Ok(next) => claim = next,
-            Err(e) => {
+        match inner.finish(ctx, step, result) {
+            None => return,
+            Some(Ok(next)) => claim = next,
+            Some(Err(e)) => {
                 inner.log(
                     ctx.row.wp_id,
                     None,
@@ -2910,6 +3308,196 @@ mod tests {
             d.log
         );
         assert_eq!(step_label(StepKind::PushSummary), "Push summary");
+    }
+
+    /// Analyze writes a plan with two files and a question; the code step edits a.ts and has one
+    /// chained command refused; reviews are clean; Codex answers with a thread id.
+    fn with_denial() -> impl ScriptFn {
+        move |job, _stop, out| {
+            match kind(job) {
+                "analyze" => {
+                    out(&init_line());
+                    out(&result_line(
+                        "## Nguyên nhân\nx\n## File sẽ sửa\n- `a.ts`\n  - chi tiết\n- `b.ts`\n## Rủi ro và câu hỏi\n- Có cần migrate không?\n- Rủi ro thấp.",
+                    ));
+                }
+                "code" => {
+                    let file = job.cwd.join("a.ts");
+                    let old = std::fs::read_to_string(&file).unwrap();
+                    std::fs::write(&file, format!("{old}// edit\n")).unwrap();
+                    out(
+                        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Chạy type check."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cd api && npx tsc --noEmit"}}]}}"#,
+                    );
+                    out(
+                        r#"{"type":"system","subtype":"permission_denied","tool_use_id":"t1","decision_reason":"not allowed"}"#,
+                    );
+                    let mut result: serde_json::Value =
+                        serde_json::from_str(&result_line("đã sửa a.ts")).unwrap();
+                    result["permission_denials"] = serde_json::json!([
+                        {"tool_name": "Bash", "tool_input": {"command": "cd api && npx tsc --noEmit"}}
+                    ]);
+                    out(&result.to_string());
+                }
+                "review" => out(&result_line(CLEAN)),
+                "codex" => {
+                    out(r#"{"type":"thread.started","thread_id":"th-9"}"#);
+                    out(r#"{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}"#);
+                    let i = job.args.iter().position(|a| a == "-o").unwrap();
+                    std::fs::write(&job.args[i + 1], "{\"findings\":[]}").unwrap();
+                }
+                _ => out(&result_line(PUSH)),
+            }
+            ok()
+        }
+    }
+
+    #[test]
+    fn runs_keep_a_note_a_chat_and_the_refused_commands() {
+        let Some(s) = setup() else { return };
+        let fake = Arc::new(Fake {
+            script: Box::new(with_denial()),
+            jobs: Mutex::new(Vec::new()),
+            missing: false,
+        });
+        let runs_dir = s.tasks.with_file_name("runs");
+        let flow = Flow::new(s.store.clone(), fake.clone(), Some(runs_dir.clone()));
+        let mut config = Config::default();
+        config.repos.insert(
+            s.repo.to_string_lossy().into_owned(),
+            RepoConfig {
+                allow_bash: vec!["Bash(npx tsc *)".into()],
+                ..RepoConfig::default()
+            },
+        );
+        let ctx = s.ctx(1, &config);
+        flow.started(&ctx);
+        assert!(flow.detail(&ctx).runs.is_empty());
+        assert_eq!(flow.chat(&ctx, None).unwrap_err().code, "run.missing");
+
+        run(&flow, &ctx, FlowAction::Run);
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(d.current, Some(StepKind::ReviewLocal), "{:?}", d.error);
+        let [analyze, implement] = &d.runs[..] else {
+            panic!("{:?}", d.runs)
+        };
+        assert_eq!((analyze.step, analyze.state), (StepKind::Analyze, RunState::Done));
+        assert_eq!(analyze.note.as_deref(), Some("plan: 2 file sẽ sửa, 1 câu hỏi"));
+        assert!(analyze.has_chat);
+        assert_eq!(analyze.resume.as_deref(), Some("claude --resume s-1"));
+        assert_eq!(analyze.cost_usd, Some(0.25));
+        assert_eq!(
+            implement.note.as_deref(),
+            Some("1 file thay đổi (+1 −0), 1 lệnh bị chặn")
+        );
+        let denied = &implement.denials[0];
+        assert_eq!(denied.input, "cd api && npx tsc --noEmit");
+        assert!(denied.chained);
+        assert_eq!(denied.rules.len(), 1);
+        assert_eq!(denied.rules[0].rule, "npx tsc *");
+        assert!(denied.rules[0].allowed);
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text == "Viết code xong: 1 file thay đổi (+1 −0), 1 lệnh bị chặn ($0.25)")
+        );
+        // the code prompt lists what may run and asks for one command at a time
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let code = jobs[1].stdin.as_deref().unwrap();
+        assert!(code.contains("allowed in this repository: `Bash(npx tsc *)`"));
+        assert!(code.contains("Do not chain commands"));
+
+        // the latest run's chat: the prompt first, the refused command marked
+        let chat = flow.chat(&ctx, None).unwrap();
+        assert_eq!(chat.run.id, implement.id);
+        assert!(!chat.missing);
+        assert_eq!(chat.items[0].kind, ChatKind::Prompt);
+        assert!(chat.items[0].text.starts_with("Implement the approved plan"));
+        let tool = chat.items.iter().find(|i| i.kind == ChatKind::Tool).unwrap();
+        assert_eq!(tool.denied.as_deref(), Some("not allowed"));
+        let first = flow.chat(&ctx, Some(analyze.id)).unwrap();
+        assert!(first.items[0].text.contains("<brief>"));
+
+        // the review is clean, then Codex keeps its thread for `codex resume`
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(d.runs[2].note.as_deref(), Some("không thấy lỗi"));
+        let d = run(&flow, &ctx, FlowAction::Run);
+        let cross = &d.runs[3];
+        assert_eq!(cross.agent, AgentKind::Codex);
+        assert_eq!(cross.note.as_deref(), Some("vòng 1: không thấy lỗi"));
+        assert_eq!(cross.resume.as_deref(), Some("codex resume th-9"));
+        let (repo, provider, session) = flow.resume_target(&ctx, cross.id).unwrap();
+        assert_eq!((provider, session.as_str()), (Provider::Codex, "th-9"));
+        assert_eq!(repo, s.repo);
+        assert!(!jobs.iter().any(|j| j.args.contains(&"--ephemeral".to_owned())));
+
+        // a log that is gone shows as missing, not as an error
+        std::fs::remove_dir_all(&runs_dir).unwrap();
+        let gone = flow.chat(&ctx, Some(analyze.id)).unwrap();
+        assert!(gone.missing && gone.items.is_empty());
+        assert!(!flow.detail(&ctx).runs[0].has_chat);
+    }
+
+    #[test]
+    fn runs_from_before_migration_5_find_their_log_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("WP-1");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("2026-11-14T10-31-19-7913326Z-implement.jsonl"), "{}").unwrap();
+        std::fs::write(folder.join("2026-11-14T10-37-37-268938Z-reviewLocal.jsonl"), "{}").unwrap();
+        let mut row = StepRunRow {
+            id: 1,
+            wp_id: 1,
+            step: "implement".into(),
+            agent: Some("claude".into()),
+            session_id: None,
+            state: "done".into(),
+            round: None,
+            cost_usd: None,
+            tokens_in: None,
+            tokens_out: None,
+            started_at: "2026-11-14T10:31:19.7801Z".into(),
+            ended_at: None,
+            model: None,
+            effort: None,
+            note: None,
+            log_file: None,
+            denials: None,
+        };
+        let found = log_path(&row, Some(tmp.path()), "WP-1").unwrap();
+        assert!(found.ends_with("2026-11-14T10-31-19-7913326Z-implement.jsonl"));
+        // another step, or a start far from the file, finds nothing
+        row.started_at = "2026-11-14T09:00:00Z".into();
+        assert!(log_path(&row, Some(tmp.path()), "WP-1").is_none());
+        row.step = "fix".into();
+        assert!(log_path(&row, Some(tmp.path()), "WP-1").is_none());
+        assert!(log_path(&row, None, "WP-1").is_none());
+    }
+
+    #[test]
+    fn resume_needs_a_plain_session_and_no_push_summary() {
+        assert_eq!(
+            resume_command(StepKind::Fix, AgentKind::Claude, Some("a-1")).as_deref(),
+            Some("claude --resume a-1")
+        );
+        assert_eq!(
+            resume_command(StepKind::PushSummary, AgentKind::Claude, Some("a-1")),
+            None
+        );
+        assert_eq!(
+            resume_command(StepKind::Fix, AgentKind::Claude, Some("a & calc")),
+            None
+        );
+        assert_eq!(resume_command(StepKind::Fix, AgentKind::Claude, None), None);
+        assert_eq!(plan_note("## Nguyên nhân\nkhông có danh sách"), "đã viết plan.md");
+        let job = Job {
+            agent: Provider::Claude,
+            args: claude::review_local_args("main", 1.0),
+            cwd: PathBuf::new(),
+            stdin: None,
+            timeout: Duration::from_secs(1),
+        };
+        let prompt = prompt_of(&job);
+        assert!(prompt.starts_with("/review-local\n\nNon-interactive run."));
     }
 
     #[test]

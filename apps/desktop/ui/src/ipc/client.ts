@@ -20,7 +20,14 @@ import {
   mockStartTask,
   mockUpdate,
 } from "./mock";
-import { mockDecideFinding, mockFlowAction, mockSaveBrief, mockTaskDetail } from "./mockFlow";
+import {
+  mockAllowBash,
+  mockDecideFinding,
+  mockFlowAction,
+  mockSaveBrief,
+  mockStepChat,
+  mockTaskDetail,
+} from "./mockFlow";
 import {
   mockAlerts,
   mockMarkAlertsRead,
@@ -34,6 +41,7 @@ import type {
   ApiError,
   AppInfo,
   BoardSnapshot,
+  ChatView,
   CommentsView,
   DiffView,
   NotifyKind,
@@ -155,6 +163,15 @@ export const refreshBriefComments = (wpId: number): Promise<CommentsView> =>
 /** Diff tab: the task's change since its base (git, read-only); `markSeen` remembers it. */
 export const getTaskDiff = (wpId: number, markSeen: boolean): Promise<DiffView> =>
   call("task_diff", () => mockTaskDiff(wpId, markSeen), { wpId, markSeen });
+/** Chat tab: the transcript of one step run (`runId` undefined = the latest). */
+export const getStepChat = (wpId: number, runId?: number): Promise<ChatView> =>
+  call("step_chat", () => mockStepChat(wpId, runId), { wpId, runId });
+/** "Cho phép lệnh này": adds `rule` to the repo's allowBash in config.json. */
+export const allowBash = (wpId: number, rule: string): Promise<TaskDetail> =>
+  call("allow_bash", () => mockAllowBash(wpId, rule), { wpId, rule });
+/** Continues a finished run's AI session in a console window in the task's repo. */
+export const openResume = (wpId: number, runId: number): Promise<null> =>
+  call("open_resume", () => null, { wpId, runId });
 
 // ---------- bell, notifications, tray ----------
 

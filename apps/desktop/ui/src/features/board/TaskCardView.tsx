@@ -83,7 +83,7 @@ function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssue
   if (step?.state === "running") {
     return (
       <>
-        {open("log")}
+        {open("progress")}
         <button className="btn btn--sm" title={f.stopHint} onClick={() => onFlow(card, { type: "stop" })}>
           <Icon name="pause" size={12} />
           {f.stop}
@@ -96,7 +96,7 @@ function primaryAction({ card, onStart, onPause, onBrief, onIssues, readingIssue
     return (
       <>
         {pause}
-        {open("log")}
+        {open("progress")}
         {login && onLogin && (
           <button className="btn btn--sm" title={vi.quota.loginHint(login === "codex" ? "Codex" : "Claude")} onClick={() => onLogin(login)}>
             {f.login}

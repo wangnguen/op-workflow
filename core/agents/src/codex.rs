@@ -28,13 +28,13 @@ pub const FINDINGS_SCHEMA: &str = r#"{
 }"#;
 
 /// Read-only cross-review. The prompt goes through stdin (`-`); the final JSON lands in
-/// `output_file`. Memories are off so Codex does not read `~/.codex/memories`.
+/// `output_file`. Memories are off so Codex does not read `~/.codex/memories`. The session is
+/// kept (no `--ephemeral`) so the Chat tab can offer `codex resume <thread id>`.
 pub fn cross_review_args(schema_file: &str, output_file: &str) -> Vec<String> {
     [
         "exec",
         "--sandbox",
         "read-only",
-        "--ephemeral",
         "--json",
         "--output-schema",
         schema_file,
@@ -179,14 +179,14 @@ mod tests {
     }
 
     #[test]
-    fn cross_review_is_read_only_ephemeral_and_reads_stdin() {
+    fn cross_review_is_read_only_kept_and_reads_stdin() {
         let args = cross_review_args("s.json", "out.json");
         assert_eq!(args[0], "exec");
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "--sandbox" && w[1] == "read-only")
         );
-        assert!(args.contains(&"--ephemeral".to_owned()));
+        assert!(!args.contains(&"--ephemeral".to_owned()));
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "-c" && w[1] == "memories.use_memories=false")

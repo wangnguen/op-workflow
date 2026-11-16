@@ -1,8 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MOCK_STEP_MS, mockDecideFinding, mockFlowAction, mockFlowCard, mockTaskDetail, resetMockFlows } from "../../ipc/mockFlow";
+import {
+  MOCK_STEP_MS,
+  mockAllowBash,
+  mockDecideFinding,
+  mockFlowAction,
+  mockFlowCard,
+  mockStepChat,
+  mockTaskDetail,
+  resetMockFlows,
+} from "../../ipc/mockFlow";
 import type { FindingView, TaskDetail } from "../../ipc/types";
 import { parseBlocks } from "../../shared/Markdown";
-import { defaultTab, findingCounts, gateTab, sortFindings, undecidedMediums } from "./taskTabs";
+import { asTab, defaultTab, findingCounts, gateTab, sortFindings, undecidedMediums } from "./taskTabs";
 
 const finding = (over: Partial<FindingView>): FindingView => ({
   fingerprint: "x",
@@ -21,10 +30,17 @@ describe("task window helpers", () => {
     expect(at({})).toBe("brief");
     expect(at({ status: "gate", gate: { kind: "planReview", since: "", message: "" } })).toBe("plan");
     expect(at({ status: "gate", gate: { kind: "mediumTriage", since: "", message: "" } })).toBe("findings");
-    expect(at({ status: "gate", gate: { kind: "error", since: "", message: "" } })).toBe("log");
-    expect(at({ status: "running" })).toBe("log");
+    expect(at({ status: "gate", gate: { kind: "error", since: "", message: "" } })).toBe("progress");
+    expect(at({ status: "running" })).toBe("progress");
     expect(at({ status: "awaitingPush" })).toBe("push");
+    // after a step, the timeline (not the plan) unless a gate needs another tab
+    const ran = mockTaskDetail(186196).runs;
+    expect(at({ status: "ready", current: "reviewLocal", plan: "## x", runs: ran })).toBe("progress");
     expect(gateTab("mediumTriage")).toBe("findings");
+    expect(gateTab("error")).toBe("progress");
+    expect(asTab("log")).toBe("progress");
+    expect(asTab("chat")).toBe("chat");
+    expect(asTab("nope")).toBeUndefined();
   });
 
   it("sorts open findings first, most severe first, and counts what the fix takes", () => {
@@ -97,5 +113,36 @@ describe("mock workflow (browser preview)", () => {
     expect(stopped.error?.code).toBe("step.stopped");
     expect(mockFlowCard(8)?.step?.state).toBe("failed");
     expect(mockFlowAction(8, { type: "retry" }).status).toBe("running");
+    const runs = mockTaskDetail(8).runs;
+    expect(runs.map((r) => r.state)).toEqual(["failed", "running"]);
+    expect(runs[0]?.note).toContain("dừng");
+  });
+
+  it("keeps each run with its result, refused commands and transcript", () => {
+    mockFlowAction(9, { type: "run" });
+    expect(mockStepChat(9).run.state).toBe("running");
+    step(9);
+    mockFlowAction(9, { type: "approvePlan" });
+    const d = step(9);
+    const [analyze, implement] = d.runs;
+    expect(analyze).toMatchObject({ step: "analyze", state: "done", note: "plan: 2 file sẽ sửa, 1 câu hỏi" });
+    expect(analyze?.resume).toMatch(/^claude --resume /);
+    expect(implement?.note).toBe("2 file thay đổi (+38 −6), 1 lệnh bị chặn");
+    expect(implement?.denials[0]?.rules).toEqual([
+      { rule: "npx tsc *", allowed: false },
+      { rule: "npx eslint *", allowed: false },
+    ]);
+    const chat = mockStepChat(9);
+    expect(chat.run.id).toBe(implement?.id);
+    expect(chat.items[0]?.kind).toBe("prompt");
+    expect(chat.items.some((i) => i.denied)).toBe(true);
+    expect(chat.items.at(-1)?.kind).toBe("end");
+    expect(mockStepChat(9, analyze?.id).run.step).toBe("analyze");
+
+    expect(() => mockAllowBash(9, "git push *")).toThrow();
+    expect(() => mockAllowBash(9, "npx tsc && rm -rf /")).toThrow();
+    mockAllowBash(9, "Bash(npx tsc *)");
+    const allowed = mockAllowBash(9, "npx eslint *");
+    expect(allowed.runs[1]?.denials[0]?.rules.every((r) => r.allowed)).toBe(true);
   });
 });

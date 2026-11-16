@@ -17,7 +17,34 @@ const CODE_RULES: &str = "Rules:\n\
 reset, stash, tag or switch branches: the user reviews and commits by hand.\n\
 - Keep the change as small as the task needs and follow the style of the code around it.\n\
 - Do not edit files that hold secrets (.env and similar) or generated migrations unless the plan says so.\n\
+- Run each shell command on its own, from the repository root. Do not chain commands with \
+`cd … &&`, `&&`, `;` or `|`: the allow list matches the whole command line, so a chained command \
+is refused even when every part is allowed. Instead of `cd`, use the tools' path arguments \
+(Grep/Glob `path`, `npx tsc -p <dir>`, `npm --prefix <dir> run …`).\n\
 - If a command you want to run is refused, carry on without it and mention it in the summary.";
+
+/// Which shell commands the app lets a code step run (`repos.<repo>.allowBash`).
+fn shell_rule(allowed: &[String]) -> String {
+    let list: Vec<String> = allowed
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| !a.is_empty())
+        .map(|a| format!("`{a}`"))
+        .collect();
+    if list.is_empty() {
+        "- No shell command is allowed for this repository beyond its own settings; others are refused."
+            .into()
+    } else {
+        format!(
+            "- Shell commands allowed in this repository: {}. Others are refused.",
+            list.join(", ")
+        )
+    }
+}
+
+fn code_rules(allowed: &[String]) -> String {
+    format!("{CODE_RULES}\n{}", shell_rule(allowed))
+}
 
 /// The last characters of the brief a reviewer sees (it reviews the diff, not the task).
 const REVIEW_BRIEF_CHARS: usize = 3000;
@@ -75,10 +102,10 @@ pub fn analyze(brief: &str, previous: Option<(&str, &str)>) -> String {
 }
 
 /// [3] Implement the approved plan. The brief is included when there is no analyze session to
-/// resume.
-pub fn implement(plan: &str, brief: Option<&str>) -> String {
+/// resume. `allowed` is the repo's `allowBash` list, so the AI knows what it may run.
+pub fn implement(plan: &str, brief: Option<&str>, allowed: &[String]) -> String {
     let mut p = String::from("Implement the approved plan below in this repository.\n\n");
-    p.push_str(CODE_RULES);
+    p.push_str(&code_rules(allowed));
     p.push_str(
         "\n\nWhen you are done, end with a short summary in Vietnamese: the files you changed, what \
          you checked, and anything the user should look at.\n\n",
@@ -104,12 +131,12 @@ pub struct FixItem {
 }
 
 /// [5] Fix the findings of the review that just ran.
-pub fn fix(items: &[FixItem]) -> String {
+pub fn fix(items: &[FixItem], allowed: &[String]) -> String {
     let mut p = String::from(
         "Reviewers found the problems listed below in the current change. Fix each one in the \
          working tree. If you are sure one is a false positive, leave the code and say why.\n\n",
     );
-    p.push_str(CODE_RULES);
+    p.push_str(&code_rules(allowed));
     p.push_str(
         "\n\nEnd with a list in Vietnamese: for each finding, `đã sửa` or `không sửa` plus the reason.\n\n",
     );
@@ -213,20 +240,37 @@ mod tests {
 
     #[test]
     fn code_prompts_forbid_git_writes() {
-        let p = implement("## Đề xuất\nx", Some("brief"));
+        let p = implement("## Đề xuất\nx", Some("brief"), &[]);
         assert!(p.contains("Never commit, push"));
         assert!(p.contains("<brief>"));
-        assert!(!implement("plan", None).contains("<brief>"));
-        let f = fix(&[FixItem {
-            severity: "high".into(),
-            file: "a.ts".into(),
-            line: Some(42),
-            title: "Null org".into(),
-            detail: "crash".into(),
-            suggestion: "guard".into(),
-        }]);
+        assert!(!implement("plan", None, &[]).contains("<brief>"));
+        let f = fix(
+            &[FixItem {
+                severity: "high".into(),
+                file: "a.ts".into(),
+                line: Some(42),
+                title: "Null org".into(),
+                detail: "crash".into(),
+                suggestion: "guard".into(),
+            }],
+            &[],
+        );
         assert!(f.contains("1. [HIGH] a.ts:42 — Null org\n   crash\n   Suggestion: guard"));
         assert!(f.contains("Never commit, push"));
+    }
+
+    #[test]
+    fn code_prompts_say_what_may_run_and_not_to_chain() {
+        let p = implement(
+            "plan",
+            None,
+            &["npm run lint *".into(), " ".into(), "npx tsc *".into()],
+        );
+        assert!(p.contains("Do not chain commands with `cd … &&`"));
+        assert!(p.contains("allowed in this repository: `npm run lint *`, `npx tsc *`."));
+        let none = fix(&[], &[]);
+        assert!(none.contains("No shell command is allowed"));
+        assert!(none.contains("Do not chain"));
     }
 
     #[test]

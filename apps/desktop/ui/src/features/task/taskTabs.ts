@@ -1,25 +1,27 @@
 // Pure helpers of the task window (no React), so they are easy to test.
 import type { FindingView, GateKind, Severity, TaskDetail } from "../../ipc/types";
 
-export type TaskTab = "brief" | "comments" | "plan" | "findings" | "diff" | "push" | "log";
+export type TaskTab = "progress" | "chat" | "brief" | "comments" | "plan" | "findings" | "diff" | "push";
 
-const TABS: readonly TaskTab[] = ["brief", "comments", "plan", "findings", "diff", "push", "log"];
+const TABS: readonly TaskTab[] = ["progress", "chat", "brief", "comments", "plan", "findings", "diff", "push"];
 
-/** A tab name from outside (an alert, the map), or `undefined` when it is not a tab. */
+/** A tab name from outside (an alert, the map), or `undefined` when it is not a tab. Alerts
+ *  saved before the Tiến trình tab existed still say "log". */
 export const asTab = (s: string | undefined): TaskTab | undefined =>
-  TABS.find((tab) => tab === s);
+  s === "log" ? "progress" : TABS.find((tab) => tab === s);
 
-/** The tab that shows what the task needs right now. */
+/** The tab that shows what the task needs right now: a gate's own tab, the brief before the
+ *  first step, otherwise the Tiến trình timeline. */
 export function defaultTab(d: TaskDetail): TaskTab {
-  if (d.gate?.kind === "planReview") return "plan";
+  if (d.gate?.kind === "planReview" || d.gate?.kind === "selfCode") return "plan";
   if (d.gate?.kind === "mediumTriage") return "findings";
   if (d.status === "awaitingPush" || d.status === "done") return "push";
-  if (d.status === "running" || d.gate?.kind === "error") return "log";
+  if (d.status === "running" || d.gate?.kind === "error") return "progress";
   if (d.findings.length > 0 && (d.current === "fix" || d.current === "crossReview" || d.current === "finalReview")) {
     return "findings";
   }
-  if (d.plan && d.current !== "analyze") return "plan";
-  return "brief";
+  if (d.runs.length === 0 && !d.plan) return "brief";
+  return "progress";
 }
 
 /** Where a gate's work is: the plan for the plan gate, the findings for triage, … */
@@ -30,7 +32,7 @@ export function gateTab(kind: GateKind): TaskTab {
     case "mediumTriage":
       return "findings";
     case "error":
-      return "log";
+      return "progress";
     default:
       return "brief";
   }

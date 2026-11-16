@@ -941,6 +941,129 @@ pub struct PushView {
     pub blocks: Vec<PushBlock>,
 }
 
+/// How one step run ended (the Tiến trình tab).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RunState {
+    Running,
+    Done,
+    Failed,
+}
+
+/// One run of a step, for the Tiến trình tab (oldest first).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSummary {
+    pub id: i64,
+    pub step: StepKind,
+    pub agent: AgentKind,
+    pub state: RunState,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_out: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Cross-review round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<u8>,
+    /// What the run produced in one line ("báo 3 lỗi (1 high, 2 medium)"), or why it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Tool calls the CLI refused (not on the allow list).
+    #[serde(default)]
+    pub denials: Vec<DeniedCall>,
+    /// The raw output is still on disk, so the Chat tab can show it.
+    pub has_chat: bool,
+    /// Command that continues this run's session in a terminal (`claude --resume <id>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
+}
+
+/// A tool call the CLI refused, with the allow-list entries that would let it run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeniedCall {
+    /// `Bash`, `Edit`, …
+    pub tool: String,
+    /// The whole command (or the path).
+    pub input: String,
+    /// Several commands joined by `&&`, `;` or `|`: every part has to be allowed.
+    pub chained: bool,
+    /// `npx tsc *`, … (empty when the call is not a shell command).
+    pub rules: Vec<RuleOption>,
+}
+
+/// One allow-list entry for `repos.<repo>.allowBash`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleOption {
+    pub rule: String,
+    /// Already in the repo's allow list.
+    pub allowed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChatKind {
+    /// What the app sent.
+    Prompt,
+    /// A message the AI wrote (markdown).
+    Text,
+    Thinking,
+    Tool,
+    /// The run ended; `tool` holds the CLI's result kind (`success`, `error_max_turns`, …).
+    End,
+    Error,
+}
+
+/// One item of the Chat tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatItem {
+    pub kind: ChatKind,
+    /// The prompt, the message, the tool's input (command, path) or the error.
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// What the tool returned (cut).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Characters of the tool result left out.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub output_cut: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
+    /// Why the CLI refused the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied: Option<String>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// The Chat tab: the transcript of one step run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatView {
+    pub run: RunSummary,
+    pub items: Vec<ChatItem>,
+    /// Older items left out (very long runs).
+    #[serde(default)]
+    pub dropped: u32,
+    /// The raw output is gone (logs are kept 14 days).
+    #[serde(default)]
+    pub missing: bool,
+}
+
 /// One line of the task's log tab.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -994,6 +1117,9 @@ pub struct TaskDetail {
     pub push: Option<PushView>,
     /// Newest last.
     pub log: Vec<LogLine>,
+    /// Every run of every step, oldest first (the Tiến trình tab).
+    #[serde(default)]
+    pub runs: Vec<RunSummary>,
     pub cost_usd: f64,
     /// Comments the user has not seen in the Comment tab (OpenProject + last issue read).
     #[serde(default)]

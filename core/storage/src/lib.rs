@@ -90,6 +90,11 @@ const MIGRATIONS: &[&str] = &[
     // 4: model and effort of each step run (Settings → Các bước AI; NULL = the CLI's default)
     "ALTER TABLE step_run ADD COLUMN model TEXT;
      ALTER TABLE step_run ADD COLUMN effort TEXT;",
+    // 5: what each run produced in one line, its raw log (the Chat tab) and the tool calls the CLI
+    // refused (JSON), for the task window's Tiến trình tab
+    "ALTER TABLE step_run ADD COLUMN note TEXT;
+     ALTER TABLE step_run ADD COLUMN log_file TEXT;
+     ALTER TABLE step_run ADD COLUMN denials TEXT;",
 ];
 
 /// Schema version this build understands.
@@ -191,6 +196,12 @@ pub struct StepRunRow {
     pub model: Option<String>,
     /// Effort passed to the CLI; `None` = its default.
     pub effort: Option<String>,
+    /// What the run produced, in one line ("báo 3 lỗi (1 high, 2 medium)"), or why it failed.
+    pub note: Option<String>,
+    /// Raw output of the run, relative to `<data dir>/runs` (`WP-1/<stamp>-implement.jsonl`).
+    pub log_file: Option<String>,
+    /// JSON array of the refused tool calls: `[{"tool":"Bash","input":"npx jest"}]`.
+    pub denials: Option<String>,
 }
 
 /// How a step run ended.
@@ -204,10 +215,12 @@ pub struct StepRunEnd<'a> {
     pub ended_at: &'a str,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    /// JSON array of refused tool calls (see [`StepRunRow::denials`]).
+    pub denials: Option<&'a str>,
 }
 
 const STEP_RUN_COLUMNS: &str = "id, wp_id, step, agent, session_id, state, round, cost_usd, tokens_in, tokens_out, \
-                                started_at, ended_at, model, effort";
+                                started_at, ended_at, model, effort, note, log_file, denials";
 
 fn step_run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunRow> {
     Ok(StepRunRow {
@@ -225,6 +238,9 @@ fn step_run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunRow> {
         ended_at: r.get(11)?,
         model: r.get(12)?,
         effort: r.get(13)?,
+        note: r.get(14)?,
+        log_file: r.get(15)?,
+        denials: r.get(16)?,
     })
 }
 
@@ -494,7 +510,8 @@ impl Store {
         Ok(())
     }
 
-    /// A step run starts; returns its id for [`Store::end_step_run`].
+    /// A step run starts; returns its id for [`Store::end_step_run`]. `log_file` is where its raw
+    /// output goes (relative to `<data dir>/runs`), so the Chat tab can follow it while it runs.
     pub fn begin_step_run(
         &self,
         wp_id: u64,
@@ -502,19 +519,28 @@ impl Store {
         agent: &str,
         round: Option<u8>,
         at: &str,
+        log_file: Option<&str>,
     ) -> StorageResult<i64> {
         self.conn.execute(
-            "INSERT INTO step_run (wp_id, step, agent, state, round, started_at)
-             VALUES (?1, ?2, ?3, 'running', ?4, ?5)",
-            params![id_param(wp_id), step, agent, round, at],
+            "INSERT INTO step_run (wp_id, step, agent, state, round, started_at, log_file)
+             VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
+            params![id_param(wp_id), step, agent, round, at, log_file],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// What the run produced, in one line (written after the app read its answer).
+    pub fn set_step_run_note(&self, id: i64, note: &str) -> StorageResult<()> {
+        self.conn
+            .execute("UPDATE step_run SET note = ?2 WHERE id = ?1", params![id, note])?;
+        Ok(())
     }
 
     pub fn end_step_run(&self, id: i64, end: &StepRunEnd<'_>) -> StorageResult<()> {
         self.conn.execute(
             "UPDATE step_run SET state = ?2, session_id = COALESCE(?3, session_id), cost_usd = ?4,
-               tokens_in = ?5, tokens_out = ?6, ended_at = ?7, model = ?8, effort = ?9 WHERE id = ?1",
+               tokens_in = ?5, tokens_out = ?6, ended_at = ?7, model = ?8, effort = ?9, denials = ?10
+             WHERE id = ?1",
             params![
                 id,
                 end.state,
@@ -524,7 +550,8 @@ impl Store {
                 opt_u64(end.tokens_out),
                 end.ended_at,
                 end.model,
-                end.effort
+                end.effort,
+                end.denials
             ],
         )?;
         Ok(())
@@ -723,10 +750,17 @@ mod tests {
         assert_eq!(store.flows().unwrap().len(), 1);
 
         let id = store
-            .begin_step_run(187716, "analyze", "claude", None, "2026-11-14T08:00:00Z")
+            .begin_step_run(
+                187716,
+                "analyze",
+                "claude",
+                None,
+                "2026-11-14T08:00:00Z",
+                Some("WP-187716/a-analyze.jsonl"),
+            )
             .unwrap();
         let open = store
-            .begin_step_run(187716, "implement", "claude", None, "2026-11-14T09:00:00Z")
+            .begin_step_run(187716, "implement", "claude", None, "2026-11-14T09:00:00Z", None)
             .unwrap();
         store
             .end_step_run(
@@ -740,14 +774,20 @@ mod tests {
                     ended_at: "2026-11-14T08:05:00Z",
                     model: Some("claude-opus-5-5"),
                     effort: None,
+                    denials: Some(r#"[{"tool":"Bash","input":"npx jest"}]"#),
                 },
             )
             .unwrap();
+        store.set_step_run_note(id, "plan: 2 file sẽ sửa").unwrap();
         assert_eq!(store.fail_unfinished_runs("2026-11-14T10:00:00Z").unwrap(), 1);
         let runs = store.step_runs(187716).unwrap();
         assert_eq!(runs[0].session_id.as_deref(), Some("s-1"));
         assert_eq!(runs[0].model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(runs[0].effort, None);
+        assert_eq!(runs[0].note.as_deref(), Some("plan: 2 file sẽ sửa"));
+        assert_eq!(runs[0].log_file.as_deref(), Some("WP-187716/a-analyze.jsonl"));
+        assert!(runs[0].denials.as_deref().is_some_and(|d| d.contains("npx jest")));
+        assert_eq!(runs[1].note, None);
         assert_eq!(runs[1].id, open);
         assert_eq!(runs[1].state, "failed");
         let done = store.done_step_runs().unwrap();

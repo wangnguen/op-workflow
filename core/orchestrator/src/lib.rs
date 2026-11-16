@@ -6,6 +6,7 @@
 //! update check need no token.
 
 pub mod alerts;
+pub mod allow;
 pub mod comments;
 pub mod demo;
 pub mod diffview;
@@ -29,11 +30,11 @@ use opw_config::{Config, secrets};
 use opw_context::BriefComment;
 use opw_domain::task::display_id;
 use opw_domain::view::{
-    AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, CommentsView, DataMode, DeleteBranchRequest,
-    DiffView, FindingDecision, FlowAction, FlowStatus, InboxItem, IssueFetch, IssueStatus, NotifyKind,
-    OrbitSnapshot, ProjectMemory, Provider, QuotaSnapshot, RepoState, SettingsView, StartOptions,
-    StartRequest, StartResult, StepChoiceRequest, StepRef, StepView, TaskCard, TaskColumn, TaskDetail,
-    TaskSystem, TasksDirChange, TodayStats, UpdateView,
+    AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CommentsView, DataMode,
+    DeleteBranchRequest, DiffView, FindingDecision, FlowAction, FlowStatus, InboxItem, IssueFetch,
+    IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, QuotaSnapshot, RepoState, SettingsView,
+    StartOptions, StartRequest, StartResult, StepChoiceRequest, StepRef, StepView, TaskCard, TaskColumn,
+    TaskDetail, TaskSystem, TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
@@ -692,6 +693,52 @@ impl AppService {
     pub fn open_task_folder(&self, wp_id: u64) -> Result<(), ApiError> {
         let (ctx, _) = self.task_ctx(wp_id)?;
         os::open_folder(&ctx.task_dir).map_err(|e| ApiError::new("path.missing", e.to_string()))
+    }
+
+    /// The Chat tab: the transcript of one step run (`None` = the latest). Reads its raw log.
+    pub fn step_chat(&self, wp_id: u64, run_id: Option<i64>) -> Result<ChatView, ApiError> {
+        let (ctx, flow) = self.task_ctx(wp_id)?;
+        flow.chat(&ctx, run_id)
+    }
+
+    /// "Cho phép lệnh này": add `rule` to `repos.<repo>.allowBash` in config.json on this
+    /// machine; the next Viết code / Sửa lỗi run may use it.
+    pub fn allow_bash(&self, wp_id: u64, rule: &str) -> Result<TaskDetail, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
+        let (ctx, _) = self.task_ctx(wp_id)?;
+        let repo = ctx
+            .row
+            .repo
+            .clone()
+            .ok_or_else(|| ApiError::new("repo.missing", "Task này chưa có repo"))?;
+        let rule = allow::clean_rule(rule).map_err(|m| ApiError::new("rule.invalid", m))?;
+        opw_config::add_allow_bash(path, &repo, &rule)
+            .map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        self.task_detail(wp_id)
+    }
+
+    /// Continue a finished run's AI session (`claude --resume`, `codex resume`) in a console
+    /// window in the task's repo, with the same git guard as the app's own runs.
+    pub fn open_resume(&self, wp_id: u64, run_id: i64) -> Result<(), ApiError> {
+        let (ctx, flow) = self.task_ctx(wp_id)?;
+        let (repo, provider, session) = flow.resume_target(&ctx, run_id)?;
+        let (exe, flag, name) = match provider {
+            Provider::Claude => (opw_agents::cli::find_claude(), "--resume", "claude"),
+            Provider::Codex => (opw_agents::cli::find_codex(), "resume", "codex"),
+        };
+        let exe =
+            exe.ok_or_else(|| ApiError::new("agent.missing", format!("Không thấy lệnh `{name}` trên PATH")))?;
+        let env = self
+            .data_dir
+            .as_ref()
+            .map(|d| opw_vcs::guard_env(&d.join("guard-hooks")))
+            .unwrap_or_default();
+        os::open_console(&repo, &exe, &[flag, session.as_str()], &env)
+            .map_err(|e| ApiError::new("open", e.to_string()))
     }
 
     /// Folder of the task folders: `tasksDir` from config, else `<data dir>/tasks`.

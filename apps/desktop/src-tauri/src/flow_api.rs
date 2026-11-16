@@ -2,7 +2,7 @@
 //! Names and payloads must match `apps/desktop/ui/src/ipc/types.ts` (`Commands`).
 //! A step runs on its own thread in the core; these commands only start, stop or read it.
 
-use opw_domain::view::{ApiError, CommentsView, DiffView, FindingDecision, FlowAction, TaskDetail};
+use opw_domain::view::{ApiError, ChatView, CommentsView, DiffView, FindingDecision, FlowAction, TaskDetail};
 use opw_orchestrator::AppService;
 use tauri::State;
 
@@ -64,4 +64,26 @@ pub fn task_diff(wp_id: u64, mark_seen: bool, service: State<'_, AppService>) ->
 #[tauri::command]
 pub fn open_task_folder(wp_id: u64, service: State<'_, AppService>) -> Result<(), ApiError> {
     service.open_task_folder(wp_id)
+}
+
+/// The Chat tab: the transcript of one step run (`run_id` absent = the latest).
+#[tauri::command(async)]
+pub fn step_chat(
+    wp_id: u64,
+    run_id: Option<i64>,
+    service: State<'_, AppService>,
+) -> Result<ChatView, ApiError> {
+    service.step_chat(wp_id, run_id)
+}
+
+/// "Cho phép lệnh này": add a rule to the repo's `allowBash` in config.json.
+#[tauri::command(async)]
+pub fn allow_bash(wp_id: u64, rule: String, service: State<'_, AppService>) -> Result<TaskDetail, ApiError> {
+    service.allow_bash(wp_id, &rule)
+}
+
+/// Continue a finished run's AI session in a console window in the task's repo.
+#[tauri::command]
+pub fn open_resume(wp_id: u64, run_id: i64, service: State<'_, AppService>) -> Result<(), ApiError> {
+    service.open_resume(wp_id, run_id)
 }

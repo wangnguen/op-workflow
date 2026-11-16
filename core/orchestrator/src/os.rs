@@ -71,6 +71,54 @@ pub fn open_folder(dir: &Path) -> std::io::Result<()> {
     return Command::new("xdg-open").arg(dir).spawn().map(drop);
 }
 
+/// Open a console window in `dir` running `exe args…`, so the user can continue an AI session
+/// there. `args` must be flags and ids the app built (letters, digits, `-`, `_`, `.`); anything
+/// else is refused because it goes through `cmd.exe`. `env` is added (the git guard) and the
+/// API-key variables are dropped, as for every AI process the app starts.
+pub fn open_console(dir: &Path, exe: &Path, args: &[&str], env: &[(String, String)]) -> std::io::Result<()> {
+    let plain = |a: &&str| {
+        !a.is_empty()
+            && a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !args.iter().all(plain) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "tham số không hợp lệ",
+        ));
+    }
+    if !dir.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} không còn", dir.display()),
+        ));
+    }
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let mut cmd = Command::new("cmd.exe");
+        // cmd /k strips the outer quotes, runs "<exe>" <args> and keeps the window open after
+        cmd.raw_arg(format!("/k \"\"{}\" {}\"", exe.display(), args.join(" ")))
+            .creation_flags(CREATE_NEW_CONSOLE);
+        cmd
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = Command::new(exe);
+        cmd.args(args);
+        cmd
+    };
+    cmd.current_dir(dir);
+    for (k, _) in std::env::vars() {
+        if opw_agents::env::is_stripped(&k, opw_agents::env::Account::Subscription) {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    cmd.spawn().map(drop)
+}
+
 /// Explorer misreads a path with `/` in it (it opens Documents instead), so always hand it `\`.
 #[cfg(windows)]
 fn explorer_path(path: &Path) -> String {

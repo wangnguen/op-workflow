@@ -413,6 +413,326 @@
   color: color-mix(in srgb, var(--st-failed) 75%, var(--text));
 }
 
+/* the log folded under the Tiến trình timeline scrolls on its own */
+.task-log--folded {
+  height: auto;
+  max-height: 320px;
+  margin-top: 6px;
+}
+
+/* ---------- Tiến trình ---------- */
+
+.btn--xs {
+  height: 22px;
+  padding: 0 7px;
+  gap: 4px;
+  font-size: 11.5px;
+}
+.timeline {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tl-row {
+  display: grid;
+  grid-template-columns: 16px 40px minmax(0, 1fr);
+  column-gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.tl-icon {
+  display: inline-flex;
+  padding-top: 2px;
+}
+.tl-time {
+  padding-top: 1px;
+  font-size: 11.5px;
+}
+.tl-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.tl-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.tl-step {
+  font-weight: 600;
+}
+.tl-model {
+  font-size: 11.5px;
+}
+.tl-figures {
+  display: inline-flex;
+  gap: 10px;
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.tl-note {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.tl-note--failed {
+  color: color-mix(in srgb, var(--st-failed) 75%, var(--text));
+}
+.tl-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+}
+.tl-tokens {
+  margin-right: 6px;
+  font-size: 11.5px;
+}
+.tl-actions .tl-tokens:only-child {
+  margin: 0;
+}
+.tl-denied {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--st-waiting-soft);
+}
+.tl-denied-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--st-waiting);
+  font-size: 12px;
+  font-weight: 600;
+}
+.tl-denied-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.tl-call {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+/* the whole refused command, wrapped, never cut */
+.tl-call-input {
+  display: block;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tl-call-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+/* same height with or without the input, so allowing a rule moves nothing */
+.tl-rule {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+}
+.tl-rule-input {
+  flex: 1;
+  min-width: 0;
+  max-width: 360px;
+  font-size: 12px;
+}
+.tl-rule-text {
+  font-size: 12px;
+}
+.tl-log {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.tl-log .task-log {
+  align-self: stretch;
+}
+
+/* ---------- Chat ---------- */
+
+/* the chat list scrolls itself (it follows a live run), so the body does not */
+.task-body--chat {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.chat {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+.chat-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.chat-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.chat-run select {
+  height: 26px;
+  max-width: 320px;
+  font-size: 12px;
+}
+.chat-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--st-running);
+}
+.chat-head-gap {
+  flex: 1;
+}
+.chat-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding-right: 4px;
+  overflow-y: auto;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+.chat-list.is-stale {
+  opacity: 0.45;
+}
+.chat-item summary,
+.chat-tool-out summary {
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+.chat-prompt .task-text {
+  max-height: 260px;
+  margin-top: 6px;
+  overflow-y: auto;
+}
+.chat-text {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+.chat-text .md {
+  overflow-wrap: anywhere;
+}
+.chat-thinking p {
+  margin: 6px 0 0;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.chat-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 0 4px 10px;
+  border-left: 2px solid var(--line-strong, var(--line));
+}
+.chat-tool.is-failed {
+  border-left-color: var(--st-failed);
+}
+.chat-tool.is-denied {
+  border-left-color: var(--st-waiting);
+}
+.chat-tool-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+.chat-tool-name {
+  font-weight: 600;
+}
+/* commands and paths wrap instead of being cut */
+.chat-tool-input {
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.chat-tool-why {
+  margin: 0;
+  color: var(--st-waiting);
+  font-size: 11.5px;
+}
+.chat-tool-peek {
+  display: inline-block;
+  max-width: 60ch;
+  margin-left: 8px;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.chat-tool-pre {
+  max-height: 280px;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+}
+.chat-end {
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--st-done-soft);
+  color: var(--st-done);
+  font-size: 12px;
+}
+.chat-end.is-failed {
+  background: var(--st-failed-soft);
+  color: var(--st-failed);
+}
+.chat-end p {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+}
+.chat-waiting {
+  margin: 0;
+  font-size: 12px;
+}
+.chip--failed {
+  color: var(--st-failed);
+  background: var(--st-failed-soft);
+}
+
 @media (max-width: 760px) {
   .task-steps {
     grid-template-columns: repeat(4, minmax(0, 1fr));

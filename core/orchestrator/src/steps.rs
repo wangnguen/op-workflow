@@ -155,6 +155,9 @@ mod tests {
             ended_at: Some(end.into()),
             model: model.map(str::to_owned),
             effort: None,
+            note: None,
+            log_file: None,
+            denials: None,
         }
     }
 

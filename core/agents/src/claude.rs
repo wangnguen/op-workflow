@@ -35,14 +35,55 @@ pub struct RunResult {
     /// Every input token the model read (fresh + cache writes + cache reads).
     pub tokens_in: u64,
     pub tokens_out: u64,
-    /// Tool calls refused because nobody could approve them (`--permission-prompts none`),
-    /// e.g. `Bash: npx jest`.
-    pub denials: Vec<String>,
+    /// Tool calls refused because nobody could approve them (`--permission-prompts none`).
+    pub denials: Vec<Denial>,
 }
 
 impl RunResult {
     pub fn over_budget(&self) -> bool {
         self.subtype.contains("budget")
+    }
+}
+
+/// One tool call the CLI refused: `Bash` + the whole command, or a tool + the file it wanted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Denial {
+    pub tool: String,
+    /// The whole command (all lines, up to [`DENIED_INPUT_MAX`] characters) or the path.
+    pub input: String,
+}
+
+impl Denial {
+    /// `Bash: npx jest` (first line only) for the log.
+    pub fn line(&self) -> String {
+        let input = short(&self.input, TOOL_DETAIL_MAX);
+        if input.is_empty() {
+            self.tool.clone()
+        } else {
+            format!("{}: {input}", self.tool)
+        }
+    }
+}
+
+/// Longest refused command kept whole (the allow-list suggestion needs all of it).
+pub const DENIED_INPUT_MAX: usize = 2000;
+
+/// The whole value of the first known input field (command, path, pattern, url), cut at `max`.
+pub fn tool_input(input: &Value, max: usize) -> String {
+    ["command", "file_path", "path", "pattern", "url", "description"]
+        .iter()
+        .find_map(|k| input.get(*k).and_then(Value::as_str))
+        .map(|s| cut(s.trim(), max))
+        .unwrap_or_default()
+}
+
+/// At most `max` characters on a char boundary, keeping every line; `…` marks a cut.
+pub fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_owned()
+    } else {
+        let kept: String = text.chars().take(max.saturating_sub(1)).collect();
+        format!("{kept}…")
     }
 }
 
@@ -148,12 +189,16 @@ pub fn parse_line(line: &str) -> AgentsResult<Vec<ClaudeEvent>> {
                 .and_then(Value::as_array)
                 .map(|a| {
                     a.iter()
-                        .map(|d| {
-                            let tool = d.get("tool_name").and_then(Value::as_str).unwrap_or("?");
-                            match d.get("tool_input").map(tool_detail) {
-                                Some(detail) if !detail.is_empty() => format!("{tool}: {detail}"),
-                                _ => tool.to_owned(),
-                            }
+                        .map(|d| Denial {
+                            tool: d
+                                .get("tool_name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("?")
+                                .to_owned(),
+                            input: d
+                                .get("tool_input")
+                                .map(|i| tool_input(i, DENIED_INPUT_MAX))
+                                .unwrap_or_default(),
                         })
                         .collect()
                 })
@@ -458,7 +503,14 @@ mod tests {
         assert_eq!(r.text, "done");
         assert_eq!(r.session_id, "s-1");
         assert_eq!((r.tokens_in, r.tokens_out, r.num_turns), (745, 90, 1));
-        assert_eq!(r.denials, ["Bash: npx jest"]);
+        assert_eq!(
+            r.denials,
+            [Denial {
+                tool: "Bash".into(),
+                input: "npx jest\nmore".into()
+            }]
+        );
+        assert_eq!(r.denials[0].line(), "Bash: npx jest");
         assert!(!r.over_budget());
         assert!((r.cost_usd - 0.001095).abs() < 1e-12);
         assert!(parse_line("not json").is_err());

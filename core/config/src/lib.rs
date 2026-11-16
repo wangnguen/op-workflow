@@ -353,6 +353,32 @@ pub fn remember_start(path: &Path, m: &StartMemory<'_>) -> ConfigResult<()> {
     })
 }
 
+/// Add `rule` to `repos.<repo>.allowBash` (the repo's key as written in config, else `repo`).
+/// Returns `false` when the rule was there already. Other keys stay untouched.
+pub fn add_allow_bash(path: &Path, repo: &str, rule: &str) -> ConfigResult<bool> {
+    let mut added = false;
+    edit_file(path, |root| {
+        let repos = object_at(root, "repos");
+        let key = repos
+            .keys()
+            .find(|k| same_path(k, repo))
+            .cloned()
+            .unwrap_or_else(|| repo.to_owned());
+        let entry = object_at(repos, &key);
+        let mut list: Vec<Value> = entry
+            .get("allowBash")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !list.iter().any(|v| v.as_str().is_some_and(|s| s.trim() == rule)) {
+            list.push(Value::String(rule.to_owned()));
+            added = true;
+        }
+        entry.insert("allowBash".into(), Value::Array(list));
+    })?;
+    Ok(added)
+}
+
 /// Same repo path, whatever the `~`, slash direction or (on Windows) letter case.
 pub fn same_path(a: &str, b: &str) -> bool {
     let norm = |p: &str| {
@@ -659,6 +685,25 @@ mod tests {
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.projects["Mobile App"].branch, None);
         assert_eq!(cfg.repos["~/code/app"].last_base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn allow_bash_rules_are_added_once_to_the_existing_repo_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"repos":{"~/code/web":{"lastBase":"main","allowBash":["npm run lint *"]}}}"#,
+        )
+        .unwrap();
+        assert!(add_allow_bash(&path, "~\\code\\web", "npx tsc *").unwrap());
+        assert!(!add_allow_bash(&path, "~/code/web/", "npx tsc *").unwrap());
+        assert!(add_allow_bash(&path, "~/code/api", "ls *").unwrap());
+        let cfg = Config::load(&path).unwrap();
+        let web = &cfg.repos["~/code/web"];
+        assert_eq!(web.allow_bash, ["npm run lint *", "npx tsc *"]);
+        assert_eq!(web.last_base.as_deref(), Some("main"));
+        assert_eq!(cfg.repos["~/code/api"].allow_bash, ["ls *"]);
     }
 
     #[test]

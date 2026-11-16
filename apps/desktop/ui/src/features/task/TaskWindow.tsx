@@ -10,19 +10,22 @@ import {
 } from "../../i18n/vi";
 import {
   POLL_MS,
+  allowBash,
   decideFinding,
   errorMessage,
   flowAction,
   getTaskDetail,
   isMockMode,
   openLogin,
+  openResume,
   openTaskFolder,
   saveBrief,
 } from "../../ipc/client";
 import type { Decision, FindingView, FlowAction, TaskDetail } from "../../ipc/types";
 import { copyText } from "../../shared/clipboard";
-import { formatClock, formatDuration, formatUsd } from "../../shared/format";
+import { formatDuration, formatUsd } from "../../shared/format";
 import { usePolling, useNow } from "../../shared/hooks";
+import { ChatTab } from "./ChatTab";
 import { CommentsTab } from "./CommentsTab";
 import { CopyPush } from "./CopyPush";
 import { DiffTab } from "./DiffTab";
@@ -31,6 +34,8 @@ import { modelText } from "../../shared/models";
 import { Icon } from "../../shared/ui/Icon";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
+import { ProgressTab } from "./ProgressTab";
+import { lastEnded } from "./runs";
 import {
   defaultTab,
   findingCounts,
@@ -66,6 +71,8 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  /** run shown in the Chat tab (undefined = the running or latest one) */
+  const [chatRunId, setChatRunId] = useState<number>();
 
   // whichever is newer: the poll, or the answer of the last button
   useEffect(() => {
@@ -93,16 +100,21 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const run = (label: string, call: () => Promise<TaskDetail | null>) => {
+  /** Resolves to whether the call worked (its error is shown above the tabs). */
+  const run = (label: string, call: () => Promise<TaskDetail | null>): Promise<boolean> => {
     setBusy(label);
     setError(undefined);
-    call()
+    return call()
       .then((next) => {
         if (next) setLatest(next);
         onChanged();
         polled.refresh();
+        return true;
       })
-      .catch((e: unknown) => setError(errorMessage(e)))
+      .catch((e: unknown) => {
+        setError(errorMessage(e));
+        return false;
+      })
       .finally(() => setBusy(undefined));
   };
   const act = (action: FlowAction) => run(action.type, () => flowAction(wpId, action));
@@ -114,17 +126,24 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
   }, [refresh, onChanged]);
   const decide = (f: FindingView, decision: Decision, reason?: string) =>
     run(`decide:${f.fingerprint}`, () => decideFinding({ wpId, fingerprint: f.fingerprint, decision, reason }));
+  const allow = (rule: string) => run("allow", () => allowBash(wpId, rule));
+  const resume = (runId: number) => run("resume", () => openResume(wpId, runId));
+  const showChat = (runId: number) => {
+    setChatRunId(runId);
+    setTab("chat");
+  };
 
   const counts = d ? findingCounts(d.findings) : { open: 0, fix: 0 };
   const fresh = d?.newComments ?? 0;
   const tabs = [
+    { value: "progress" as const, label: t.tabs.progress },
+    { value: "chat" as const, label: t.tabs.chat },
     { value: "brief" as const, label: t.tabs.brief },
     { value: "comments" as const, label: t.tabs.comments, count: fresh > 0 ? fresh : undefined },
     { value: "plan" as const, label: t.tabs.plan },
     { value: "findings" as const, label: t.tabs.findings, count: counts.open > 0 ? counts.open : undefined },
     { value: "diff" as const, label: t.tabs.diff },
     { value: "push" as const, label: t.tabs.push },
-    { value: "log" as const, label: t.tabs.log },
   ];
 
   return (
@@ -194,13 +213,25 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
             <div className="task-tabs">
               <SegmentedControl
                 options={tabs}
-                value={tab ?? "brief"}
+                value={tab ?? "progress"}
                 onChange={setTab}
                 label={t.tabsLabel}
               />
               {isMockMode() && <small className="faint">{t.demoNote}</small>}
             </div>
-            <div className="task-body" key={tab}>
+            <div className={`task-body${tab === "chat" ? " task-body--chat" : ""}`} key={tab}>
+              {tab === "progress" && (
+                <ProgressTab
+                  detail={d}
+                  busy={busy}
+                  onChat={showChat}
+                  onAllow={allow}
+                  onResume={resume}
+                />
+              )}
+              {tab === "chat" && (
+                <ChatTab detail={d} runId={chatRunId} busy={busy} onPick={setChatRunId} onResume={resume} />
+              )}
               {tab === "brief" && (
                 <BriefTab
                   detail={d}
@@ -221,7 +252,6 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
               {tab === "findings" && <FindingsTab detail={d} busy={busy} onDecide={decide} onAction={act} />}
               {tab === "diff" && <DiffTab detail={d} />}
               {tab === "push" && <PushTab detail={d} busy={busy} onAction={act} />}
-              {tab === "log" && <LogTab detail={d} />}
             </div>
           </>
         )}
@@ -275,10 +305,16 @@ function StatusStrip({ detail: d, busy, onError, onAction, onLogin, onShow, onFe
   let tone = d.status as string;
 
   if (d.status === "ready" && d.current) {
+    const last = lastEnded(d.runs);
+    const said =
+      last?.note &&
+      (last.state === "failed"
+        ? t.progress.lastFailed(stepLabel[last.step], last.note)
+        : t.progress.lastDone(stepLabel[last.step], last.note));
     text = (
       <>
-        <strong>{t.ready(step)}</strong>
-        <span className="faint">{stepHint[d.current]}</span>
+        <strong title={stepHint[d.current]}>{t.ready(step)}</strong>
+        <span className="faint">{said || stepHint[d.current]}</span>
       </>
     );
     actions = (
@@ -731,33 +767,5 @@ function PushTab({ detail: d, busy, onAction }: { detail: TaskDetail; busy?: str
         </section>
       ))}
     </div>
-  );
-}
-
-function LogTab({ detail: d }: { detail: TaskDetail }) {
-  const box = useRef<HTMLOListElement>(null);
-  const stick = useRef(true);
-  useEffect(() => {
-    const el = box.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [d.log.length]);
-  if (d.log.length === 0) return <p className="dim">{t.logEmpty}</p>;
-  return (
-    <ol
-      className="task-log"
-      ref={box}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-      }}
-    >
-      {d.log.map((l, i) => (
-        <li key={`${l.at}-${i}`} className={`log-line log-line--${l.kind}`}>
-          <span className="mono faint">{formatClock(l.at)}</span>
-          <span className="log-step">{l.step ? stepLabel[l.step] : ""}</span>
-          <span className={l.kind === "tool" ? "mono" : undefined}>{l.text}</span>
-        </li>
-      ))}
-    </ol>
   );
 }

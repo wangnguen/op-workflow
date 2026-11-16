@@ -7,6 +7,7 @@ pub mod codex;
 pub mod env;
 pub mod run;
 pub mod text;
+pub mod transcript;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentsError {

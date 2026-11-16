@@ -634,6 +634,78 @@ export interface LogLine {
   text: string;
 }
 
+export type RunState = "running" | "done" | "failed";
+
+/** One run of a step, for the Tiến trình tab (oldest first). */
+export interface RunSummary {
+  id: number;
+  step: StepKind;
+  agent: AgentKind;
+  state: RunState;
+  startedAt: string;
+  endedAt?: string;
+  costUsd?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+  model?: string;
+  effort?: string;
+  /** cross-review round */
+  round?: number;
+  /** what the run produced in one line ("báo 3 lỗi (1 high, 2 medium)"), or why it failed */
+  note?: string;
+  /** tool calls the CLI refused (not on the allow list) */
+  denials: DeniedCall[];
+  /** the raw output is still on disk (the Chat tab can show it) */
+  hasChat: boolean;
+  /** command that continues the session in a terminal (`claude --resume <id>`) */
+  resume?: string;
+}
+
+/** A tool call the CLI refused, with the allow-list entries that would let it run. */
+export interface DeniedCall {
+  /** "Bash", "Edit", … */
+  tool: string;
+  /** the whole command (or the path) */
+  input: string;
+  /** several commands joined by &&, ; or |: every part has to be allowed */
+  chained: boolean;
+  /** "npx tsc *", … (empty when it is not a shell command) */
+  rules: RuleOption[];
+}
+
+export interface RuleOption {
+  rule: string;
+  /** already in the repo's allowBash */
+  allowed: boolean;
+}
+
+export type ChatKind = "prompt" | "text" | "thinking" | "tool" | "end" | "error";
+
+/** One item of the Chat tab. */
+export interface ChatItem {
+  kind: ChatKind;
+  /** the prompt, the message, the tool's input (command, path) or the error */
+  text: string;
+  tool?: string;
+  /** what the tool returned (cut) */
+  output?: string;
+  /** characters of the tool result left out */
+  outputCut?: number;
+  failed?: boolean;
+  /** why the CLI refused the call */
+  denied?: string;
+}
+
+/** The Chat tab: the transcript of one step run. */
+export interface ChatView {
+  run: RunSummary;
+  items: ChatItem[];
+  /** older items left out (very long runs) */
+  dropped: number;
+  /** the raw output is gone (logs are kept 14 days) */
+  missing: boolean;
+}
+
 /** Everything the task window shows. */
 export interface TaskDetail {
   wpId: number;
@@ -662,6 +734,8 @@ export interface TaskDetail {
   push?: PushView;
   /** newest last */
   log: LogLine[];
+  /** every run of every step, oldest first (the Tiến trình tab) */
+  runs: RunSummary[];
   costUsd: number;
   /** comments not seen in the Comment tab yet (OpenProject + last issue read) */
   newComments?: number;
@@ -730,6 +804,9 @@ export interface Commands {
   set_notify: SettingsView;
   set_step_choice: SettingsView;
   step_models: StepModels;
+  step_chat: ChatView;
+  allow_bash: TaskDetail;
+  open_resume: null;
 }
 
 export interface CommandArgs {
@@ -758,4 +835,7 @@ export interface CommandArgs {
   set_notify: { kind: NotifyKind; on: boolean };
   set_step_choice: { choice: StepChoiceRequest };
   step_models: { refresh: boolean };
+  step_chat: { wpId: number; runId?: number };
+  allow_bash: { wpId: number; rule: string };
+  open_resume: { wpId: number; runId: number };
 }
