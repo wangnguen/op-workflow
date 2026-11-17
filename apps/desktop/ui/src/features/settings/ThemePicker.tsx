@@ -56,22 +56,25 @@ function Group({ mode }: { mode: Mode }) {
       <p className="label">{mode === "dark" ? t.themeDark : t.themeLight}</p>
       <div className="tp-grid" role="radiogroup" aria-label={mode === "dark" ? t.themeDark : t.themeLight} onKeyDown={onKey}>
         {list.map((x) => {
+          // the theme remembered for this mode (keyboard focus starts there)
           const chosen = prefs[mode] === x.id;
+          // only the theme on screen is marked: one mark on the page, not one per mode
+          const shown = theme.id === x.id;
           return (
             <button
               key={x.id}
               type="button"
               role="radio"
-              aria-checked={chosen}
+              aria-checked={shown}
               tabIndex={chosen ? 0 : -1}
               data-theme-option={x.id}
-              className={`tp-card${chosen ? " is-on" : ""}${theme.id === x.id ? " is-shown" : ""}`}
+              className={`tp-card${shown ? " is-on" : ""}`}
               onClick={() => pick(x.id)}
             >
               <Preview theme={x} />
               <span className="tp-name">
                 <span>{x.name}</span>
-                {chosen && <Icon name="check" size={13} />}
+                {shown && <Icon name="check" size={13} />}
               </span>
               <span className="tp-desc">{x.description}</span>
             </button>

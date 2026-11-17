@@ -74,6 +74,7 @@ fn main() {
             flow_api::decide_finding,
             flow_api::save_brief,
             flow_api::open_task_folder,
+            flow_api::open_task_link,
             flow_api::task_comments,
             flow_api::refresh_brief_comments,
             flow_api::task_diff,

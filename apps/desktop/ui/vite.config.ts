@@ -7,6 +7,7 @@ export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   server: { port: 5173, strictPort: true },
-  build: { outDir: "dist", target: "es2022", sourcemap: false },
+  // one chunk read from disk by the Tauri window: size does not slow loading, so warn later
+  build: { outDir: "dist", target: "es2022", sourcemap: false, chunkSizeWarningLimit: 800 },
   test: { environment: "node", include: ["src/**/*.test.ts"] },
 });

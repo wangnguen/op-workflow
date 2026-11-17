@@ -31,9 +31,8 @@ describe("dropping a card on a column", () => {
     expect(kinds("awaitingPush", step("done", "pushSummary"))).toEqual(["pause", "continue", "none", "finish"]);
   });
 
-  it("carries a finished task on, but not straight back to Inbox", () => {
-    expect(kinds("done", step("done", "pushSummary"))).toEqual(["refuse", "continue", "continue", "none"]);
-    const r = dropRule({ column: "done" }, "inbox");
-    expect(r.kind === "refuse" && r.reason).toContain("kéo sang Đang làm");
+  it("carries a finished task on, or sends it back to Inbox", () => {
+    expect(kinds("done", step("done", "pushSummary"))).toEqual(["pause", "continue", "continue", "none"]);
+    expect(dropRule({ column: "done" }, "inbox")).toEqual({ kind: "pause" });
   });
 });

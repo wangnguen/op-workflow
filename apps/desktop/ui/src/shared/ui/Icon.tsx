@@ -20,6 +20,7 @@ const PATHS = {
   file: <path d="M7 3.5h7l4 4v13H7zM14 3.5v4h4M9.5 12.5h6M9.5 16h6" />,
   check: <path d="M5 12.5l4.5 4.5L19 7.5" />,
   chevron: <path d="M9.5 6l6 6-6 6" />,
+  external: <path d="M13.5 4.5h6v6M19.5 4.5l-8 8M17.5 14v5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h5" />,
   pause: <path d="M9 6.5v11M15 6.5v11" />,
   play: <path d="M8.5 6v12l9.5-6z" />,
   dot: <circle cx={12} cy={12} r={3} />,

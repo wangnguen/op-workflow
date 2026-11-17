@@ -1,6 +1,6 @@
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/core";
 import { agentLabel, stepHint, stepLabel, stepStateLabel, vi } from "../../i18n/vi";
-import { getTaskDetail } from "../../ipc/client";
+import { errorMessage, getTaskDetail, openTaskLink } from "../../ipc/client";
 import type { FlowAction, IssueStatus, Provider, PushCheck, TaskCard } from "../../ipc/types";
 import { CopyPush } from "../task/CopyPush";
 import type { TaskTab } from "../task/taskTabs";
@@ -10,7 +10,14 @@ import { Icon } from "../../shared/ui/Icon";
 import { StatusChip } from "../../shared/ui/StatusChip";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
 
-interface Props {
+/** What dnd-kit puts on a card that can be dragged (the card is its own handle). */
+export interface CardDrag {
+  ref: (el: HTMLElement | null) => void;
+  attributes: DraggableAttributes;
+  listeners: DraggableSyntheticListeners;
+}
+
+export interface TaskCardProps {
   card: TaskCard;
   onStart: (card: TaskCard) => void;
   onPause: (card: TaskCard) => void;
@@ -31,9 +38,11 @@ interface Props {
   onFinish: (card: TaskCard) => void;
   /** "Làm tiếp" on a finished task */
   onContinue: (card: TaskCard) => void;
-  /** press on the card body: may become a drag to another column */
-  onDragStart?: (e: ReactPointerEvent<HTMLElement>, card: TaskCard) => void;
-  /** this card is being dragged (its ghost follows the pointer) */
+  /** "N comment mới" on an Inbox card: show the comments without starting the task */
+  onPeekComments?: (card: TaskCard) => void;
+  /** the card can be dragged to another column (absent on the copy that follows the pointer) */
+  drag?: CardDrag;
+  /** this card is being dragged (its copy follows the pointer) */
   dragging?: boolean;
 }
 
@@ -56,7 +65,7 @@ const beforeAnalyze = (card: TaskCard) =>
   (card.step?.kind === "intake" && card.step.state === "done") ||
   (card.step?.kind === "analyze" && card.step.state === "pending");
 
-function primaryAction(props: Props) {
+function primaryAction(props: TaskCardProps) {
   const { card, onStart, onPause, onBrief, onIssues, readingIssues, onOpen, onFlow, onLogin, onError, onFinish, onContinue } = props;
   if (card.column === "inbox") {
     return (
@@ -255,15 +264,17 @@ function PushLine({ check }: { check: PushCheck }) {
   );
 }
 
-export function TaskCardView(props: Props) {
-  const { card, onDragStart, dragging } = props;
+export function TaskCardView(props: TaskCardProps) {
+  const { card, drag, dragging } = props;
   const step = card.step;
   const waiting = step?.state === "waitingUser";
   const done = card.column === "done";
   return (
     <article
+      ref={drag?.ref}
+      {...drag?.attributes}
+      {...drag?.listeners}
       className={`card card--${card.column}${waiting ? " card--waiting" : ""}${dragging ? " is-drag-source" : ""}`}
-      onPointerDown={onDragStart && ((e) => onDragStart(e, card))}
     >
       <span className="card-bar" aria-hidden="true" />
       <header className="card-top">
@@ -273,9 +284,29 @@ export function TaskCardView(props: Props) {
         <span className="card-heading">
           <h3 className="card-title">{card.title}</h3>
           <span className="card-sub">
-            <span className="mono">{card.id}</span>
+            <button
+              type="button"
+              className="link-btn mono card-id"
+              title={vi.flow.comments.openTaskHint}
+              onClick={() => openTaskLink(card.wpId).catch((e: unknown) => props.onError?.(errorMessage(e)))}
+            >
+              {card.id}
+            </button>
             <span className="card-sub-sep">·</span>
             <span className="card-project">{card.project}</span>
+            {card.priority?.color ? (
+              <StatusChip
+                name={card.priority.name}
+                color={card.priority.color}
+                className="card-prio"
+                title={b.priorityHint(card.priority.name)}
+              />
+            ) : card.priority ? (
+              // no colour on OpenProject: plain, as OpenProject shows it
+              <span className="chip card-prio" title={b.priorityHint(card.priority.name)}>
+                {card.priority.name}
+              </span>
+            ) : null}
           </span>
         </span>
         <StatusChip
@@ -347,6 +378,10 @@ export function TaskCardView(props: Props) {
       <footer className="card-foot">
         {card.newComments > 0 && card.column !== "inbox" ? (
           <button className="badge" title={vi.flow.comments.openHint} onClick={() => props.onOpen(card, "comments")}>
+            {b.newComments(card.newComments)}
+          </button>
+        ) : card.newComments > 0 && props.onPeekComments ? (
+          <button className="badge" title={b.peek.hint} onClick={() => props.onPeekComments?.(card)}>
             {b.newComments(card.newComments)}
           </button>
         ) : card.newComments > 0 ? (

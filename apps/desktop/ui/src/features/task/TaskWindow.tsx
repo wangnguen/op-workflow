@@ -19,6 +19,7 @@ import {
   openLogin,
   openResume,
   openTaskFolder,
+  openTaskLink,
   saveBrief,
 } from "../../ipc/client";
 import type { Decision, FindingView, FlowAction, TaskDetail } from "../../ipc/types";
@@ -162,7 +163,15 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
             <h2 id="task-title">{d?.title ?? "…"}</h2>
             {d && (
               <p title={[d.taskId, d.project, d.branch, d.base].filter(Boolean).join(" · ")}>
-                <span className="mono">{d.taskId}</span> · {d.project}
+                <button
+                  type="button"
+                  className="link-btn mono"
+                  title={vi.flow.comments.openTaskHint}
+                  onClick={() => openTaskLink(d.wpId).catch((e: unknown) => setError(errorMessage(e)))}
+                >
+                  {d.taskId}
+                </button>{" "}
+                · {d.project}
                 {d.branch && (
                   <>
                     {" · "}

@@ -38,6 +38,9 @@ pub struct WorkPackage {
     /// `updatedAt`: changes with any edit (a comment, the status, …), so the app only reloads
     /// comments of tasks whose value moved.
     pub updated_at: String,
+    /// Priority name as OpenProject shows it (`_links.priority.title`, e.g. `High`); empty when
+    /// the response has none.
+    pub priority: String,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +64,7 @@ struct RawFormattable {
 struct RawLinks {
     status: RawLink,
     project: RawLink,
+    priority: Option<RawLink>,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +82,7 @@ pub fn parse_work_package(v: &Value) -> TrackerResult<WorkPackage> {
         project: raw.links.project.title.unwrap_or_default(),
         description: raw.description.and_then(|d| d.raw).unwrap_or_default(),
         updated_at: raw.updated_at.unwrap_or_default(),
+        priority: raw.links.priority.and_then(|p| p.title).unwrap_or_default(),
     })
 }
 
@@ -98,6 +103,50 @@ pub struct Comment {
     pub raw: String,
     /// Name of the writer, for the Comment tab only (the brief leaves it out).
     pub author: Option<String>,
+    /// OpenProject user id of the writer (from `_links.user.href`), to tell the user's own
+    /// comments from other people's.
+    pub author_id: Option<u64>,
+    /// The activity's number on its work package (`version`), for the `#activity-N` link.
+    pub version: Option<u64>,
+}
+
+impl Comment {
+    /// Written by the user `me` (the token owner). Unknown on either side → not theirs, so a
+    /// comment is never hidden from the alerts by mistake.
+    pub fn is_by(&self, me: Option<u64>) -> bool {
+        me.is_some() && self.author_id == me
+    }
+}
+
+/// The token owner (`GET /api/v3/users/me`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Me {
+    pub id: u64,
+    pub name: String,
+}
+
+pub fn parse_me(v: &Value) -> TrackerResult<Me> {
+    let id = v
+        .get("id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| TrackerError::Shape("users/me without id".into()))?;
+    let name = v
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| TrackerError::Shape("users/me without name".into()))?;
+    Ok(Me {
+        id,
+        name: name.to_owned(),
+    })
+}
+
+/// `/api/v3/users/9` → 9.
+fn user_id(href: &str) -> Option<u64> {
+    href.rsplit_once("/api/v3/users/")?
+        .1
+        .trim_end_matches('/')
+        .parse()
+        .ok()
 }
 
 /// `GET /api/v3/work_packages/{id}/activities` → only activities that carry a comment.
@@ -120,6 +169,11 @@ pub fn comments_from_activities(v: &Value) -> Vec<Comment> {
                     .pointer("/_links/user/title")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                author_id: a
+                    .pointer("/_links/user/href")
+                    .and_then(Value::as_str)
+                    .and_then(user_id),
+                version: a.get("version").and_then(Value::as_u64),
             })
         })
         .collect()
@@ -219,8 +273,8 @@ pub fn extract_issue_links(text: &str) -> Vec<IssueLink> {
     out
 }
 
-/// `GET /api/v3/statuses` → (status name, `#rrggbb` colour) as set by the OpenProject admin.
-/// Statuses without a colour are left out.
+/// `GET /api/v3/statuses` (or `/priorities`) → (name, `#rrggbb` colour) as set by the
+/// OpenProject admin. Entries without a colour are left out.
 pub fn parse_status_colors(v: &Value) -> Vec<(String, String)> {
     v.pointer("/_embedded/elements")
         .and_then(Value::as_array)
@@ -300,17 +354,49 @@ mod tests {
                        "project": {"href": "/api/v3/projects/208", "title": "Web Platform"}}});
         let parsed = parse_work_package_collection(&json!({"_embedded": {"elements": [wp]}})).unwrap();
         assert_eq!(parsed[0].status, "Open");
+        assert_eq!(parsed[0].priority, "");
+        let with_priority = json!({"id": 1, "subject": "S", "lockVersion": 0,
+            "_links": {"status": {"title": "Open"}, "project": {"title": "P"},
+                       "priority": {"href": "/api/v3/priorities/9", "title": "Immediate"}}});
+        assert_eq!(parse_work_package(&with_priority).unwrap().priority, "Immediate");
         assert_eq!(parsed[0].updated_at, "");
         assert_eq!(parsed[0].lock_version, 3);
 
         let acts = json!({"_embedded": {"elements": [
             {"id": 1, "createdAt": "2026-11-12T01:00:00Z", "comment": {"raw": ""}},
-            {"id": 2, "createdAt": "2026-11-12T02:00:00Z", "comment": {"raw": " Lỗi khi lưu "},
+            {"id": 2, "version": 4, "createdAt": "2026-11-12T02:00:00Z", "comment": {"raw": " Lỗi khi lưu "},
              "_links": {"user": {"href": "/api/v3/users/9", "title": "Tester A"}}}]}});
         let comments = comments_from_activities(&acts);
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].raw, "Lỗi khi lưu");
         assert_eq!(comments[0].author.as_deref(), Some("Tester A"));
+        assert_eq!(comments[0].author_id, Some(9));
+        assert_eq!(comments[0].version, Some(4));
+        assert!(comments[0].is_by(Some(9)));
+        assert!(!comments[0].is_by(Some(10)) && !comments[0].is_by(None));
+    }
+
+    #[test]
+    fn me_and_user_ids() {
+        let me = parse_me(&json!({"_type": "User", "id": 9, "name": "Dev C", "login": "devc"})).unwrap();
+        assert_eq!(
+            me,
+            Me {
+                id: 9,
+                name: "Dev C".into()
+            }
+        );
+        assert!(parse_me(&json!({"name": "x"})).is_err());
+        assert_eq!(user_id("/api/v3/users/9"), Some(9));
+        assert_eq!(user_id("https://op.example.com/api/v3/users/12"), Some(12));
+        assert_eq!(user_id("/api/v3/users/me"), None);
+        assert_eq!(user_id("/api/v3/groups/3"), None);
+        // a comment without a user link (system) is nobody's
+        let acts = json!({"_embedded": {"elements": [
+            {"id": 1, "createdAt": "x", "comment": {"raw": "auto"}}]}});
+        let c = &comments_from_activities(&acts)[0];
+        assert_eq!(c.author_id, None);
+        assert!(!c.is_by(Some(9)));
     }
 
     #[test]

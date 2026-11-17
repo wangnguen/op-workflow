@@ -53,6 +53,13 @@
   flex: none;
   gap: 8px;
 }
+/* The comment box of an Inbox card: wider, the list scrolls inside. */
+.flow-sheet.peek-sheet {
+  width: min(640px, calc(100vw - 32px));
+}
+.peek-body {
+  gap: 10px;
+}
 .sheet-foot.flow-foot {
   justify-content: flex-end;
 }

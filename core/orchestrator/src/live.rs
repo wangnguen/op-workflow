@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 
 use opw_agents::cli;
 use opw_agents::env::{Account, is_stripped};
+use opw_domain::view::PriorityView;
 use opw_domain::view::{LinkStatus, Provider, ProviderLink, QuotaSnapshot};
-use opw_tracker::{Comment, HttpTracker, TrackerApi, WorkPackage};
+use opw_tracker::{Comment, HttpTracker, Me, TrackerApi, WorkPackage};
 use serde_json::{Value, json};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(20);
@@ -37,12 +38,17 @@ pub struct LiveState {
     pub base_url: String,
     pub token: Option<String>,
     pub nx_user: Option<String>,
+    /// OpenProject id of the token owner: comments with this author are the user's own (no
+    /// "cần xem", no bell). `None` until `users/me` answers.
+    pub nx_user_id: Option<u64>,
     /// `None` until the first successful fetch.
     pub tasks: Option<Vec<WorkPackage>>,
     pub last_sync: Option<String>,
     pub tasks_error: Option<String>,
     /// OpenProject status name → `#rrggbb`, refreshed with the inbox.
     pub status_colors: Vec<(String, String)>,
+    /// Priority name → `#rrggbb`, refreshed with the inbox (when the server gives colours).
+    pub priority_colors: Vec<(String, String)>,
     /// Comments of the inbox tasks (work package id → comments, oldest first).
     pub comments: HashMap<u64, Vec<Comment>>,
     pub claude: Option<QuotaSnapshot>,
@@ -58,6 +64,19 @@ impl LiveState {
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(status))
             .map(|(_, c)| c.clone())
+    }
+
+    /// A task's priority as OpenProject shows it (`None` when it has no name).
+    pub fn priority(&self, name: &str) -> Option<PriorityView> {
+        let name = name.trim();
+        (!name.is_empty()).then(|| PriorityView {
+            name: name.to_owned(),
+            color: self
+                .priority_colors
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, c)| c.clone()),
+        })
     }
 
     pub fn links(&self) -> Vec<ProviderLink> {
@@ -191,11 +210,12 @@ impl Live {
     }
 
     /// Use a token that the caller has already checked with `HttpTracker::me`.
-    pub fn set_token(&self, base_url: String, token: String, user: String) {
+    pub fn set_token(&self, base_url: String, token: String, user: Me) {
         if let Ok(mut s) = self.state.lock() {
             s.base_url = base_url;
             s.token = Some(token);
-            s.nx_user = Some(user);
+            s.nx_user = Some(user.name);
+            s.nx_user_id = Some(user.id);
             s.tasks = None;
             s.tasks_error = None;
             s.comments.clear();
@@ -207,6 +227,7 @@ impl Live {
         if let Ok(mut s) = self.state.lock() {
             s.token = None;
             s.nx_user = None;
+            s.nx_user_id = None;
             s.tasks = None;
             s.tasks_error = None;
             s.last_sync = None;
@@ -391,13 +412,14 @@ fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver
     loop {
         let (base_url, token, need_user) = state
             .lock()
-            .map(|s| (s.base_url.clone(), s.token.clone(), s.nx_user.is_none()))
+            .map(|s| (s.base_url.clone(), s.token.clone(), s.nx_user_id.is_none()))
             .unwrap_or_default();
         if let Some(token) = token.filter(|_| !base_url.is_empty()) {
             let tracker = HttpTracker::new(&base_url, &token);
             let user = need_user.then(|| tracker.me().ok()).flatten();
             let result = tracker.inbox();
             let colors = tracker.status_colors().ok().filter(|c| !c.is_empty());
+            let priority_colors = tracker.priority_colors().ok().filter(|c| !c.is_empty());
             let cached: Vec<u64> = state
                 .lock()
                 .map(|s| s.comments.keys().copied().collect())
@@ -411,11 +433,15 @@ fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver
                 if s.token.as_deref() != Some(token.as_str()) {
                     return;
                 }
-                if user.is_some() {
-                    s.nx_user = user;
+                if let Some(me) = user {
+                    s.nx_user = Some(me.name);
+                    s.nx_user_id = Some(me.id);
                 }
                 if let Some(colors) = colors {
                     s.status_colors = colors;
+                }
+                if let Some(colors) = priority_colors {
+                    s.priority_colors = colors;
                 }
                 match result {
                     Ok(tasks) => {
@@ -736,6 +762,21 @@ mod tests {
         assert!(err.starts_with("Codex chưa đăng nhập"), "{err}");
         // one problem, one line
         assert!(!err.contains('\n'));
+    }
+
+    #[test]
+    fn priority_is_the_openproject_name_and_colour() {
+        let s = LiveState {
+            priority_colors: vec![("High".into(), "#ff922b".into())],
+            ..LiveState::default()
+        };
+        let high = s.priority("high").unwrap();
+        assert_eq!(
+            (high.name.as_str(), high.color.as_deref()),
+            ("high", Some("#ff922b"))
+        );
+        assert_eq!(s.priority("Normal").unwrap().color, None);
+        assert!(s.priority(" ").is_none());
     }
 
     #[test]

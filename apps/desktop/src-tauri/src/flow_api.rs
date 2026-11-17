@@ -68,6 +68,17 @@ pub fn open_task_folder(wp_id: u64, service: State<'_, AppService>) -> Result<()
     service.open_task_folder(wp_id)
 }
 
+/// Open the task on OpenProject (no `url`), a comment on it, or the task's GitHub issue in the
+/// browser (links of this task only).
+#[tauri::command]
+pub fn open_task_link(
+    wp_id: u64,
+    url: Option<String>,
+    service: State<'_, AppService>,
+) -> Result<(), ApiError> {
+    service.open_task_link(wp_id, url.as_deref())
+}
+
 /// The Chat tab: the transcript of one step run (`run_id` absent = the latest).
 #[tauri::command(async)]
 pub fn step_chat(

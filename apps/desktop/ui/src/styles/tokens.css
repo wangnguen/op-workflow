@@ -72,6 +72,9 @@
   --glow-a: rgba(80, 60, 160, 0.16);
   --glow-b: rgba(240, 130, 70, 0.08);
 
+  /* dialogs: the same gap above and below, so a tall one uses the window evenly */
+  --sheet-gap: max(16px, 3vh);
+
   /* motion */
   --dur-press: 100ms;
   --dur-fast: 150ms;

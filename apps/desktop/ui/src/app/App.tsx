@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { POLL_MS, getAppInfo, getBoard, getOrbit, getUpdateStatus, isMockMode, openReleasePage } from "../ipc/client";
+import { CommentsPeek } from "../features/board/CommentsPeek";
 import { TaskBoard } from "../features/board/TaskBoard";
 import { SessionsView } from "../features/sessions/SessionsView";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
@@ -20,6 +21,8 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // a task opened from the bell
   const [opened, setOpened] = useState<{ wpId: number; tab?: TaskTab }>();
+  // the comments of an Inbox task, opened from the bell (it has no task window yet)
+  const [peeking, setPeeking] = useState<{ wpId: number; taskId: string; title: string }>();
   const board = usePolling(getBoard, POLL_MS);
   const orbit = usePolling(getOrbit, POLL_MS);
   const info = usePolling(getAppInfo, INFO_POLL_MS);
@@ -46,9 +49,12 @@ export function App() {
         unreadAlerts={board.data?.unreadAlerts ?? 0}
         onOpenTask={(wpId, tab) => {
           const known = board.data?.tasks.find((c) => c.wpId === wpId);
-          // inbox tasks have no task window yet: show the board instead
           if (known && known.column !== "inbox") setOpened({ wpId, tab: asTab(tab) });
-          else setTab("task");
+          else {
+            // inbox tasks have no task window yet: the board, with the task's comments on top
+            setTab("task");
+            if (known) setPeeking({ wpId, taskId: known.id, title: known.title });
+          }
         }}
         update={update.data}
         onRefresh={refreshAll}
@@ -69,6 +75,15 @@ export function App() {
       </main>
       {opened && (
         <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={refreshAll} />
+      )}
+      {peeking && (
+        <CommentsPeek
+          wpId={peeking.wpId}
+          taskId={peeking.taskId}
+          title={peeking.title}
+          onClose={() => setPeeking(undefined)}
+          onChanged={refreshAll}
+        />
       )}
       {settingsOpen && (
         <SettingsDialog

@@ -222,6 +222,7 @@ impl AppService {
             finished_at: None,
             push_check: None,
             nx_open: false,
+            priority: state.priority(&wp.priority),
         }
     }
 
@@ -275,6 +276,7 @@ impl AppService {
                         finished_at: None,
                         push_check: None,
                         nx_open: false,
+                        priority: None,
                     });
                     tasks.len() - 1
                 }
@@ -303,6 +305,8 @@ impl AppService {
                 }
             }
         }
+        let parked = self.parked_cards(&tasks);
+        tasks.extend(parked);
         tasks.extend(self.done_cards(&state, &config));
         self.fill_new_comments(&mut tasks, &state);
         let notice = self.inbox_notice(&state);
@@ -322,6 +326,47 @@ impl AppService {
             tasks_dir_offer: self.tasks_dir_offer(),
             unread_alerts: self.alerts.unread(),
         }
+    }
+
+    /// Tasks the user moved back to Inbox (paused, or dragged out of "Đã xong") that OpenProject
+    /// no longer lists as open and assigned: they stay on the board instead of vanishing, and
+    /// "Bắt đầu" works from the saved task.
+    fn parked_cards(&self, shown: &[TaskCard]) -> Vec<TaskCard> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        let rows = store
+            .lock()
+            .ok()
+            .and_then(|s| s.tasks_in(COLUMN_INBOX, DONE_SHOWN).ok())
+            .unwrap_or_default();
+        rows.into_iter()
+            .filter(|row| !shown.iter().any(|c| c.wp_id == row.wp_id))
+            .map(|row| TaskCard {
+                id: row.display_id.clone(),
+                wp_id: row.wp_id,
+                title: row.title.clone(),
+                project: row.project.clone(),
+                repo: row.repo.as_deref().map(repo_name),
+                branch: row.branch.clone(),
+                nx_status: "—".into(),
+                nx_status_color: None,
+                column: TaskColumn::Inbox,
+                step: None,
+                agent: None,
+                cost_usd: None,
+                context_pct: None,
+                new_comments: 0,
+                gate: None,
+                flow_note: None,
+                login: None,
+                issues: None,
+                finished_at: None,
+                push_check: None,
+                nx_open: false,
+                priority: None,
+            })
+            .collect()
     }
 
     /// The "Đã xong" column: tasks the user marked done, with the push check made then, and a
@@ -365,6 +410,7 @@ impl AppService {
                     finished_at: Some(row.updated_at.clone()),
                     push_check: store.lock().ok().and_then(|s| pushcheck::last(&s, row.wp_id)),
                     nx_open: open.is_some(),
+                    priority: open.and_then(|wp| state.priority(&wp.priority)),
                 };
                 if let (Some(flow), Some(ctx)) = (&self.flow, self.ctx_for(row, config)) {
                     if let Some(f) = flow.card(&ctx) {
@@ -386,7 +432,7 @@ impl AppService {
         };
         for card in cards {
             let cached = state.comments.get(&card.wp_id).map(Vec::as_slice);
-            card.new_comments = comments::new_count(&store, card.wp_id, cached);
+            card.new_comments = comments::new_count(&store, card.wp_id, cached, state.nx_user_id);
             card.issues = issues::status(&store, card.wp_id);
         }
     }
@@ -397,7 +443,9 @@ impl AppService {
         self.store
             .as_ref()
             .and_then(|s| s.lock().ok())
-            .map_or(0, |store| comments::new_count(&store, wp_id, cached))
+            .map_or(0, |store| {
+                comments::new_count(&store, wp_id, cached, state.nx_user_id)
+            })
     }
 
     pub fn orbit_snapshot(&self) -> OrbitSnapshot {
@@ -520,6 +568,7 @@ impl AppService {
                 project: row.project,
                 description: String::new(),
                 updated_at: String::new(),
+                priority: String::new(),
             })
         })
     }
@@ -642,8 +691,9 @@ impl AppService {
         Ok(result)
     }
 
-    /// Move the active task back to the Inbox. The branch and brief stay; the next start
-    /// pre-fills them.
+    /// Move a task back to the Inbox: an active one (Tạm dừng) or a finished one (dragged out
+    /// of "Đã xong"). The branch, brief and history stay; the next start pre-fills them, reads
+    /// the brief again and, for a finished task, runs a new round on the same branch.
     pub fn pause_task(&self, wp_id: u64) -> Result<(), ApiError> {
         let store = self
             .store
@@ -781,6 +831,37 @@ impl AppService {
         std::fs::write(&file, text)
             .map_err(|e| ApiError::new("brief.write", format!("Không ghi được brief: {e}")))?;
         Ok(self.with_counts(flow.detail(&ctx)))
+    }
+
+    /// Open a page of this task in the default browser: the work package on OpenProject (no
+    /// `url`: the task itself; else a comment on it) or one of its GitHub issues. Only links the
+    /// app itself built for this task are opened.
+    pub fn open_task_link(&self, wp_id: u64, url: Option<&str>) -> Result<(), ApiError> {
+        let state = self.live_state().unwrap_or_default();
+        let task_url = nx_task_url(&state, wp_id);
+        let url = match (url, &task_url) {
+            (Some(u), _) => u.to_owned(),
+            (None, Some(t)) => t.clone(),
+            (None, None) => {
+                return Err(ApiError::new(
+                    "link.noUrl",
+                    "Chưa có URL OpenProject: nhập ở Cài đặt → OpenProject",
+                ));
+            }
+        };
+        let issues = self
+            .store
+            .as_ref()
+            .and_then(|s| s.lock().ok())
+            .map(|s| comments::stored_issues(&s, wp_id))
+            .unwrap_or_default();
+        if !comments::is_task_link(&url, task_url.as_deref(), &issues) {
+            return Err(ApiError::new(
+                "link.refused",
+                "Link không thuộc task này nên app không mở",
+            ));
+        }
+        os::open_url(&url).map_err(|e| ApiError::new("open", e.to_string()))
     }
 
     /// Show the task folder (brief, plan, push summary) in Explorer.
@@ -989,27 +1070,34 @@ impl AppService {
 
     /// The Comment tab: OpenProject comments read now (network: off the UI thread) and the
     /// issues of the last "Lấy issue". `mark_seen`: the tab is open, so they count as seen.
+    /// Works for an Inbox task too (the comment box of its card): no brief yet, so no
+    /// "Cập nhật brief".
     pub fn task_comments(&self, wp_id: u64, mark_seen: bool) -> Result<CommentsView, ApiError> {
-        let (ctx, _) = self.task_ctx(wp_id)?;
+        let brief_file = match self.task_ctx(wp_id) {
+            Ok((ctx, _)) => Some(ctx.task_dir.join(flow::BRIEF_FILE)),
+            Err(_) if self.find_task(wp_id).is_some() => None,
+            Err(e) => return Err(e),
+        };
         let state = self.live_state().unwrap_or_default();
         let now = opw_quota::now_rfc3339();
         let (list, error) = match self.read_comments(wp_id, &state) {
             Ok(list) => (list, None),
             Err(e) => (state.comments.get(&wp_id).cloned().unwrap_or_default(), Some(e)),
         };
-        let brief = std::fs::read_to_string(ctx.task_dir.join(flow::BRIEF_FILE)).ok();
+        let brief = brief_file.and_then(|f| std::fs::read_to_string(f).ok());
         let store = self.store.as_ref().and_then(|s| s.lock().ok());
         let seen = store.as_ref().and_then(|s| comments::seen_id(s, wp_id));
         let (issues, issues_seen) = store.as_ref().map_or_else(Default::default, |s| {
             (comments::stored_issues(s, wp_id), comments::issues_seen(s, wp_id))
         });
+        let me = state.nx_user_id;
+        let task_url = nx_task_url(&state, wp_id);
         let view = CommentsView {
-            comments: comments::op_views(&list, seen),
-            task_url: (!state.base_url.is_empty())
-                .then(|| format!("{}/work_packages/{wp_id}", state.base_url.trim_end_matches('/'))),
+            comments: comments::op_views(&list, seen, me, task_url.as_deref()),
+            task_url,
             issues: comments::issue_threads(&issues, &issues_seen),
             issues_read_at: issues.iter().map(|i| i.read_at.clone()).max(),
-            brief_stale: error.is_none() && comments::brief_stale(brief.as_deref(), &list),
+            brief_stale: error.is_none() && comments::brief_stale(brief.as_deref(), &list, me),
             error,
             fetched_at: now.clone(),
         };
@@ -1119,8 +1207,11 @@ impl AppService {
                         let task_id = display_id(&config.tracker.task_prefix, wp.id);
                         let tab = started.contains(&wp.id).then(|| "comments".to_owned());
                         self.check_status(&store, wp, &task_id, tab.clone(), &now);
-                        if let Some(list) = state.comments.get(&wp.id) {
-                            self.check_comments(&store, wp, list, &task_id, tab, &now);
+                        // until `users/me` answers, the user's own comments cannot be told
+                        // apart: wait (the marks stay, so a later poll announces them)
+                        if let (Some(list), Some(me)) = (state.comments.get(&wp.id), state.nx_user_id) {
+                            let seen = TaskComments { list, me };
+                            self.check_comments(&store, wp, &seen, &task_id, tab, &now);
                         }
                     }
                 }
@@ -1143,15 +1234,17 @@ impl AppService {
         ids
     }
 
+    /// Ring the bell for other people's new comments; the user's own only move the mark.
     fn check_comments(
         &self,
         store: &Store,
         wp: &WorkPackage,
-        list: &[Comment],
+        seen: &TaskComments<'_>,
         task_id: &str,
         tab: Option<String>,
         now: &str,
     ) {
+        let list = seen.list;
         let Some(max) = comments::max_id(list) else { return };
         let notified: Option<u64> = store
             .kv_get(wp.id, comments::NOTIFIED, "")
@@ -1169,7 +1262,7 @@ impl AppService {
         if max <= notified {
             return;
         }
-        let fresh: Vec<&Comment> = list.iter().filter(|c| c.id > notified).collect();
+        let fresh = comments::to_announce(list, notified, Some(seen.me));
         if let Some(newest) = fresh.iter().max_by_key(|c| c.id) {
             let who = newest.author.as_deref().unwrap_or("OpenProject");
             self.alerts.push(
@@ -1545,8 +1638,20 @@ fn repo_name(path: &str) -> String {
         .to_owned()
 }
 
+/// `<OpenProject>/work_packages/<id>`, once the URL is set.
+fn nx_task_url(state: &LiveState, wp_id: u64) -> Option<String> {
+    (!state.base_url.is_empty())
+        .then(|| format!("{}/work_packages/{wp_id}", state.base_url.trim_end_matches('/')))
+}
+
 fn live_quota(state: &LiveState) -> Vec<QuotaSnapshot> {
     state.claude.iter().chain(state.codex.iter()).cloned().collect()
+}
+
+/// One task's cached OpenProject comments and the user's OpenProject id, for the bell.
+struct TaskComments<'a> {
+    list: &'a [Comment],
+    me: u64,
 }
 
 #[cfg(test)]
@@ -1683,6 +1788,24 @@ mod tests {
             println!("{color}  {name}");
         }
         assert!(!colors.is_empty());
+    }
+
+    /// Live, read-only: does the server give priorities a colour? Prints counts only.
+    /// `cargo test -p opw-orchestrator -- --ignored live_priority_colors --nocapture`
+    #[test]
+    #[ignore = "calls the real OpenProject"]
+    fn live_priority_colors() {
+        let config = Config::load(&opw_config::config_path().unwrap()).unwrap();
+        let token = secrets::get(&config.tracker.token).unwrap().expect("token saved");
+        let tracker = HttpTracker::new(&config.tracker.base_url, &token);
+        let colors = tracker.priority_colors().unwrap();
+        let tasks = tracker.inbox().unwrap();
+        let named = tasks.iter().filter(|t| !t.priority.is_empty()).count();
+        println!(
+            "priorities with a colour: {}; inbox tasks with a priority: {named}/{}",
+            colors.len(),
+            tasks.len()
+        );
     }
 
     #[test]

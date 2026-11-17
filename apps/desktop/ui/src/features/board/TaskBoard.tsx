@@ -1,15 +1,17 @@
+import { DndContext, DragOverlay, type Announcements, type UniqueIdentifier } from "@dnd-kit/core";
 import { useEffect, useRef, useState } from "react";
 import { stepLabel, vi } from "../../i18n/vi";
 import { errorMessage, flowAction, isMockMode, openBrief, openLogin, pauseTask, setTasksDir } from "../../ipc/client";
 import type { BoardSnapshot, TaskCard, TaskColumn } from "../../ipc/types";
 import { ContinueDialog } from "../task/ContinueDialog";
+import { CommentsPeek } from "./CommentsPeek";
 import { FinishDialog } from "../task/FinishDialog";
 import { TaskWindow } from "../task/TaskWindow";
 import type { TaskTab } from "../task/taskTabs";
 import { Icon } from "../../shared/ui/Icon";
 import { dropRule, type DropAction } from "./dropRule";
+import { DraggableCard, DropColumn, cardCollision, makeDropAnimation, useCardSensors, type DropEnd } from "./cardDnd";
 import { TaskCardView } from "./TaskCardView";
-import { useCardDrag } from "./useCardDrag";
 import { joined, useStartWork } from "./useStartWork";
 import "./board.css";
 
@@ -21,6 +23,7 @@ interface Props {
 }
 
 const b = vi.board;
+const noop = () => undefined;
 
 const COLUMNS: { key: TaskColumn; title: string; hint: string }[] = [
   { key: "inbox", title: b.inbox, hint: b.inboxHint },
@@ -56,6 +59,8 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
   const start = useStartWork({ tasks: board.tasks, onChanged });
   const [offerBusy, setOfferBusy] = useState(false);
   const [opened, setOpened] = useState<{ wpId: number; tab?: TaskTab }>();
+  // "N comment mới" on an Inbox card
+  const [peeking, setPeeking] = useState<TaskCard>();
   const [finishing, setFinishing] = useState<TaskCard>();
   const [continuing, setContinuing] = useState<{ card: TaskCard; to?: TaskColumn }>();
   const [doneOpen, setDoneOpen] = useState(readDoneOpen);
@@ -113,8 +118,38 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
         return;
     }
   };
-  const drag = useCardDrag(dropped, (reason) => say("warn", reason));
-  const dragged = drag.view ? board.tasks.find((t) => t.wpId === drag.view?.wpId) : undefined;
+  // ---------- drag and drop (dnd-kit) ----------
+  const sensors = useCardSensors();
+  const [drag, setDrag] = useState<{ wpId: number; over?: TaskColumn } | null>(null);
+  const dragged = drag ? board.tasks.find((t) => t.wpId === drag.wpId) : undefined;
+  // what the copy of the card does after the drop (read by the drop animation)
+  const pending = useRef<Promise<DropEnd>>(Promise.resolve("back"));
+  const [dropAnimation] = useState(() => makeDropAnimation(() => pending.current));
+  const endDrag = () => {
+    setDrag(null);
+    document.body.classList.remove("is-card-dragging");
+  };
+  /** Carry out a drop: refused or nowhere → back; a dialog → fade; pausing → wait for it. */
+  const settle = (card: TaskCard | undefined, to: TaskColumn | undefined): Promise<DropEnd> => {
+    if (!card || !to) return Promise.resolve("back");
+    const action = dropRule(card, to);
+    if (action.kind === "none") return Promise.resolve("back");
+    if (action.kind === "refuse") {
+      say("warn", action.reason);
+      return Promise.resolve("back");
+    }
+    const answer = dropped(card, to, action);
+    return answer ? answer.then((ok): DropEnd => (ok ? "fade" : "back"), (): DropEnd => "back") : Promise.resolve("fade");
+  };
+  const columnTitle = (id: UniqueIdentifier | undefined) => COLUMNS.find((c) => c.key === id)?.title ?? "";
+  const cardName = (id: UniqueIdentifier) => board.tasks.find((t) => t.wpId === id)?.id ?? String(id);
+  const announcements: Announcements = {
+    onDragStart: ({ active }) => b.drag.lifted(cardName(active.id)),
+    onDragOver: ({ active, over }) => (over ? b.drag.over(cardName(active.id), columnTitle(over.id)) : b.drag.outside),
+    onDragEnd: ({ active, over }) =>
+      over ? b.drag.dropped(cardName(active.id), columnTitle(over.id)) : b.drag.back(cardName(active.id)),
+    onDragCancel: ({ active }) => b.drag.back(cardName(active.id)),
+  };
 
   const chooseTasksDir = (dir?: string) => {
     setOfferBusy(true);
@@ -132,7 +167,7 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
   const dropClass = (col: TaskColumn): string => {
     if (!dragged || col === dragged.column) return "";
     const kind = dropRule(dragged, col).kind;
-    const over = drag.view?.over === col;
+    const over = drag?.over === col;
     if (kind === "refuse") return over ? " is-drop-no" : "";
     return over ? " is-drop-over" : " is-drop-ready";
   };
@@ -169,66 +204,101 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
         </div>
       )}
       {start.banner}
-      <div className={`board${doneOpen ? " is-done-open" : ""}${dragged ? " is-dragging" : ""}`}>
-        {COLUMNS.map((col) => {
-          const cards = board.tasks.filter((t) => t.column === col.key);
-          const folded = col.key === "done" && !doneOpen;
-          return (
-            <section
-              key={col.key}
-              data-column={col.key}
-              className={`column column--${col.key}${folded ? " is-folded" : ""}${dropClass(col.key)}`}
-              onClick={folded ? toggleDone : undefined}
-            >
-              <header className="column-head">
-                {/* the done column's title fades in again when it folds or opens */}
-                <h2 key={folded ? "folded" : "open"}>
-                  <span className="column-title">{col.title}</span> <span className="column-count">{cards.length}</span>
-                </h2>
-                {!folded && <span className="faint column-hint">{col.hint}</span>}
-                {col.key === "done" && (
-                  <button
-                    className="btn btn--ghost btn--icon btn--sm column-fold"
-                    title={doneOpen ? b.doneHide : b.doneShow}
-                    aria-label={doneOpen ? b.doneHide : b.doneShow}
-                    aria-expanded={doneOpen}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleDone();
-                    }}
-                  >
-                    <Icon name="chevron" size={14} />
-                  </button>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={cardCollision}
+        accessibility={{ announcements, screenReaderInstructions: { draggable: b.drag.instructions } }}
+        onDragStart={({ active }) => {
+          setDrag({ wpId: Number(active.id) });
+          document.body.classList.add("is-card-dragging");
+        }}
+        onDragOver={({ over }) => setDrag((d) => d && { ...d, over: over?.id as TaskColumn | undefined })}
+        onDragEnd={({ active, over }) => {
+          endDrag();
+          const card = board.tasks.find((t) => t.wpId === active.id);
+          pending.current = settle(card, over?.id as TaskColumn | undefined);
+        }}
+        onDragCancel={() => {
+          endDrag();
+          pending.current = Promise.resolve("back");
+        }}
+      >
+        <div className={`board${doneOpen ? " is-done-open" : ""}${dragged ? " is-dragging" : ""}`}>
+          {COLUMNS.map((col) => {
+            const cards = board.tasks.filter((t) => t.column === col.key);
+            const folded = col.key === "done" && !doneOpen;
+            return (
+              <DropColumn
+                key={col.key}
+                id={col.key}
+                className={`column column--${col.key}${folded ? " is-folded" : ""}${dropClass(col.key)}`}
+                onClick={folded ? toggleDone : undefined}
+              >
+                <header className="column-head">
+                  {/* the done column's title fades in again when it folds or opens */}
+                  <h2 key={folded ? "folded" : "open"}>
+                    <span className="column-title">{col.title}</span> <span className="column-count">{cards.length}</span>
+                  </h2>
+                  {!folded && <span className="faint column-hint">{col.hint}</span>}
+                  {col.key === "done" && (
+                    <button
+                      className="btn btn--ghost btn--icon btn--sm column-fold"
+                      title={doneOpen ? b.doneHide : b.doneShow}
+                      aria-label={doneOpen ? b.doneHide : b.doneShow}
+                      aria-expanded={doneOpen}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleDone();
+                      }}
+                    >
+                      <Icon name="chevron" size={14} />
+                    </button>
+                  )}
+                </header>
+                {!folded && (
+                  <div className="column-body">
+                    {cards.length === 0 && <div className="column-empty">{b.empty}</div>}
+                    {cards.map((card) => (
+                      <DraggableCard
+                        key={card.id}
+                        card={card}
+                        onStart={start.open}
+                        onPause={(c) => run(pauseTask(c.wpId))}
+                        onBrief={isMockMode() ? undefined : (c) => run(openBrief(c.wpId))}
+                        onIssues={start.readIssues}
+                        readingIssues={start.reading.has(card.wpId)}
+                        onOpen={(c, tab) => setOpened({ wpId: c.wpId, tab })}
+                        onFlow={(c, action) => run(flowAction(c.wpId, action))}
+                        onFinish={setFinishing}
+                        onContinue={(c) => setContinuing({ card: c })}
+                        onPeekComments={setPeeking}
+                        onLogin={(p) => run(openLogin(p))}
+                        onError={(text) => start.setFlash({ kind: "warn", text })}
+                      />
+                    ))}
+                  </div>
                 )}
-              </header>
-              {!folded && (
-                <div className="column-body">
-                  {cards.length === 0 && <div className="column-empty">{b.empty}</div>}
-                  {cards.map((card) => (
-                    <TaskCardView
-                      key={card.id}
-                      card={card}
-                      dragging={drag.view?.wpId === card.wpId}
-                      onDragStart={drag.begin}
-                      onStart={start.open}
-                      onPause={(c) => run(pauseTask(c.wpId))}
-                      onBrief={isMockMode() ? undefined : (c) => run(openBrief(c.wpId))}
-                      onIssues={start.readIssues}
-                      readingIssues={start.reading.has(card.wpId)}
-                      onOpen={(c, tab) => setOpened({ wpId: c.wpId, tab })}
-                      onFlow={(c, action) => run(flowAction(c.wpId, action))}
-                      onFinish={setFinishing}
-                      onContinue={(c) => setContinuing({ card: c })}
-                      onLogin={(p) => run(openLogin(p))}
-                      onError={(text) => start.setFlash({ kind: "warn", text })}
-                    />
-                  ))}
-                </div>
-              )}
-            </section>
-          );
-        })}
-      </div>
+              </DropColumn>
+            );
+          })}
+        </div>
+        <DragOverlay dropAnimation={dropAnimation} zIndex={70}>
+          {dragged && (
+            // a still copy: its buttons do nothing
+            <div className="card-lift" inert>
+              <TaskCardView
+                card={dragged}
+                onStart={noop}
+                onPause={noop}
+                onOpen={noop}
+                onFlow={noop}
+                onFinish={noop}
+                onContinue={noop}
+              />
+            </div>
+          )}
+        </DragOverlay>
+      </DndContext>
       <div
         className={`drop-toast${toast && !toast.hidden ? " is-shown" : ""}${toast?.kind === "warn" ? " drop-toast--warn" : ""}`}
         role="status"
@@ -270,6 +340,16 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
       )}
       {opened && (
         <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={onChanged} />
+      )}
+      {peeking && (
+        <CommentsPeek
+          wpId={peeking.wpId}
+          taskId={peeking.id}
+          title={peeking.title}
+          onClose={() => setPeeking(undefined)}
+          onChanged={onChanged}
+          onStart={() => start.open(peeking)}
+        />
       )}
     </div>
   );

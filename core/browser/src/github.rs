@@ -1,6 +1,8 @@
 //! Read GitHub issues (title, markdown body, comment bodies) from the issue page's embedded
 //! data. Authors, assignees, labels and the activity list are never collected, and `@mentions`
-//! in the text are blanked: the brief only needs what the issue says.
+//! in the text are blanked: the brief only needs what the issue says. The one thing kept about a
+//! comment's writer is GitHub's own `viewerDidAuthor` flag (written by the signed-in user or
+//! not), so the app can keep quiet about the user's own comments.
 
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -24,6 +26,8 @@ const READ_RETRY: Duration = Duration::from_millis(800);
 pub struct IssueComment {
     pub created_at: String,
     pub body: String,
+    /// The signed-in Chrome user wrote it (`viewerDidAuthor`; missing → `false`).
+    pub mine: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,8 +73,8 @@ fn canonical_issue_url(url: &str) -> Option<String> {
     Some(format!("https://github.com/{}/{}/issues/{}", &c[1], &c[2], &c[3]))
 }
 
-/// Runs in the issue page. Returns only the issue's title/body and its comments' dates and
-/// bodies (+ the HTML, to find which `@words` GitHub rendered as mentions).
+/// Runs in the issue page. Returns only the issue's title/body and its comments' dates, bodies
+/// and `viewerDidAuthor` flags (+ the HTML, to find which `@words` GitHub rendered as mentions).
 const EXTRACT: &str = r#"(() => {
   const login = document.querySelector('meta[name="user-login"]')?.content || "";
   const base = { signedIn: login !== "", notFound: /not found/i.test(document.title) };
@@ -86,7 +90,8 @@ const EXTRACT: &str = r#"(() => {
       if (!n || (n.id && seen.has(n.id))) continue;
       if (n.id) seen.add(n.id);
       if (n.__typename !== "IssueComment" || n.isHidden || n.isMinimized) continue;
-      comments.push({ createdAt: n.createdAt || "", body: n.body || "", bodyHTML: n.bodyHTML || "" });
+      comments.push({ createdAt: n.createdAt || "", body: n.body || "", bodyHTML: n.bodyHTML || "",
+                      mine: n.viewerDidAuthor === true });
     }
   }
   return { ...base, found: true, title: issue.title, body: issue.body || "", bodyHTML: issue.bodyHTML || "",
@@ -159,6 +164,7 @@ fn parse_extracted(v: &Value, url: &str) -> Extracted {
                 .map(|c| IssueComment {
                     created_at: text(c, "createdAt"),
                     body: strip_mentions(&text(c, "body"), &text(c, "bodyHTML")),
+                    mine: c.get("mine").and_then(Value::as_bool).unwrap_or(false),
                 })
                 .collect()
         })
@@ -315,15 +321,17 @@ mod tests {
             "signedIn": true, "notFound": false, "found": true,
             "title": "保存できない", "body": "手順 @dev-a", "bodyHTML": "<a class=\"user-mention\">@dev-a</a>",
             "totalComments": 3,
-            "comments": [{ "createdAt": "2026-11-10T01:00:00Z", "body": "補足", "bodyHTML": "" }]
+            "comments": [{ "createdAt": "2026-11-10T01:00:00Z", "body": "補足", "bodyHTML": "" },
+                         { "createdAt": "2026-11-11T01:00:00Z", "body": "対応中", "bodyHTML": "", "mine": true }]
         });
         let Extracted::Page(page) = parse_extracted(&v, "https://github.com/a/b/issues/1") else {
             panic!("page expected");
         };
         assert_eq!(page.title, "保存できない");
         assert_eq!(page.body, "手順 @…");
-        assert_eq!(page.comments.len(), 1);
+        assert_eq!(page.comments.len(), 2);
         assert_eq!(page.comments[0].body, "補足");
+        assert!(!page.comments[0].mine && page.comments[1].mine);
         assert_eq!(page.total_comments, 3);
     }
 
@@ -343,11 +351,12 @@ mod tests {
         for read in read_github_issues(&urls).unwrap() {
             match read.result {
                 Ok(p) => println!(
-                    "ok: title {} chars, body {} chars, {} comments of {}, mentions left {}",
+                    "ok: title {} chars, body {} chars, {} comments of {} ({} mine), mentions left {}",
                     p.title.chars().count(),
                     p.body.chars().count(),
                     p.comments.len(),
                     p.total_comments,
+                    p.comments.iter().filter(|c| c.mine).count(),
                     p.body.matches("@…").count()
                 ),
                 Err(e) => println!("error: {e}"),

@@ -477,8 +477,8 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
   if (f.agent) activeCard.contextPct = f.agent.ctxPct;
 
   const tasks: TaskCard[] = [
-    { id: "WP-188001", wpId: 188001, title: INBOX[0]?.title ?? "", project: "Web Platform", nxStatus: "Open", nxStatusColor: "#1a67a3", column: "inbox", newComments: 2 },
-    { id: "WP-188002", wpId: 188002, title: INBOX[1]?.title ?? "", project: "Mobile App", nxStatus: "Reopened", nxStatusColor: "#ff3300", column: "inbox", newComments: 0 },
+    { id: "WP-188001", wpId: 188001, title: INBOX[0]?.title ?? "", project: "Web Platform", nxStatus: "Open", nxStatusColor: "#1a67a3", column: "inbox", newComments: mockNewComments(188001), priority: { name: "Normal" } },
+    { id: "WP-188002", wpId: 188002, title: INBOX[1]?.title ?? "", project: "Mobile App", nxStatus: "Reopened", nxStatusColor: "#ff3300", column: "inbox", newComments: 0, priority: { name: "Immediate", color: "#e03131" } },
     activeCard,
     {
       id: "WP-186196",
@@ -510,6 +510,7 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
       column: "active",
       step: { kind: "intake", index: 1, state: "done", since: iso(now - 25 * 60_000) },
       newComments: mockNewComments(SECOND.wpId),
+      priority: { name: "High", color: "#ff922b" },
       ...mockFlowCard(SECOND.wpId),
     });
   }

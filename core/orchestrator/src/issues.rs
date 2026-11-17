@@ -68,6 +68,7 @@ pub fn section_from(reads: Vec<IssueRead>) -> Result<(String, Vec<BriefIssue>, V
                         .map(|c| BriefIssueComment {
                             created_at: c.created_at,
                             body: c.body,
+                            mine: c.mine,
                         })
                         .collect(),
                     unread: page.total_comments.saturating_sub(loaded),
@@ -125,6 +126,7 @@ mod tests {
             comments: vec![IssueComment {
                 created_at: "2026-11-10T00:00:00Z".into(),
                 body: "補足".into(),
+                mine: true,
             }],
             total_comments: 2,
         }
@@ -144,6 +146,7 @@ mod tests {
         ];
         let (section, read, warnings) = section_from(reads).unwrap();
         assert_eq!(read.len(), 1);
+        assert!(read[0].comments[0].mine);
         assert!(section.contains("### 保存できない"));
         assert!(section.contains("(1 comment trên GitHub không lấy được"));
         assert_eq!(warnings.len(), 1);

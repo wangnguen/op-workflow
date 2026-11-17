@@ -332,10 +332,23 @@ pub fn board(tick: u64) -> BoardSnapshot {
         finished_at: None,
         push_check: None,
         nx_open: false,
+        priority: None,
     };
     let mut tasks = vec![
-        inbox(188001, "Thêm bộ lọc danh sách user", "Web Platform", 2),
-        inbox(188002, "Lỗi upload file lớn", "Mobile App", 0),
+        TaskCard {
+            priority: Some(opw_domain::view::PriorityView {
+                name: "High".into(),
+                color: Some("#ff922b".into()),
+            }),
+            ..inbox(188001, "Thêm bộ lọc danh sách user", "Web Platform", 2)
+        },
+        TaskCard {
+            priority: Some(opw_domain::view::PriorityView {
+                name: "Normal".into(),
+                color: None,
+            }),
+            ..inbox(188002, "Lỗi upload file lớn", "Mobile App", 0)
+        },
         TaskCard {
             id: "WP-186196".into(),
             wp_id: 186196,
@@ -363,6 +376,7 @@ pub fn board(tick: u64) -> BoardSnapshot {
             finished_at: None,
             push_check: None,
             nx_open: false,
+            priority: None,
         },
     ];
     if let Some(sys) = &system {
@@ -402,6 +416,7 @@ pub fn board(tick: u64) -> BoardSnapshot {
             finished_at: None,
             push_check: None,
             nx_open: false,
+            priority: None,
         });
     }
     BoardSnapshot {

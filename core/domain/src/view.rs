@@ -22,6 +22,18 @@ pub enum SessionStatus {
     Idle,
 }
 
+/// The task's priority on OpenProject (read-only), shown as OpenProject shows it: its name in
+/// the colour the admin gave it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriorityView {
+    /// As OpenProject shows it, e.g. `High`.
+    pub name: String,
+    /// `#rrggbb` when the OpenProject admin gave the priority a colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskColumn {
@@ -184,6 +196,9 @@ pub struct TaskCard {
     /// "Đã xong" column: OpenProject still lists the task as open (not Resolved yet).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nx_open: bool,
+    /// The task's priority on OpenProject; absent when unknown (e.g. no longer listed there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<PriorityView>,
 }
 
 /// Is the task branch on origin? Made by "Đã push xong" (`git fetch`, then local branch vs
@@ -616,8 +631,16 @@ pub struct CommentView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
     pub text: String,
-    /// Arrived after the user last opened the Comment tab.
+    /// The user wrote it (OpenProject: author = `users/me`; GitHub: `viewerDidAuthor`). Shown
+    /// folded, never new.
+    #[serde(default)]
+    pub mine: bool,
+    /// Someone else wrote it after the user last opened the Comment tab ("cần xem").
     pub is_new: bool,
+    /// Where to read it in the browser: the comment on its OpenProject work package, or the
+    /// GitHub issue (issue comments are read without their ids). Opened via `open_task_link`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// A GitHub issue as the last "Lấy issue" read it.
@@ -1302,6 +1325,7 @@ mod tests {
             finished_at: None,
             push_check: None,
             nx_open: false,
+            priority: None,
         };
         let v = serde_json::to_value(&card).unwrap();
         assert_eq!(

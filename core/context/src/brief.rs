@@ -128,6 +128,9 @@ pub const MAX_ISSUE_COMMENTS: usize = 15;
 pub struct BriefIssueComment {
     pub created_at: String,
     pub body: String,
+    /// Written by the user (GitHub's `viewerDidAuthor`). Not written into the brief; the
+    /// Comment tab uses it to keep quiet about the user's own comments.
+    pub mine: bool,
 }
 
 /// One issue as read from its page (title, markdown body, comments).
@@ -283,10 +286,12 @@ mod tests {
                 BriefIssueComment {
                     created_at: "2026-11-01T00:00:00Z".into(),
                     body: "cũ".into(),
+                    mine: false,
                 },
                 BriefIssueComment {
                     created_at: "2026-11-05T00:00:00Z".into(),
                     body: "đã thử, vẫn lỗi".into(),
+                    mine: true,
                 },
             ],
             unread: 1,

@@ -47,6 +47,16 @@ describe("preview board moves", () => {
     expect(mockPushCheck(9).pushed).toBe(true);
   });
 
+  it("sends a finished task back to Inbox, and starting it again runs a new round", () => {
+    const [card] = mockDoneCards();
+    mockPauseTask(card!.wpId);
+    expect(mockPlaceCard(card!).column).toBe("inbox");
+    mockStarted(card!.wpId, card!.title);
+    const again = mockPlaceCard(card!);
+    expect(again.column).toBe("active");
+    expect(again.step?.kind).toBe("analyze");
+  });
+
   it("sends a finished task back to Viết code with a note", () => {
     const [card] = mockDoneCards();
     const d = mockFlowAction(card!.wpId, { type: "reopen", step: "implement", note: "thêm test" });

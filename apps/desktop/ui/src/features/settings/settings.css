@@ -3,7 +3,7 @@
 .set-sheet {
   display: flex;
   width: min(920px, calc(100vw - 32px));
-  height: min(640px, calc(100vh - 32px));
+  height: min(640px, calc(100vh - 2 * var(--sheet-gap)));
   overflow: hidden;
   border-radius: 12px;
   background: var(--panel);

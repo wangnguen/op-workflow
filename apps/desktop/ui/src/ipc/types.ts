@@ -100,6 +100,16 @@ export interface TaskCard {
   pushCheck?: PushCheck;
   /** "Đã xong" column: OpenProject still lists the task as open (not Resolved yet) */
   nxOpen?: boolean;
+  /** the task's priority on OpenProject; absent when unknown */
+  priority?: PriorityView;
+}
+
+/** The task's priority as OpenProject shows it: its name in the admin's colour. */
+export interface PriorityView {
+  /** as OpenProject shows it, e.g. "High" */
+  name: string;
+  /** `#rrggbb` when the OpenProject admin gave the priority a colour */
+  color?: string;
 }
 
 /** Is the task branch on origin? Made by "Đã push xong" (`git fetch`, then the local branch
@@ -393,8 +403,12 @@ export interface CommentView {
   /** OpenProject only; issue comments are read without names */
   author?: string;
   text: string;
-  /** arrived after the user last opened the Comment tab */
+  /** the user wrote it (OpenProject: author = users/me; GitHub: viewerDidAuthor): shown folded, never new */
+  mine: boolean;
+  /** someone else wrote it after the user last opened the Comment tab ("cần xem") */
   isNew: boolean;
+  /** the comment on OpenProject, or the GitHub issue; open with openTaskLink */
+  url?: string;
 }
 
 export interface IssueThread {
@@ -832,6 +846,7 @@ export interface Commands {
   decide_finding: TaskDetail;
   save_brief: TaskDetail;
   open_task_folder: null;
+  open_task_link: null;
   task_comments: CommentsView;
   refresh_brief_comments: CommentsView;
   task_diff: DiffView;
@@ -865,6 +880,7 @@ export interface CommandArgs {
   decide_finding: { decision: FindingDecision };
   save_brief: { wpId: number; text: string };
   open_task_folder: { wpId: number };
+  open_task_link: { wpId: number; url?: string };
   task_comments: { wpId: number; markSeen: boolean };
   refresh_brief_comments: { wpId: number };
   task_diff: { wpId: number; markSeen: boolean };

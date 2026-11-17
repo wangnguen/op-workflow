@@ -135,6 +135,10 @@
 .card {
   cursor: grab;
 }
+.card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .card.is-drag-source {
   opacity: 0.35;
 }
@@ -143,28 +147,20 @@ body.is-card-dragging * {
   cursor: grabbing !important;
   user-select: none;
 }
-/* the copy of the card that follows the pointer (useCardDrag) */
-.card.card-ghost {
-  position: fixed;
-  z-index: 70;
+/* the copy of the card that follows the pointer or the arrow keys (DragOverlay in cardDnd.tsx;
+   dnd-kit moves the wrapper, the drop animation fades it or slides it back) */
+.card-lift {
+  height: 100%;
+}
+.card-lift > .card {
+  height: 100%;
   margin: 0;
-  pointer-events: none;
   box-shadow: var(--shadow-pop);
-  will-change: transform;
-  transition: none;
+  rotate: 1deg;
 }
-.card.card-ghost.is-waiting {
+.is-waiting > .card-lift {
   opacity: 0.8;
-}
-.card.card-ghost.is-returning {
-  transition: transform 240ms var(--ease-out);
-}
-.card.card-ghost.is-dropped {
-  opacity: 0;
-  scale: 0.96;
-  transition:
-    opacity 160ms var(--ease-out),
-    scale 160ms var(--ease-out);
+  transition: opacity var(--dur-fast) var(--ease-out);
 }
 /* why a drop was refused, or what it did: floats over the board, nothing moves */
 .drop-toast {
@@ -313,8 +309,22 @@ body.is-card-dragging * {
 .card-sub .mono {
   color: var(--text-dim);
 }
+/* the task id opens the task on OpenProject */
+.card-sub .card-id {
+  font-size: inherit;
+}
+.card-sub .card-id:hover,
+.card-sub .card-id:focus-visible {
+  color: var(--accent-ink);
+}
 .card-nx {
   flex-shrink: 0;
+}
+/* OpenProject priority: the same chip as the status, in the colour the admin gave it. */
+.card-sub .card-prio {
+  height: 17px;
+  margin-left: 2px;
+  font-size: 10.5px;
 }
 /* step status line: glyph + text on a soft tint of the state colour */
 .card-line {
@@ -530,14 +540,9 @@ button.badge {
   min-width: 0;
   color: var(--text-faint);
 }
+/* the whole path, wrapped (no "…" that only opens on hover) */
 .repo-meta .mono {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.repo-meta .mono:hover {
-  white-space: normal;
   overflow-wrap: anywhere;
 }
 .repo-other summary {
@@ -608,19 +613,13 @@ button.badge {
 .branch-icon {
   color: var(--text-faint);
 }
+/* the whole name, wrapped (no "…" that only opens on hover) */
 .branch-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .branch-prefix {
   color: var(--text-faint);
-}
-/* hover shows the whole name instead of "…" */
-.branch:hover .branch-name,
-.branch:focus-visible .branch-name {
-  white-space: normal;
-  overflow-wrap: anywhere;
 }
 .branch-track {
   color: var(--text-faint);

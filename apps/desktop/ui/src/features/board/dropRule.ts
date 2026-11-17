@@ -8,7 +8,7 @@ export type DropAction =
   | { kind: "none" }
   /** Inbox → Đang làm: the "Bắt đầu làm việc" dialog */
   | { kind: "start" }
-  /** back to Inbox: "Tạm dừng" */
+  /** back to Inbox: "Tạm dừng" (also out of Đã xong; starting it again runs a new round) */
   | { kind: "pause" }
   /** into Đã xong: the push check, then "Đã push xong" */
   | { kind: "finish" }
@@ -35,6 +35,6 @@ export function dropRule(card: Pick<TaskCard, "column" | "step">, to: TaskColumn
       if (running) return { kind: "refuse", reason: to === "inbox" ? d.stopToPause(running) : d.stopToFinish(running) };
       return to === "inbox" ? { kind: "pause" } : { kind: "finish" };
     case "done":
-      return to === "inbox" ? { kind: "refuse", reason: d.doneToInbox } : { kind: "continue" };
+      return to === "inbox" ? { kind: "pause" } : { kind: "continue" };
   }
 }

@@ -311,8 +311,9 @@ function wantsError(): boolean {
   return typeof location !== "undefined" && new URLSearchParams(location.search).has("flowError");
 }
 
-/** The flow of a task, created at "Phân tích ready" the first time it is asked for. */
-function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo"): Flow {
+/** The flow of a task, created at "Phân tích ready" the first time it is asked for. `seeded`:
+ *  the demo tasks start where the preview shows them (false = a plain new round). */
+function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo", seeded = true): Flow {
   let f = flows.get(wpId);
   if (!f) {
     const states = Object.fromEntries(STEP_ORDER.map((s) => [s, "pending"])) as Record<StepKind, StepState>;
@@ -340,7 +341,7 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo"): Flow 
       allow: [],
       checks: 0,
     };
-    if (wpId === DEMO_ACTIVE_WP) {
+    if (seeded && wpId === DEMO_ACTIVE_WP) {
       // the animated demo task: open it where the demo shows a gate, at the plan review
       f.title = "Không tải được danh sách file khi user chưa có org";
       f.states.analyze = "waitingUser";
@@ -349,7 +350,7 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo"): Flow 
       f.started = iso(Date.now() - 12 * 60_000);
       seedRun(f, "analyze", 9, 50, "plan: 2 file sẽ sửa, 1 câu hỏi");
     }
-    if (wpId === DEMO_PUSH_WP) {
+    if (seeded && wpId === DEMO_PUSH_WP) {
       // the demo card in "Chờ bạn push": every step done, the push summary written
       f.title = "Sửa thông báo lỗi khi token Box hết hạn";
       for (const s of STEP_ORDER) f.states[s] = "done";
@@ -375,7 +376,7 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo"): Flow 
       seedRun(f, "finalReview", 26, 126, "không thấy lỗi");
       seedRun(f, "pushSummary", 21, 14, "đã viết commit message + PR description");
     }
-    const seed = DONE_SEED.find((d) => d.wpId === wpId);
+    const seed = seeded ? DONE_SEED.find((d) => d.wpId === wpId) : undefined;
     if (seed) {
       f.title = seed.title;
       for (const s of STEP_ORDER) f.states[s] = "done";
@@ -1026,9 +1027,12 @@ export function mockPauseTask(wpId: number): null {
   return null;
 }
 
-/** A task started from Inbox in the preview: it gets (or keeps) its flow and leaves Inbox. */
+/** A task started from Inbox in the preview: it gets (or keeps) its flow and leaves Inbox. A
+ *  finished one (dragged back out of Đã xong) starts a new round, like the app. */
 export function mockStarted(wpId: number, title: string): void {
-  const f = flowOf(wpId, `WP-${wpId}`, title);
+  const again = flows.get(wpId)?.phase === "done";
+  if (again) flows.delete(wpId);
+  const f = flowOf(wpId, `WP-${wpId}`, title, !again);
   f.moved = true;
   paused.delete(wpId);
 }
@@ -1037,8 +1041,8 @@ export function mockStarted(wpId: number, title: string): void {
  *  or reopened ones from their flow. */
 export function mockPlaceCard(card: TaskCard): TaskCard {
   if (paused.has(card.wpId)) {
-    const { id, wpId, title, project, nxStatus, nxStatusColor, newComments, issues } = card;
-    return { id, wpId, title, project, nxStatus, nxStatusColor, newComments, issues, column: "inbox" };
+    const { id, wpId, title, project, nxStatus, nxStatusColor, newComments, issues, priority } = card;
+    return { id, wpId, title, project, nxStatus, nxStatusColor, newComments, issues, priority, column: "inbox" };
   }
   const f = flows.get(card.wpId);
   if (!f?.moved) return card;

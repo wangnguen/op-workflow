@@ -158,6 +158,17 @@ export const saveBrief = (wpId: number, text: string): Promise<TaskDetail> =>
   call("save_brief", () => mockSaveBrief(wpId, text), { wpId, text });
 /** Shows the task folder (brief, plan, push summary) in Explorer. */
 export const openTaskFolder = (wpId: number): Promise<null> => call("open_task_folder", () => null, { wpId });
+/** Opens a link of this task in the browser: the task on OpenProject (no `url`), a comment on
+ *  it, or the GitHub issue. */
+export const openTaskLink = (wpId: number, url?: string): Promise<null> =>
+  call(
+    "open_task_link",
+    () => {
+      window.open(url ?? `https://openproject.example.com/work_packages/${wpId}`, "_blank", "noopener");
+      return null;
+    },
+    { wpId, url },
+  );
 /** Comment tab: OpenProject comments (read now) and the last issue read; `markSeen` clears "mới". */
 export const getTaskComments = (wpId: number, markSeen: boolean): Promise<CommentsView> =>
   call("task_comments", () => mockTaskComments(wpId, markSeen), { wpId, markSeen });

@@ -34,51 +34,70 @@ const stateOf = (wpId: number): MockComments => {
   return s;
 };
 
+/** Oldest first; `mine` = written by the user (shown folded, never new). */
 const OP_COMMENTS = [
   { id: 1, minutes: 60 * 26, author: "Tester A", text: "Bấm Lưu đơn khi chưa chọn tổ chức thì trang trắng." },
   { id: 2, minutes: 60 * 20, author: "PM B", text: "Ưu tiên cao, khách đang chờ bản sửa trước thứ Sáu." },
   {
     id: 3,
+    minutes: 60 * 2,
+    author: "Dev C",
+    mine: true,
+    text: "Đã sửa: kiểm tra tổ chức trống trước khi lưu, thêm thông báo lỗi.\nNhờ chị test lại trên staging giúp em. Bản build 2026.11.17-1.",
+  },
+  {
+    id: 4,
     minutes: 35,
     author: "Tester A",
     text: "Test failed trên staging: vẫn trắng trang khi user mới tạo tài khoản.\nLog: TypeError: Cannot read properties of null (reading 'id')",
   },
 ];
 
+/** Oldest first. */
 const ISSUE_COMMENTS = [
   { minutes: 60 * 50, text: "Steps: create account → open Orders → Save. Page goes blank." },
+  { minutes: 60 * 4, mine: true, text: "Thanks, looking into it. Which browser version are you on?" },
   { minutes: 60 * 3, text: "Same on mobile Safari. Attaching console log in the next comment." },
 ];
 
-/** New OpenProject + issue comments of a task in the preview (the card badge). */
+/** Other people's new OpenProject + issue comments of a task in the preview (the card badge). */
 export function mockNewComments(wpId: number): number {
   const s = stateOf(wpId);
-  return OP_COMMENTS.filter((c) => c.id > s.seen).length + Math.max(0, ISSUE_COMMENTS.length - s.issueSeen);
+  return (
+    OP_COMMENTS.filter((c) => !c.mine && c.id > s.seen).length +
+    ISSUE_COMMENTS.filter((c, i) => !c.mine && i >= s.issueSeen).length
+  );
 }
 
 export function mockTaskComments(wpId: number, markSeen: boolean): CommentsView {
   const s = stateOf(wpId);
+  const taskUrl = `https://openproject.example.com/work_packages/${wpId}`;
   const comments: CommentView[] = [...OP_COMMENTS].reverse().map((c) => ({
     id: String(c.id),
     createdAt: iso(c.minutes),
     author: c.author,
     text: c.text,
-    isNew: c.id > s.seen,
+    mine: c.mine === true,
+    isNew: c.mine !== true && c.id > s.seen,
+    url: `${taskUrl}/activity#activity-${c.id + 1}`,
   }));
+  const issueUrl = "https://github.com/acme/web/issues/456";
   const issue: IssueThread = {
-    url: "https://github.com/acme/web/issues/456",
+    url: issueUrl,
     title: "Orders: blank page after saving",
     comments: ISSUE_COMMENTS.map((c, i) => ({
       id: `issue#${i}`,
       createdAt: iso(c.minutes),
       text: c.text,
-      isNew: i >= s.issueSeen,
+      mine: c.mine === true,
+      isNew: c.mine !== true && i >= s.issueSeen,
+      url: issueUrl,
     })).reverse(),
     unread: 1,
   };
   const view: CommentsView = {
     comments,
-    taskUrl: `https://openproject.example.com/work_packages/${wpId}`,
+    taskUrl,
     issues: [issue],
     issuesReadAt: iso(5),
     briefStale: s.briefStale,

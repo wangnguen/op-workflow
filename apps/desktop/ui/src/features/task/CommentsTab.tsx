@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { vi } from "../../i18n/vi";
-import { errorMessage, fetchIssues, getTaskComments, refreshBriefComments } from "../../ipc/client";
-import type { CommentView, CommentsView, TaskDetail } from "../../ipc/types";
-import { formatDateTime, formatRelative } from "../../shared/format";
+import { errorMessage, fetchIssues, getTaskComments, openTaskLink, refreshBriefComments } from "../../ipc/client";
+import type { CommentsView, TaskDetail } from "../../ipc/types";
+import { formatRelative } from "../../shared/format";
 import { useNow } from "../../shared/hooks";
 import { Icon } from "../../shared/ui/Icon";
+import { CommentItem, useNewMarks } from "./CommentList";
+import { commentCounts } from "./comments";
 
 const t = vi.flow.comments;
 
@@ -14,8 +16,9 @@ interface Props {
   onChanged: () => void;
 }
 
-/** OpenProject comments (read when the tab opens) and the GitHub issues of the last read. The
- *  "mới" marks stay while the tab is open; opening it counts them as seen. */
+/** OpenProject comments (read when the tab opens) and the GitHub issues of the last read. Other
+ *  people's new comments are marked "cần xem" while the tab is open (opening it counts them as
+ *  seen); the user's own comments are folded to one line and never count as new. */
 export function CommentsTab({ detail: d, onChanged }: Props) {
   const [view, setView] = useState<CommentsView>();
   const [loading, setLoading] = useState(true);
@@ -27,21 +30,7 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
   const changedRef = useRef(onChanged);
   changedRef.current = onChanged;
   const changed = () => changedRef.current();
-  // comments that were new when this tab opened stay marked while it is open, even though the
-  // first read already counted them as seen (and a second read, e.g. React's dev double effect
-  // or "Đọc lại", no longer reports them as new)
-  const newIds = useRef(new Set<string>());
-  const remember = useCallback((v: CommentsView): CommentsView => {
-    const mark = (c: CommentView): CommentView => {
-      if (c.isNew) newIds.current.add(c.id);
-      return { ...c, isNew: newIds.current.has(c.id) };
-    };
-    return {
-      ...v,
-      comments: v.comments.map(mark),
-      issues: v.issues.map((i) => ({ ...i, comments: i.comments.map(mark) })),
-    };
-  }, []);
+  const remember = useNewMarks();
 
   const load = useCallback(() => {
     setLoading(true);
@@ -85,21 +74,31 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
       .finally(() => setBusy(undefined));
   };
 
-  const fresh = view ? view.comments.filter((c) => c.isNew).length : 0;
+  const { fresh, mine } = commentCounts(view?.comments ?? []);
   const running = d.status === "running";
+  const open = (url: string) => {
+    openTaskLink(d.wpId, url).catch((e: unknown) => setError(errorMessage(e)));
+  };
 
   return (
     <div className="task-pane comments">
       <div className="comments-head">
         <span className="dim">
           {loading && !view ? t.loading : view ? `${view.comments.length} comment` : ""}
+          {mine > 0 && <span title={t.mineHint}> · {t.mineCount(mine)}</span>}
           {fresh > 0 && <span className="chip chip--new">{t.newCount(fresh)}</span>}
         </span>
         <span className="comments-head-actions">
           {view?.taskUrl && (
-            <span className="faint mono" title={view.taskUrl}>
+            <button
+              type="button"
+              className="link-btn mono"
+              title={`${t.openTaskHint}\n${view.taskUrl}`}
+              onClick={() => open(view.taskUrl as string)}
+            >
               {t.openProject} #{d.wpId}
-            </span>
+              <Icon name="external" size={11} />
+            </button>
           )}
           <button className="btn btn--ghost btn--sm" disabled={loading || busy !== undefined} onClick={load}>
             <Icon name="refresh" size={12} />
@@ -131,7 +130,14 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
       {view && view.comments.length > 0 && (
         <ul className="comment-list">
           {view.comments.map((c) => (
-            <CommentItem key={c.id} c={c} now={now} who={c.author ?? t.anonymous} />
+            <CommentItem
+                key={c.id}
+                c={c}
+                now={now}
+                who={c.mine ? t.you : (c.author ?? t.anonymous)}
+                where="openProject"
+                onOpen={open}
+              />
           ))}
         </ul>
       )}
@@ -164,7 +170,7 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
             {issue.comments.length === 0 && <p className="dim">{t.issueNoComments}</p>}
             <ul className="comment-list">
               {issue.comments.map((c) => (
-                <CommentItem key={c.id} c={c} now={now} who="GitHub" />
+                <CommentItem key={c.id} c={c} now={now} who={c.mine ? t.you : "GitHub"} where="github" onOpen={open} />
               ))}
             </ul>
             {issue.unread > 0 && <p className="faint">{t.issueUnread(issue.unread)}</p>}
@@ -172,20 +178,5 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
         ))}
       </section>
     </div>
-  );
-}
-
-function CommentItem({ c, now, who }: { c: CommentView; now: number; who: string }) {
-  return (
-    <li className={`comment${c.isNew ? " is-new" : ""}`}>
-      <div className="comment-meta">
-        <strong>{who}</strong>
-        <span className="faint" title={formatDateTime(c.createdAt)}>
-          {formatRelative(c.createdAt, now)}
-        </span>
-        {c.isNew && <span className="chip chip--new">{t.isNew}</span>}
-      </div>
-      <p className="comment-text">{c.text}</p>
-    </li>
   );
 }

@@ -228,14 +228,31 @@ export const vi = {
     nxStillOpen: (status: string) => `OpenProject vẫn để ${status}: nhớ tự chuyển sang Resolved`,
     dragHint: "Kéo thẻ sang cột khác để bắt đầu, tạm dừng, đánh dấu xong hoặc làm tiếp",
     paused: (id: string) => `${id}: đã về Inbox (nhánh, brief và tiến trình vẫn giữ)`,
+    priorityHint: (name: string) => `Độ ưu tiên trên OpenProject: ${name}`,
+    peek: {
+      title: (id: string) => `Comment · ${id}`,
+      hint: "Xem comment của task (chưa cần bắt đầu task)",
+      notStarted: "Task chưa bắt đầu: comment chỉ xem ở đây; bắt đầu task thì comment vào brief cho AI.",
+      close: "Đóng",
+    },
     movedDone: (id: string) => `${id}: đã sang Đã xong`,
     reopened: (id: string, step: string) => `${id}: làm tiếp ở ${step}`,
+    /** dnd-kit: what screen readers hear while a card moves */
+    drag: {
+      role: "thẻ task kéo được",
+      instructions:
+        "Bấm Space hoặc Enter để nhấc thẻ, mũi tên trái phải để chuyển cột, Space hoặc Enter để thả, Esc để huỷ.",
+      lifted: (id: string) => `Đã nhấc ${id}.`,
+      over: (id: string, column: string) => `${id} đang ở trên cột ${column}.`,
+      outside: "Không ở trên cột nào.",
+      dropped: (id: string, column: string) => `Đã thả ${id} vào cột ${column}.`,
+      back: (id: string) => `${id} về chỗ cũ.`,
+    },
     drop: {
       startFirst: "Bắt đầu task trước: kéo sang Đang làm.",
       pushByItself: "Task tự sang Chờ push khi bước Push summary xong.",
       stopToPause: (step: string) => `${step} đang chạy: bấm Dừng trước rồi mới tạm dừng.`,
       stopToFinish: (step: string) => `${step} đang chạy: bấm Dừng trước rồi mới đánh dấu xong.`,
-      doneToInbox: "Task đã xong: kéo sang Đang làm để làm tiếp.",
     },
   },
   /** "Đã push xong": the push check and marking the task done */
@@ -465,8 +482,20 @@ export const vi = {
       openHint: "Mở tab Comment của task",
       openProject: "OpenProject",
       none: "Task chưa có comment nào.",
-      isNew: "mới",
-      newCount: (n: number) => `${n} mới`,
+      isNew: "cần xem",
+      isNewHint: "Người khác viết sau lần bạn mở tab này trước",
+      newCount: (n: number) => `${n} cần xem`,
+      you: "Bạn",
+      mineCount: (n: number) => `${n} của bạn`,
+      mineHint: "Comment của bạn: thu gọn, không tính là mới, không báo chuông",
+      expand: "Mở comment",
+      collapse: "Thu gọn",
+      openOn: (where: "openProject" | "github") => (where === "github" ? "Mở trên GitHub" : "Mở trên OpenProject"),
+      openOnHint: (where: "openProject" | "github") =>
+        where === "github"
+          ? "Mở issue trong trình duyệt (app không lấy id của từng comment issue nên mở đầu trang)"
+          : "Mở đúng comment này trên OpenProject trong trình duyệt",
+      openTaskHint: "Mở task trên OpenProject trong trình duyệt",
       briefStale: "Có comment mới hơn phần comment trong brief. AI chỉ đọc brief.",
       updateBrief: "Cập nhật brief",
       updateBriefHint:

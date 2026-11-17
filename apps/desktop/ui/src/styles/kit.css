@@ -188,14 +188,14 @@ select.input {
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: 9vh 16px 16px;
+  padding: var(--sheet-gap) 16px;
   background: var(--scrim);
   animation: scrim-in var(--dur-base) var(--ease-out);
 }
 .sheet {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 9vh - 16px);
+  max-height: calc(100vh - 2 * var(--sheet-gap));
   border-radius: 12px;
   background: var(--panel);
   box-shadow: var(--shadow-pop);
@@ -231,16 +231,12 @@ select.input {
   font-size: 14px;
   font-weight: 650;
 }
+/* shown whole (wrapped), not cut with "…" and opened on hover: nothing jumps */
 .sheet-titles p {
   margin: 0;
-  overflow: hidden;
   color: var(--text-faint);
   font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sheet-titles p:hover {
-  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .sheet-body {
   display: flex;
@@ -308,4 +304,24 @@ select.input {
   height: 7px;
   flex-shrink: 0;
   border-radius: 50%;
+}
+
+/* A text link that opens the browser (a task or comment on OpenProject, a GitHub issue). */
+.link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.link-btn:hover,
+.link-btn:focus-visible {
+  color: var(--accent-ink);
+  text-decoration: underline;
 }

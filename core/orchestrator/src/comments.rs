@@ -8,6 +8,9 @@
 //! - `issues.read` (key = issue URL): the issue as last read, JSON;
 //! - `issues.seen` (key = issue URL): date of the newest issue comment the user saw;
 //! - `nx.status`: the OpenProject status last seen, to notice Test failed / Reopened.
+//!
+//! The user's own comments (OpenProject: author = `users/me`; GitHub: `viewerDidAuthor`) never
+//! count as new: no "cần xem" mark, no "+N comment", no bell. The tab shows them folded.
 
 use std::collections::HashMap;
 
@@ -28,6 +31,9 @@ pub const STATUS: &str = "nx.status";
 pub struct StoredComment {
     pub created_at: String,
     pub body: String,
+    /// The user wrote it (reads saved before this field existed: `false`).
+    #[serde(default)]
+    pub mine: bool,
 }
 
 /// One issue as "Lấy issue" read it (no author names, like the brief).
@@ -52,6 +58,7 @@ impl StoredIssue {
                 .map(|c| StoredComment {
                     created_at: c.created_at.clone(),
                     body: c.body.clone(),
+                    mine: c.mine,
                 })
                 .collect(),
             unread: issue.unread,
@@ -63,11 +70,15 @@ impl StoredIssue {
         self.comments.iter().map(|c| c.created_at.as_str()).max()
     }
 
-    /// Comments newer than `seen` (none when nothing was seen yet: the first read is the
-    /// baseline).
+    /// Other people's comments newer than `seen` (none when nothing was seen yet: the first
+    /// read is the baseline).
     pub fn new_after(&self, seen: Option<&str>) -> u32 {
         let Some(seen) = seen else { return 0 };
-        count(self.comments.iter().filter(|c| c.created_at.as_str() > seen))
+        count(
+            self.comments
+                .iter()
+                .filter(|c| !c.mine && c.created_at.as_str() > seen),
+        )
     }
 }
 
@@ -79,23 +90,52 @@ pub fn max_id(comments: &[Comment]) -> Option<u64> {
     comments.iter().map(|c| c.id).max()
 }
 
-/// OpenProject comments newer than the last one the user saw (0 before any baseline).
-pub fn op_new(comments: &[Comment], seen: Option<u64>) -> u32 {
-    seen.map_or(0, |s| count(comments.iter().filter(|c| c.id > s)))
+/// Other people's OpenProject comments newer than the last one the user saw (0 before any
+/// baseline). `me`: the user's OpenProject id, if known.
+pub fn op_new(comments: &[Comment], seen: Option<u64>, me: Option<u64>) -> u32 {
+    seen.map_or(0, |s| count(comments.iter().filter(|c| c.id > s && !c.is_by(me))))
 }
 
-/// Newest first, `is_new` against `seen`.
-pub fn op_views(comments: &[Comment], seen: Option<u64>) -> Vec<CommentView> {
+/// The comment on its work package page: `<task url>/activity#activity-<N>` (the page's own
+/// "#N" anchor; without a number, the activity tab).
+pub fn op_link(task_url: &str, c: &Comment) -> String {
+    match c.version {
+        Some(n) => format!("{task_url}/activity#activity-{n}"),
+        None => format!("{task_url}/activity"),
+    }
+}
+
+/// Newest first, `is_new` against `seen` (never for the user's own comments). `task_url`:
+/// `<OpenProject>/work_packages/<id>`, for each comment's link.
+pub fn op_views(
+    comments: &[Comment],
+    seen: Option<u64>,
+    me: Option<u64>,
+    task_url: Option<&str>,
+) -> Vec<CommentView> {
     let mut list: Vec<&Comment> = comments.iter().collect();
     list.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
     list.into_iter()
-        .map(|c| CommentView {
-            id: c.id.to_string(),
-            created_at: c.created_at.clone(),
-            author: c.author.clone(),
-            text: c.raw.clone(),
-            is_new: seen.is_some_and(|s| c.id > s),
+        .map(|c| {
+            let mine = c.is_by(me);
+            CommentView {
+                id: c.id.to_string(),
+                created_at: c.created_at.clone(),
+                author: c.author.clone(),
+                text: c.raw.clone(),
+                mine,
+                is_new: !mine && seen.is_some_and(|s| c.id > s),
+                url: task_url.map(|t| op_link(t, c)),
+            }
         })
+        .collect()
+}
+
+/// Comments to ring the bell for: other people's, newer than the last announced id.
+pub fn to_announce(comments: &[Comment], notified: u64, me: Option<u64>) -> Vec<&Comment> {
+    comments
+        .iter()
+        .filter(|c| c.id > notified && !c.is_by(me))
         .collect()
 }
 
@@ -116,7 +156,9 @@ pub fn issue_threads(issues: &[StoredIssue], seen: &HashMap<String, String>) -> 
                         created_at: c.created_at.clone(),
                         author: None,
                         text: c.body.clone(),
-                        is_new: seen.is_some_and(|s| c.created_at.as_str() > s),
+                        mine: c.mine,
+                        is_new: !c.mine && seen.is_some_and(|s| c.created_at.as_str() > s),
+                        url: Some(issue.url.clone()),
                     })
                     .collect(),
                 unread: issue.unread,
@@ -125,15 +167,35 @@ pub fn issue_threads(issues: &[StoredIssue], seen: &HashMap<String, String>) -> 
         .collect()
 }
 
-/// OpenProject has a comment newer than the newest one in the brief's comment section.
-pub fn brief_stale(brief: Option<&str>, comments: &[Comment]) -> bool {
-    let Some(newest) = comments.iter().map(|c| c.created_at.as_str()).max() else {
+/// Someone else wrote an OpenProject comment newer than the newest one in the brief's comment
+/// section (the user's own replies alone do not ask for a brief update).
+pub fn brief_stale(brief: Option<&str>, comments: &[Comment], me: Option<u64>) -> bool {
+    let Some(newest) = comments
+        .iter()
+        .filter(|c| !c.is_by(me))
+        .map(|c| c.created_at.as_str())
+        .max()
+    else {
         return false;
     };
     match brief.and_then(newest_brief_comment) {
         Some(in_brief) => newest > in_brief.as_str(),
         None => brief.is_some(),
     }
+}
+
+/// `url` is a page of this task the app links to: the work package itself (any sub-page or
+/// anchor) or one of the task's issues as last read. Anything else is refused, so the UI can
+/// never make the app open an arbitrary address.
+pub fn is_task_link(url: &str, task_url: Option<&str>, issues: &[StoredIssue]) -> bool {
+    if !url.starts_with("https://") || url.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let under = |base: &str| {
+        url.strip_prefix(base)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '#', '?']))
+    };
+    task_url.is_some_and(under) || issues.iter().any(|i| under(&i.url))
 }
 
 // ---------- stored state ----------
@@ -159,10 +221,10 @@ pub fn issues_seen(store: &Store, wp_id: u64) -> HashMap<String, String> {
         .collect()
 }
 
-/// Comments the user has not seen: OpenProject (`comments` = the cached list, if any) plus the
-/// stored issues.
-pub fn new_count(store: &Store, wp_id: u64, comments: Option<&[Comment]>) -> u32 {
-    let op = comments.map_or(0, |c| op_new(c, seen_id(store, wp_id)));
+/// Other people's comments the user has not seen: OpenProject (`comments` = the cached list, if
+/// any) plus the stored issues.
+pub fn new_count(store: &Store, wp_id: u64, comments: Option<&[Comment]>, me: Option<u64>) -> u32 {
+    let op = comments.map_or(0, |c| op_new(c, seen_id(store, wp_id), me));
     let seen = issues_seen(store, wp_id);
     let issues: u32 = stored_issues(store, wp_id)
         .iter()
@@ -236,12 +298,25 @@ pub fn mark_issues_seen(store: &Store, wp_id: u64, at: &str) {
 mod tests {
     use super::*;
 
+    /// The user's own OpenProject id in these tests.
+    const ME: Option<u64> = Some(42);
+
     fn c(id: u64, at: &str) -> Comment {
         Comment {
             id,
             created_at: at.into(),
             raw: format!("c{id}"),
             author: Some("A".into()),
+            author_id: Some(7),
+            version: None,
+        }
+    }
+
+    fn mine(id: u64, at: &str) -> Comment {
+        Comment {
+            author: Some("Me".into()),
+            author_id: ME,
+            ..c(id, at)
         }
     }
 
@@ -254,6 +329,7 @@ mod tests {
                 .map(|d| StoredComment {
                     created_at: (*d).into(),
                     body: "b".into(),
+                    mine: false,
                 })
                 .collect(),
             unread: 0,
@@ -264,21 +340,108 @@ mod tests {
     #[test]
     fn op_comments_count_and_mark_new_against_the_baseline() {
         let list = [c(5, "2026-11-10T00:00:00Z"), c(9, "2026-11-12T00:00:00Z")];
-        assert_eq!(op_new(&list, None), 0);
-        assert_eq!(op_new(&list, Some(5)), 1);
-        let views = op_views(&list, Some(5));
+        assert_eq!(op_new(&list, None, ME), 0);
+        assert_eq!(op_new(&list, Some(5), ME), 1);
+        let views = op_views(&list, Some(5), ME, None);
         assert_eq!(views[0].id, "9");
         assert!(views[0].is_new && !views[1].is_new);
+        assert!(!views[0].mine && views[0].url.is_none());
         assert_eq!(views[0].author.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn own_comments_are_never_new_nor_announced() {
+        let list = [
+            c(5, "2026-11-10T00:00:00Z"),
+            mine(9, "2026-11-12T00:00:00Z"),
+            c(11, "2026-11-13T00:00:00Z"),
+        ];
+        assert_eq!(op_new(&list, Some(5), ME), 1);
+        let views = op_views(&list, Some(5), ME, None);
+        assert_eq!(views[1].id, "9");
+        assert!(views[1].mine && !views[1].is_new);
+        assert!(views[0].is_new && !views[0].mine);
+        let ids: Vec<u64> = to_announce(&list, 5, ME).iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![11]);
+        assert!(to_announce(&list[..2], 5, ME).is_empty());
+        // unknown user (users/me not read yet): everything counts as someone else's
+        assert_eq!(op_new(&list, Some(5), None), 2);
+        assert_eq!(to_announce(&list, 5, None).len(), 2);
+    }
+
+    #[test]
+    fn links_point_at_the_comment_and_only_task_pages_open() {
+        let task = "https://op.example.com/work_packages/77";
+        let with_n = Comment {
+            version: Some(3),
+            ..c(5, "a")
+        };
+        assert_eq!(op_link(task, &with_n), format!("{task}/activity#activity-3"));
+        assert_eq!(op_link(task, &c(6, "b")), format!("{task}/activity"));
+        let views = op_views(&[with_n], None, ME, Some(task));
+        assert_eq!(
+            views[0].url.as_deref(),
+            Some("https://op.example.com/work_packages/77/activity#activity-3")
+        );
+
+        let issues = [issue(&[])];
+        for ok in [
+            task,
+            "https://op.example.com/work_packages/77/activity#activity-3",
+            "https://github.com/acme/web/issues/1",
+            "https://github.com/acme/web/issues/1#issuecomment-9",
+        ] {
+            assert!(is_task_link(ok, Some(task), &issues), "{ok}");
+        }
+        for bad in [
+            "https://op.example.com/work_packages/778",
+            "https://op.example.com/work_packages/7",
+            "https://op.example.com/projects/x",
+            "https://github.com/acme/web/issues/12",
+            "https://evil.example/https://op.example.com/work_packages/77",
+            "http://op.example.com/work_packages/77",
+            "https://op.example.com/work_packages/77 & calc",
+            "",
+        ] {
+            assert!(!is_task_link(bad, Some(task), &issues), "{bad}");
+        }
+        assert!(!is_task_link(task, None, &[]));
     }
 
     #[test]
     fn brief_is_stale_when_openproject_has_newer_comments() {
         let brief = "# x\n\n## Comment trên OpenProject\n### 2026-11-10T00:00:00Z\ncũ\n\n## Từ issue\n";
-        assert!(!brief_stale(Some(brief), &[c(5, "2026-11-10T00:00:00Z")]));
-        assert!(brief_stale(Some(brief), &[c(9, "2026-11-12T00:00:00Z")]));
-        assert!(!brief_stale(Some(brief), &[]));
-        assert!(!brief_stale(None, &[c(9, "2026-11-12T00:00:00Z")]));
+        assert!(!brief_stale(Some(brief), &[c(5, "2026-11-10T00:00:00Z")], ME));
+        assert!(brief_stale(Some(brief), &[c(9, "2026-11-12T00:00:00Z")], ME));
+        assert!(!brief_stale(Some(brief), &[], ME));
+        assert!(!brief_stale(None, &[c(9, "2026-11-12T00:00:00Z")], ME));
+        // only the user's own reply is newer: no update asked
+        let own = [c(5, "2026-11-10T00:00:00Z"), mine(9, "2026-11-12T00:00:00Z")];
+        assert!(!brief_stale(Some(brief), &own, ME));
+        assert!(brief_stale(Some(brief), &own, None));
+    }
+
+    #[test]
+    fn own_issue_comments_are_not_new_and_old_reads_still_load() {
+        let mut read = issue(&[
+            "2026-11-01T00:00:00Z",
+            "2026-11-05T00:00:00Z",
+            "2026-11-06T00:00:00Z",
+        ]);
+        read.comments[1].mine = true;
+        assert_eq!(read.new_after(Some("2026-11-02T00:00:00Z")), 1);
+        let seen = HashMap::from([(read.url.clone(), "2026-11-02T00:00:00Z".to_owned())]);
+        let thread = &issue_threads(std::slice::from_ref(&read), &seen)[0];
+        // newest first: 06 (someone else, new), 05 (mine), 01 (old)
+        assert!(thread.comments[0].is_new && !thread.comments[0].mine);
+        assert!(thread.comments[1].mine && !thread.comments[1].is_new);
+        assert_eq!(thread.comments[0].url.as_deref(), Some(read.url.as_str()));
+        // a read saved before `mine` existed
+        let old: StoredIssue = serde_json::from_str(
+            r#"{"url":"u","title":"t","comments":[{"createdAt":"a","body":"b"}],"unread":0,"readAt":"x"}"#,
+        )
+        .unwrap();
+        assert!(!old.comments[0].mine);
     }
 
     #[test]
@@ -286,18 +449,21 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let first = issue(&["2026-11-01T00:00:00Z"]);
         assert_eq!(save_issue_read(&store, 7, &[first], "t1"), 0);
-        assert_eq!(new_count(&store, 7, None), 0);
+        assert_eq!(new_count(&store, 7, None, ME), 0);
         let second = issue(&["2026-11-01T00:00:00Z", "2026-11-05T00:00:00Z"]);
         assert_eq!(save_issue_read(&store, 7, &[second], "t2"), 1);
-        assert_eq!(new_count(&store, 7, None), 1);
+        assert_eq!(new_count(&store, 7, None, ME), 1);
         let threads = issue_threads(&stored_issues(&store, 7), &issues_seen(&store, 7));
         assert!(threads[0].comments[0].is_new && !threads[0].comments[1].is_new);
         // OpenProject: no baseline yet, then one newer than seen
         let op = [c(3, "a"), c(4, "b")];
         mark_seen(&store, 7, &op[..1], "t3");
-        assert_eq!(new_count(&store, 7, Some(&op)), 1);
+        assert_eq!(new_count(&store, 7, Some(&op), ME), 1);
         mark_seen(&store, 7, &op, "t4");
-        assert_eq!(new_count(&store, 7, Some(&op)), 0);
+        assert_eq!(new_count(&store, 7, Some(&op), ME), 0);
+        // the user's own reply after that does not show as new
+        let replied = [c(3, "a"), c(4, "b"), mine(6, "c")];
+        assert_eq!(new_count(&store, 7, Some(&replied), ME), 0);
         // seen never goes back
         raise(&store, 7, SEEN, 2, "t5");
         assert_eq!(seen_id(&store, 7), Some(4));

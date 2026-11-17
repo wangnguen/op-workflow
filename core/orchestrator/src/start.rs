@@ -466,6 +466,7 @@ mod tests {
             project: "Web Platform".into(),
             description: description.into(),
             updated_at: "2026-11-13T08:00:00Z".into(),
+            priority: "High".into(),
         }
     }
 
@@ -593,6 +594,8 @@ mod tests {
                     created_at: "2026-11-12T01:00:00Z".into(),
                     raw: "Vẫn lỗi".into(),
                     author: None,
+                    author_id: None,
+                    version: None,
                 }],
             )),
             task_url: "https://op.example.com/work_packages/188001".into(),

@@ -10,8 +10,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::{
-    Comment, TrackerApi, TrackerError, TrackerResult, WorkPackage, comments_from_activities, inbox_url,
-    parse_work_package, parse_work_package_collection,
+    Comment, Me, TrackerApi, TrackerError, TrackerResult, WorkPackage, comments_from_activities, inbox_url,
+    parse_me, parse_work_package, parse_work_package_collection,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -113,18 +113,21 @@ impl HttpTracker {
         serde_json::from_str(&body).map_err(|e| TrackerError::Shape(e.to_string()))
     }
 
+    /// Priority colours set by the OpenProject admin (`GET /api/v3/priorities`; same shape as
+    /// statuses). Priorities without a colour are left out.
+    pub fn priority_colors(&self) -> TrackerResult<Vec<(String, String)>> {
+        Ok(crate::parse_status_colors(&self.get_json("/api/v3/priorities")?))
+    }
+
     /// Status colours set by the OpenProject admin (`GET /api/v3/statuses`).
     pub fn status_colors(&self) -> TrackerResult<Vec<(String, String)>> {
         Ok(crate::parse_status_colors(&self.get_json("/api/v3/statuses")?))
     }
 
-    /// Display name of the token owner (`GET /api/v3/users/me`); used to check a new token.
-    pub fn me(&self) -> TrackerResult<String> {
-        let v = self.get_json("/api/v3/users/me")?;
-        v.get("name")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| TrackerError::Shape("users/me without name".into()))
+    /// The token owner (`GET /api/v3/users/me`): checks a new token, and its id tells the
+    /// user's own comments from other people's.
+    pub fn me(&self) -> TrackerResult<Me> {
+        parse_me(&self.get_json("/api/v3/users/me")?)
     }
 }
 
