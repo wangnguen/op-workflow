@@ -13,6 +13,11 @@ import type { FindingView, TaskDetail } from "../../ipc/types";
 import { parseBlocks } from "../../shared/Markdown";
 import { asTab, defaultTab, findingCounts, gateTab, sortFindings, unpicked, unpickedSevere } from "./taskTabs";
 
+/** The plan gate waits for the analysis's questions: leave them all to the AI. */
+function answerAll(wpId: number): void {
+  for (const q of mockTaskDetail(wpId).questions) mockFlowAction(wpId, { type: "answerQuestion", id: q.id, aiDecides: true });
+}
+
 const finding = (over: Partial<FindingView>): FindingView => ({
   fingerprint: "x",
   severity: "low",
@@ -85,7 +90,21 @@ describe("mock workflow (browser preview)", () => {
     expect(mockFlowCard(7)?.step?.state).toBe("running");
     expect(step(7)).toMatchObject({ status: "gate", gate: { kind: "planReview" } });
     expect(() => mockFlowAction(7, { type: "rejectPlan", feedback: " " })).toThrow();
+    // the analysis asks two questions and advises Harness: Duyệt waits for the answers
+    const gate = mockTaskDetail(7);
+    expect(gate.questions.map((q) => q.id)).toEqual(["q1", "q2"]);
+    expect(gate.uses).toEqual(["harness"]);
+    expect(gate.gate?.message).toContain("AI hỏi 2 câu");
+    expect(() => mockFlowAction(7, { type: "approvePlan" })).toThrow(/Còn 2 câu hỏi/);
+    mockFlowAction(7, { type: "answerQuestion", id: "q1", answer: " Có " });
+    mockFlowAction(7, { type: "answerQuestion", id: "q2", aiDecides: true });
+    expect(() => mockFlowAction(7, { type: "setUses", step: "checks", on: true })).toThrow();
+    mockFlowAction(7, { type: "setUses", step: "browserTest", on: true });
     mockFlowAction(7, { type: "approvePlan" });
+    const plan = mockTaskDetail(7).plan ?? "";
+    expect(plan).toContain("## Câu hỏi và trả lời");
+    expect(plan).toContain("→ Có\n");
+    expect(plan).toContain("→ AI tự quyết");
     expect(step(7)).toMatchObject({ status: "ready", current: "reviewLocal" });
     // Tự review reports a high and a low: the user picks what the AI fixes
     mockFlowAction(7, { type: "run" });
@@ -134,10 +153,11 @@ describe("mock workflow (browser preview)", () => {
     mockFlowAction(9, { type: "run" });
     expect(mockStepChat(9).run.state).toBe("running");
     step(9);
+    answerAll(9);
     mockFlowAction(9, { type: "approvePlan" });
     const d = step(9);
     const [analyze, implement] = d.runs;
-    expect(analyze).toMatchObject({ step: "analyze", state: "done", note: "plan: 2 file sẽ sửa, 1 câu hỏi" });
+    expect(analyze).toMatchObject({ step: "analyze", state: "done", note: "plan: 2 file sẽ sửa, 2 câu hỏi, đề xuất Harness" });
     expect(analyze?.resume).toMatch(/^claude --resume /);
     expect(implement?.note).toBe("2 file thay đổi (+38 −6), 1 lệnh bị chặn");
     expect(implement?.denials[0]?.rules).toEqual([

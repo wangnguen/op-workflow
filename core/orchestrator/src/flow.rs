@@ -30,9 +30,9 @@ use opw_context::prompts::{self, FixItem};
 use opw_domain::finding::{Severity, fingerprint};
 use opw_domain::view::{
     AgentKind, AgentView, AlertKind, ApiError, CarryOn, ChatItem, ChatKind, ChatView, Decision,
-    FindingDecision, FindingView, FlowAction, FlowError, FlowStatus, GateKind, GateView, LogLine, Provider,
-    PushBlock, PushView, QuotaSnapshot, ReviewNote, RunState, RunSummary, RunView, SessionStatus, StepRef,
-    StepView, TaskColumn, TaskDetail, ToolEvent,
+    FindingDecision, FindingView, FlowAction, FlowError, FlowStatus, GateKind, GateView, LogLine,
+    PlanQuestion, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote, RunState, RunSummary, RunView,
+    SessionStatus, StepProposal, StepRef, StepView, TaskColumn, TaskDetail, ToolEvent,
 };
 use opw_domain::workflow::{AfterFix, Phase, StepKind, StepState, Workflow, WorkflowEvent};
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
@@ -57,6 +57,12 @@ const CODEX_HANDOFF: u64 = 400_000;
 const NOTE_CHARS: usize = 400;
 /// Run logs older than this are deleted when the app starts.
 const RUN_LOG_DAYS: u64 = 14;
+/// Optional steps the user turns on or off per task (the analysis proposes them).
+const SWITCHABLE: [StepKind; 2] = [StepKind::Harness, StepKind::BrowserTest];
+/// Steps this build cannot run yet (parts 5c, 5e, 5f): turned on, they are passed as "bỏ qua".
+const NOT_YET: [StepKind; 3] = [StepKind::Checks, StepKind::Harness, StepKind::BrowserTest];
+/// What a question left to the AI says in plan.md.
+const AI_DECIDES: &str = "AI tự quyết";
 
 // ---------- launching AI processes ----------
 
@@ -153,6 +159,12 @@ struct Saved {
     finished: bool,
     /// What the user wrote with "Làm tiếp → quay lại Viết code"; goes into the next Viết code.
     note: Option<String>,
+    /// The latest analysis's questions with the user's answers.
+    questions: Vec<PlanQuestion>,
+    /// The latest analysis's advice on Harness / Test trình duyệt.
+    proposals: Vec<StepProposal>,
+    /// Optional steps the user turned on or off by hand: a new analysis no longer changes them.
+    picked: Vec<StepKind>,
 }
 
 #[derive(Debug)]
@@ -704,14 +716,17 @@ impl Flow {
                         })
                     })
                     .collect();
-                tasks.insert(
-                    wp_id,
-                    Entry {
-                        saved,
-                        run: None,
-                        log,
-                    },
-                );
+                let mut entry = Entry {
+                    saved,
+                    run: None,
+                    log,
+                };
+                if pass_not_yet(&mut entry) {
+                    if let Ok(json) = serde_json::to_string(&entry.saved) {
+                        let _ = s.save_flow(wp_id, &json, &at);
+                    }
+                }
+                tasks.insert(wp_id, entry);
             }
         }
         if let Some(dir) = &runs_dir {
@@ -821,6 +836,7 @@ impl Flow {
             let mut tasks = self.inner.lock_tasks();
             let entry = tasks.get_mut(&wp_id).ok_or_else(flow_missing)?;
             let start = apply_action(entry, &ctx, &action, &self.inner.store)?;
+            pass_not_yet(entry);
             if !matches!(action, FlowAction::Run | FlowAction::Retry) || start {
                 self.inner.persist(wp_id, entry);
             }
@@ -1028,6 +1044,12 @@ impl Flow {
             auto_advance: ctx.auto(&entry.saved),
             brief: ctx.read(BRIEF_FILE),
             plan: ctx.read(PLAN_FILE),
+            questions: entry.saved.questions.clone(),
+            proposals: entry.saved.proposals.clone(),
+            uses: SWITCHABLE
+                .into_iter()
+                .filter(|s| entry.saved.workflow.uses(*s))
+                .collect(),
             findings: findings.iter().map(finding_view).collect(),
             review_notes: review_notes(ctx),
             push,
@@ -1307,8 +1329,9 @@ fn prompt_of(job: &Job) -> String {
     }
 }
 
-/// "plan: 3 file sẽ sửa, 2 câu hỏi" from the sections `prompts::analyze` asks for.
-fn plan_note(plan: &str) -> String {
+/// "plan: 3 file sẽ sửa, 2 câu hỏi, đề xuất Harness" from the sections `prompts::analyze` asks
+/// for, the questions and the steps the AI advises.
+fn plan_note(plan: &str, questions: usize, proposals: &[StepProposal]) -> String {
     let section = |title: &str| -> Vec<&str> {
         let mut lines = plan
             .lines()
@@ -1321,16 +1344,20 @@ fn plan_note(plan: &str) -> String {
         .iter()
         .filter(|l| l.starts_with(['-', '*', '+']) || l.chars().next().is_some_and(|c| c.is_ascii_digit()))
         .count();
-    let questions = section("câu hỏi")
-        .iter()
-        .filter(|l| l.contains('?') || l.contains('？'))
-        .count();
     let mut parts = Vec::new();
     if files > 0 {
         parts.push(format!("{files} file sẽ sửa"));
     }
     if questions > 0 {
         parts.push(format!("{questions} câu hỏi"));
+    }
+    let advised: Vec<&str> = proposals
+        .iter()
+        .filter(|p| p.recommend)
+        .map(|p| step_label(p.step))
+        .collect();
+    if !advised.is_empty() {
+        parts.push(format!("đề xuất {}", advised.join(" + ")));
     }
     if parts.is_empty() {
         "đã viết plan.md".into()
@@ -1453,8 +1480,25 @@ fn apply_action(
             Ok(false)
         }
         FlowAction::ApprovePlan => {
-            if ctx.read(PLAN_FILE).is_none_or(|p| p.trim().is_empty()) {
-                return Err(ApiError::new("plan.missing", "Chưa có plan.md để duyệt"));
+            let plan = ctx
+                .read(PLAN_FILE)
+                .filter(|p| !p.trim().is_empty())
+                .ok_or_else(|| ApiError::new("plan.missing", "Chưa có plan.md để duyệt"))?;
+            if phase != Phase::Gate(GateKind::PlanReview) {
+                return Err(not_now("duyệt plan"));
+            }
+            let open = entry.saved.questions.iter().filter(|q| !q.answered()).count();
+            if open > 0 {
+                return Err(ApiError::new(
+                    "plan.questions",
+                    format!(
+                        "Còn {open} câu hỏi chưa trả lời: trả lời hoặc chọn \"{AI_DECIDES}\" trước khi duyệt"
+                    ),
+                ));
+            }
+            if !entry.saved.questions.is_empty() {
+                write_task_file(ctx, PLAN_FILE, &plan_with_answers(&plan, &entry.saved.questions))
+                    .map_err(|e| ApiError::new(e.code, e.message))?;
             }
             event(entry, E::PlanApproved)?;
             push_log(
@@ -1479,6 +1523,62 @@ fn apply_action(
                 "Bạn góp ý plan: phân tích lại",
             );
             Ok(true)
+        }
+        FlowAction::AnswerQuestion {
+            id,
+            answer,
+            ai_decides,
+        } => {
+            if phase != Phase::Gate(GateKind::PlanReview) {
+                return Err(not_now("trả lời câu hỏi của plan"));
+            }
+            let q = entry
+                .saved
+                .questions
+                .iter_mut()
+                .find(|q| q.id == *id)
+                .ok_or_else(|| ApiError::new("plan.question", "Không thấy câu hỏi này nữa"))?;
+            q.ai_decides = *ai_decides;
+            q.answer = if *ai_decides {
+                None
+            } else {
+                answer
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_owned)
+            };
+            Ok(false)
+        }
+        FlowAction::SetUses { step, on } => {
+            if !SWITCHABLE.contains(step) {
+                return Err(ApiError::new(
+                    "flow.uses",
+                    format!("{} không bật/tắt theo task được", step_label(*step)),
+                ));
+            }
+            let wf = &entry.saved.workflow;
+            if phase == Phase::NotStarted || entry.saved.finished || wf.state_of(*step) != StepState::Pending
+            {
+                return Err(ApiError::new(
+                    "flow.uses",
+                    format!(
+                        "Đã qua {}: chỉ bật/tắt được trước khi tới bước này",
+                        step_label(*step)
+                    ),
+                ));
+            }
+            entry.saved.workflow.set_uses(*step, *on);
+            if !entry.saved.picked.contains(step) {
+                entry.saved.picked.push(*step);
+            }
+            let text = format!(
+                "Bạn {} {} cho task này",
+                if *on { "bật" } else { "tắt" },
+                step_label(*step)
+            );
+            push_log(entry, Some(*step), "info", &text);
+            Ok(false)
         }
         FlowAction::SelfCode => {
             event(entry, E::SelfCode)?;
@@ -1637,6 +1737,74 @@ fn apply_action(
             Ok(false)
         }
     }
+}
+
+/// The flow reached an optional step this build cannot run yet: pass it as "bỏ qua" (with a
+/// log line) and move on, so the task never waits on a step nothing will run. Returns whether
+/// anything changed.
+fn pass_not_yet(entry: &mut Entry) -> bool {
+    let mut changed = false;
+    while entry.run.is_none() {
+        let Phase::Running(step) = entry.saved.workflow.phase() else {
+            break;
+        };
+        if !NOT_YET.contains(&step)
+            || entry
+                .saved
+                .workflow
+                .apply(WorkflowEvent::StepSkipped(step))
+                .is_err()
+        {
+            break;
+        }
+        push_log(
+            entry,
+            Some(step),
+            "info",
+            &format!("{} chưa chạy được ở bản này: bỏ qua", step_label(step)),
+        );
+        changed = true;
+    }
+    changed
+}
+
+/// plan.md with the user's answers as its last section (an older answers section is replaced).
+fn plan_with_answers(plan: &str, questions: &[PlanQuestion]) -> String {
+    let body = match plan.find(prompts::ANSWERS_HEADING) {
+        Some(at) => &plan[..at],
+        None => plan,
+    };
+    let body = body.trim_end();
+    if questions.is_empty() {
+        return format!("{body}\n");
+    }
+    let mut out = format!("{body}\n\n{}\n", prompts::ANSWERS_HEADING);
+    for q in questions {
+        let answer = if q.ai_decides {
+            AI_DECIDES
+        } else {
+            q.answer.as_deref().map_or("", str::trim)
+        };
+        out.push_str(&format!("\n- {}\n  → {answer}\n", q.text.trim()));
+    }
+    out
+}
+
+/// The analysis's questions; an earlier answer is kept when the same question comes back.
+fn new_questions(raw: Vec<text::RawQuestion>, before: &[PlanQuestion]) -> Vec<PlanQuestion> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(i, q)| {
+            let old = before.iter().find(|b| b.text.trim() == q.text.trim());
+            PlanQuestion {
+                id: format!("q{}", i + 1),
+                text: q.text,
+                options: q.options,
+                answer: old.and_then(|o| o.answer.clone()),
+                ai_decides: old.is_some_and(|o| o.ai_decides),
+            }
+        })
+        .collect()
 }
 
 fn push_log(entry: &mut Entry, step: Option<StepKind>, kind: &str, text: &str) {
@@ -1841,7 +2009,12 @@ fn gate_message(kind: GateKind, entry: &Entry, findings: &[FindingRow]) -> Strin
     let wf = &entry.saved.workflow;
     match kind {
         GateKind::PlanReview => {
-            "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.".into()
+            let open = entry.saved.questions.iter().filter(|q| !q.answered()).count();
+            if open > 0 {
+                format!("Plan đã xong, AI hỏi {open} câu: trả lời (hoặc để AI tự quyết) rồi duyệt.")
+            } else {
+                "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.".into()
+            }
         }
         GateKind::Findings => {
             let review = wf.gate_review().unwrap_or(StepKind::FinalReview);
@@ -2158,6 +2331,7 @@ impl Inner {
             }
         };
         push_log(entry, Some(step), kind, &text);
+        pass_not_yet(entry);
         self.persist(wp_id, entry);
         let go_on = kind == "ok"
             && ctx.auto(&entry.saved)
@@ -2668,25 +2842,71 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         StepKind::Analyze => {
             let previous_plan = ctx.read(PLAN_FILE);
             let previous = feedback.as_deref().zip(previous_plan.as_deref());
-            let prompt = prompts::analyze(&brief, previous);
+            // answers to the previous plan's questions carry over into the new analysis
+            let before = inner
+                .with_saved(wp_id, |s| s.questions.clone())
+                .unwrap_or_default();
+            let answers: Vec<(String, String)> = before
+                .iter()
+                .filter(|q| q.answered())
+                .map(|q| {
+                    let a = if q.ai_decides {
+                        AI_DECIDES.to_owned()
+                    } else {
+                        q.answer.clone().unwrap_or_default()
+                    };
+                    (q.text.clone(), a)
+                })
+                .collect();
+            let answers: Vec<(&str, &str)> = answers.iter().map(|(q, a)| (q.as_str(), a.as_str())).collect();
+            let prompt = prompts::analyze(&brief, previous, &answers);
             let r = inner.run_claude(
                 ctx,
                 step,
                 &job(Provider::Claude, cl(claude::analyze_args(budget)), Some(prompt)),
                 claim,
             )?;
-            let plan = r.text.trim();
-            if plan.is_empty() {
+            let answer = text::plan_answer(&r.text);
+            if answer.plan.is_empty() {
                 return Err(flow_error(
                     "plan.empty",
                     "Claude không trả về plan. Xem Log rồi bấm Thử lại.",
                 ));
             }
-            write_task_file(ctx, PLAN_FILE, plan)?;
+            write_task_file(ctx, PLAN_FILE, &answer.plan)?;
             set_session(&r.session_id);
+            let questions = new_questions(answer.questions, &before);
+            let proposals: Vec<StepProposal> = answer
+                .proposals
+                .into_iter()
+                .filter_map(|p| {
+                    let step = match p.step {
+                        "harness" => StepKind::Harness,
+                        "browserTest" => StepKind::BrowserTest,
+                        _ => return None,
+                    };
+                    Some(StepProposal {
+                        step,
+                        recommend: p.recommend,
+                        reason: p.reason,
+                        checks: p.checks,
+                    })
+                })
+                .collect();
+            let note = plan_note(&answer.plan, questions.len(), &proposals);
+            inner.with_saved(wp_id, |s| {
+                // the AI's advice turns a step on or off unless the user already chose
+                for p in &proposals {
+                    if !s.picked.contains(&p.step) && s.workflow.state_of(p.step) == StepState::Pending {
+                        s.workflow.set_uses(p.step, p.recommend);
+                    }
+                }
+                s.questions = questions;
+                s.proposals = proposals;
+            });
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Analyze),
-                note: plan_note(plan),
+                note,
                 cost: Some(r.cost_usd),
             })
         }
@@ -3957,6 +4177,123 @@ mod tests {
     }
 
     #[test]
+    fn plan_questions_and_step_advice_wait_for_the_user() {
+        let Some(s) = setup() else { return };
+        let analyses = AtomicUsize::new(0);
+        let (flow, fake) = flow_with(&s, false, move |job, _stop, out| {
+            if kind(job) == "analyze" {
+                let n = analyses.fetch_add(1, Ordering::SeqCst);
+                let json = if n == 0 {
+                    r#"{"questions":[{"text":"Giữ API cũ?","options":["Có","Không"]},{"text":"Thêm log?"}],
+                       "harness":{"recommend":false,"reason":"ít logic"},
+                       "browserTest":{"recommend":true,"reason":"đổi màn hình","scenario":["mở trang","bấm Lưu"]}}"#
+                } else {
+                    r#"{"questions":[{"text":"Giữ API cũ?"}],
+                       "harness":{"recommend":true,"reason":"có hàm tính","checks":"tổng rỗng"},
+                       "browserTest":{"recommend":true,"reason":"đổi màn hình"}}"#
+                };
+                out(&result_line(&format!(
+                    "## Nguyên nhân\nx\n## Rủi ro\nthấp\n\n```json\n{json}\n```"
+                )));
+                return ok();
+            }
+            (happy(CLEAN))(job, _stop, out)
+        });
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(d.plan.as_deref(), Some("## Nguyên nhân\nx\n## Rủi ro\nthấp\n"));
+        assert_eq!(d.questions.len(), 2);
+        assert_eq!(d.questions[0].options, vec!["Có", "Không"]);
+        assert_eq!(d.proposals.len(), 2);
+        assert_eq!(d.proposals[1].checks, "- mở trang\n- bấm Lưu");
+        // the AI's advice decides until the user switches a step
+        assert_eq!(d.uses, vec![StepKind::BrowserTest]);
+        let analyze = d.runs.iter().find(|r| r.step == StepKind::Analyze).unwrap();
+        assert_eq!(
+            analyze.note.as_deref(),
+            Some("plan: 2 câu hỏi, đề xuất Test trình duyệt")
+        );
+
+        let set = |step, on| FlowAction::SetUses { step, on };
+        assert_eq!(
+            flow.act(ctx.clone(), set(StepKind::Checks, true))
+                .unwrap_err()
+                .code,
+            "flow.uses"
+        );
+        flow.act(ctx.clone(), set(StepKind::BrowserTest, false)).unwrap();
+        let ai = FlowAction::AnswerQuestion {
+            id: "q1".into(),
+            answer: None,
+            ai_decides: true,
+        };
+        flow.act(ctx.clone(), ai).unwrap();
+        let missing = FlowAction::AnswerQuestion {
+            id: "q9".into(),
+            answer: Some("x".into()),
+            ai_decides: false,
+        };
+        assert_eq!(flow.act(ctx.clone(), missing).unwrap_err().code, "plan.question");
+        let err = flow.act(ctx.clone(), FlowAction::ApprovePlan).unwrap_err();
+        assert!(err.message.contains("Còn 1 câu hỏi"), "{}", err.message);
+
+        // asking for changes: the answers go into the new analysis and stay on the same question
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::RejectPlan {
+                feedback: "ngắn hơn".into(),
+            },
+        );
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let again = jobs[1].stdin.as_deref().unwrap();
+        assert!(
+            again.contains("<answers>\n- Giữ API cũ?\n  → AI tự quyết\n</answers>"),
+            "{again}"
+        );
+        assert!(!again.contains("Thêm log?\n  →"));
+        assert_eq!(d.questions.len(), 1);
+        assert!(d.questions[0].ai_decides);
+        // the user's "off" holds; Harness follows the new advice
+        assert_eq!(d.uses, vec![StepKind::Harness]);
+
+        // approved: Harness is on but cannot run in this build, so it is passed as "bỏ qua"
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(
+            (d.current, d.status),
+            (Some(StepKind::ReviewLocal), FlowStatus::Ready),
+            "{:?}",
+            d.error
+        );
+        let harness = d.steps.iter().find(|v| v.kind == StepKind::Harness).unwrap();
+        assert_eq!(harness.state, StepState::Skipped);
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text == "Harness chưa chạy được ở bản này: bỏ qua")
+        );
+        assert!(
+            d.plan
+                .as_deref()
+                .unwrap()
+                .ends_with("- Giữ API cũ?\n  → AI tự quyết\n")
+        );
+        assert_eq!(
+            flow.act(ctx.clone(), set(StepKind::Harness, false))
+                .unwrap_err()
+                .code,
+            "flow.uses"
+        );
+        // Test trình duyệt is not reached yet: the user can still turn it back on
+        flow.act(ctx.clone(), set(StepKind::BrowserTest, true)).unwrap();
+        assert_eq!(
+            flow.detail(&ctx).uses,
+            vec![StepKind::Harness, StepKind::BrowserTest]
+        );
+    }
+
+    #[test]
     fn runs_keep_a_note_a_chat_and_the_refused_commands() {
         let Some(s) = setup() else { return };
         let fake = Arc::new(Fake {
@@ -3979,9 +4316,28 @@ mod tests {
         assert!(flow.detail(&ctx).runs.is_empty());
         assert_eq!(flow.chat(&ctx, None).unwrap_err().code, "run.missing");
 
-        run(&flow, &ctx, FlowAction::Run);
+        let d = run(&flow, &ctx, FlowAction::Run);
+        // the plan asks one question (markdown, no json block): approving waits for the answer
+        let [q] = &d.questions[..] else {
+            panic!("{:?}", d.questions)
+        };
+        assert_eq!((q.id.as_str(), q.text.as_str()), ("q1", "Có cần migrate không?"));
+        assert!(d.proposals.is_empty() && d.uses.is_empty());
+        let err = flow.act(ctx.clone(), FlowAction::ApprovePlan).unwrap_err();
+        assert_eq!(err.code, "plan.questions");
+        let answer = |text: &str| FlowAction::AnswerQuestion {
+            id: "q1".into(),
+            answer: Some(text.into()),
+            ai_decides: false,
+        };
+        flow.act(ctx.clone(), answer("  ")).unwrap();
+        assert!(!flow.detail(&ctx).questions[0].answered());
+        flow.act(ctx.clone(), answer("Không, giữ schema")).unwrap();
         let d = run(&flow, &ctx, FlowAction::ApprovePlan);
         assert_eq!(d.current, Some(StepKind::ReviewLocal), "{:?}", d.error);
+        // the answer is in plan.md and reaches Viết code through it
+        let plan = d.plan.as_deref().unwrap();
+        assert!(plan.ends_with("## Câu hỏi và trả lời\n\n- Có cần migrate không?\n  → Không, giữ schema\n"));
         let [analyze, implement] = &d.runs[..] else {
             panic!("{:?}", d.runs)
         };
@@ -4010,6 +4366,7 @@ mod tests {
         let code = jobs[1].stdin.as_deref().unwrap();
         assert!(code.contains("allowed in this repository: `Bash(npx tsc *)`"));
         assert!(code.contains("Do not chain commands"));
+        assert!(code.contains("Follow them") && code.contains("→ Không, giữ schema"));
 
         // the latest run's chat: the prompt first, the refused command marked
         let chat = flow.chat(&ctx, None).unwrap();
@@ -4093,7 +4450,55 @@ mod tests {
             None
         );
         assert_eq!(resume_command(StepKind::Fix, AgentKind::Claude, None), None);
-        assert_eq!(plan_note("## Nguyên nhân\nkhông có danh sách"), "đã viết plan.md");
+        assert_eq!(
+            plan_note("## Nguyên nhân\nkhông có danh sách", 0, &[]),
+            "đã viết plan.md"
+        );
+        let advice = [
+            StepProposal {
+                step: StepKind::Harness,
+                recommend: true,
+                reason: String::new(),
+                checks: String::new(),
+            },
+            StepProposal {
+                step: StepKind::BrowserTest,
+                recommend: false,
+                reason: String::new(),
+                checks: String::new(),
+            },
+        ];
+        assert_eq!(plan_note("x", 2, &advice), "plan: 2 câu hỏi, đề xuất Harness");
+        // the answers section is replaced, not added twice
+        let q = |text: &str, answer: Option<&str>, ai: bool| PlanQuestion {
+            id: "q1".into(),
+            text: text.into(),
+            options: vec![],
+            answer: answer.map(str::to_owned),
+            ai_decides: ai,
+        };
+        let once = plan_with_answers("## Rủi ro\nx\n", &[q("A?", Some(" Có "), false)]);
+        assert_eq!(once, "## Rủi ro\nx\n\n## Câu hỏi và trả lời\n\n- A?\n  → Có\n");
+        let twice = plan_with_answers(&once, &[q("A?", None, true)]);
+        assert_eq!(
+            twice,
+            "## Rủi ro\nx\n\n## Câu hỏi và trả lời\n\n- A?\n  → AI tự quyết\n"
+        );
+        let kept = new_questions(
+            vec![
+                text::RawQuestion {
+                    text: "B?".into(),
+                    options: vec![],
+                },
+                text::RawQuestion {
+                    text: " A? ".into(),
+                    options: vec![],
+                },
+            ],
+            &[q("A?", None, true)],
+        );
+        assert_eq!((kept[0].id.as_str(), kept[0].answered()), ("q1", false));
+        assert_eq!((kept[1].id.as_str(), kept[1].ai_decides), ("q2", true));
         let job = Job {
             agent: Provider::Claude,
             args: claude::review_local_args("main", 1.0),

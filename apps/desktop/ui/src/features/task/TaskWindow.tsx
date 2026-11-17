@@ -37,6 +37,8 @@ import { modelText } from "../../shared/models";
 import { Icon } from "../../shared/ui/Icon";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
+import { OptionalSteps, PlanQuestions } from "./PlanExtras";
+import { unanswered } from "./planQuestions";
 import { ProgressTab } from "./ProgressTab";
 import { lastEnded } from "./runs";
 import {
@@ -466,7 +468,12 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
           <button className="btn btn--sm" disabled={disabled} title={t.selfCodeHint} onClick={() => onAction({ type: "selfCode" })}>
             {t.selfCode}
           </button>
-          <button className="btn btn--primary btn--sm" disabled={disabled} title={t.approveHint} onClick={() => onAction({ type: "approvePlan" })}>
+          <button
+            className="btn btn--primary btn--sm"
+            disabled={disabled || unanswered(d.questions) > 0}
+            title={unanswered(d.questions) > 0 ? t.questions.approveBlocked(unanswered(d.questions)) : t.approveHint}
+            onClick={() => onAction({ type: "approvePlan" })}
+          >
             <Icon name="check" size={12} />
             {t.approve}
           </button>
@@ -677,15 +684,18 @@ function PlanTab({ detail: d, busy, feedbackOpen, setFeedbackOpen, onAction }: P
   const [feedback, setFeedback] = useState("");
   if (!d.plan) return <p className="dim">{t.noPlan}</p>;
   const atGate = d.gate?.kind === "planReview";
+  const left = unanswered(d.questions);
   return (
     <div className="task-pane">
       {atGate && (
         <p className="note note--warn">
           <Icon name="alert" size={13} />
-          {t.planGate}
+          {left > 0 ? t.planGateQuestions(left) : t.planGate}
         </p>
       )}
       <Markdown text={d.plan} className="task-md" />
+      {atGate && <PlanQuestions detail={d} onAction={onAction} />}
+      <OptionalSteps detail={d} onAction={onAction} />
       {atGate && feedbackOpen && (
         <div className="task-feedback">
           <textarea

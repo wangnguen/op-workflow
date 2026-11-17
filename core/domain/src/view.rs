@@ -1016,6 +1016,43 @@ pub struct RunView {
     pub command: Option<String>,
 }
 
+/// A question the analysis asks the user; the plan gate waits until each one is answered or
+/// left to the AI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanQuestion {
+    /// `q1`, `q2`, … in the order the AI asked.
+    pub id: String,
+    pub text: String,
+    /// Answers the AI suggests (the user may write another one).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// "AI tự quyết": the user leaves it to the AI.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ai_decides: bool,
+}
+
+impl PlanQuestion {
+    pub fn answered(&self) -> bool {
+        self.ai_decides || self.answer.as_deref().is_some_and(|a| !a.trim().is_empty())
+    }
+}
+
+/// What the analysis proposes for an optional step (Harness, Test trình duyệt) of this task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepProposal {
+    pub step: StepKind,
+    pub recommend: bool,
+    #[serde(default)]
+    pub reason: String,
+    /// What it would check (harness) or the scenario (browser test).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checks: String,
+}
+
 /// What a review said about documentation and tests (the `/review-local` docs/test section).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1215,6 +1252,15 @@ pub struct TaskDetail {
     pub brief: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// The analysis's questions and the user's answers (the plan gate waits for all of them).
+    #[serde(default)]
+    pub questions: Vec<PlanQuestion>,
+    /// The analysis's advice on Harness and Test trình duyệt.
+    #[serde(default)]
+    pub proposals: Vec<StepProposal>,
+    /// Optional steps this task runs (Harness, Test trình duyệt; off = "bỏ qua").
+    #[serde(default)]
+    pub uses: Vec<StepKind>,
     pub findings: Vec<FindingView>,
     /// Docs/test judgement of the latest review of each kind (Tự review, Review chốt, …).
     #[serde(default)]
@@ -1248,6 +1294,18 @@ pub enum FlowAction {
     RejectPlan { feedback: String },
     /// Plan gate: the user codes by hand.
     SelfCode,
+    /// Plan gate: answer one of the analysis's questions (`answer`), or leave it to the AI.
+    #[serde(rename_all = "camelCase")]
+    AnswerQuestion {
+        id: String,
+        #[serde(default)]
+        answer: Option<String>,
+        #[serde(default)]
+        ai_decides: bool,
+    },
+    /// Turn an optional step (Harness, Test trình duyệt) on or off for this task, until the flow
+    /// gets there.
+    SetUses { step: StepKind, on: bool },
     /// The user finished coding by hand.
     SelfCodeDone,
     /// Findings gate: fix the picked findings (`fix`), or go on without fixing.
@@ -1488,6 +1546,41 @@ mod tests {
             FlowAction::AfterFix {
                 choice: AfterFix::CrossReview
             }
+        );
+        let a: FlowAction =
+            serde_json::from_value(json!({"type": "answerQuestion", "id": "q1", "answer": "Có"})).unwrap();
+        assert_eq!(
+            a,
+            FlowAction::AnswerQuestion {
+                id: "q1".into(),
+                answer: Some("Có".into()),
+                ai_decides: false
+            }
+        );
+        let a: FlowAction =
+            serde_json::from_value(json!({"type": "answerQuestion", "id": "q2", "aiDecides": true})).unwrap();
+        assert_eq!(
+            a,
+            FlowAction::AnswerQuestion {
+                id: "q2".into(),
+                answer: None,
+                ai_decides: true
+            }
+        );
+        let a: FlowAction =
+            serde_json::from_value(json!({"type": "setUses", "step": "harness", "on": false})).unwrap();
+        assert_eq!(
+            a,
+            FlowAction::SetUses {
+                step: StepKind::Harness,
+                on: false
+            }
+        );
+        let q: PlanQuestion = serde_json::from_value(json!({"id": "q1", "text": "?"})).unwrap();
+        assert!(!q.answered());
+        assert_eq!(
+            serde_json::to_value(&q).unwrap(),
+            json!({"id": "q1", "text": "?"})
         );
         // the old button sends no `forced`; "Làm tiếp" may leave out the step and the note
         let a: FlowAction = serde_json::from_value(json!({"type": "finish"})).unwrap();

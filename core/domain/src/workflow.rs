@@ -164,6 +164,8 @@ pub enum AfterFix {
 pub enum WorkflowEvent {
     Start,
     StepSucceeded(StepKind),
+    /// An optional step the task turned on that this build cannot run yet: passed as "bỏ qua".
+    StepSkipped(StepKind),
     StepFailed(StepKind),
     Retry(StepKind),
     PlanApproved,
@@ -385,6 +387,14 @@ impl Workflow {
             (Phase::Running(cur), E::StepSucceeded(step)) => {
                 self.ensure_current(cur, step)?;
                 self.on_step_succeeded(step)
+            }
+            (Phase::Running(cur), E::StepSkipped(step)) if step.is_optional() => {
+                self.ensure_current(cur, step)?;
+                self.set(step, StepState::Skipped);
+                match step.next() {
+                    Some(next) => self.run(next),
+                    None => Ok(()),
+                }
             }
             (Phase::Running(cur), E::StepFailed(step)) => {
                 self.ensure_current(cur, step)?;
@@ -932,6 +942,11 @@ mod tests {
         let mut again = wf.clone();
         again.apply(E::Reopen(StepKind::Harness)).unwrap();
         assert_eq!(again.phase(), Phase::Running(StepKind::Harness));
+        // turned on but not runnable yet: passed as "bỏ qua"; only optional steps can be
+        again.apply(E::StepSkipped(StepKind::Harness)).unwrap();
+        assert_eq!(again.phase(), Phase::Running(StepKind::ReviewLocal));
+        assert_eq!(again.state_of(StepKind::Harness), StepState::Skipped);
+        assert!(again.apply(E::StepSkipped(StepKind::ReviewLocal)).is_err());
     }
 
     fn legacy(states: &str, phase: &str, round: u8) -> String {

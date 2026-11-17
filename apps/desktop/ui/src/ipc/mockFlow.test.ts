@@ -26,6 +26,11 @@ function finishStep(wpId: number): TaskDetail {
   return mockTaskDetail(wpId);
 }
 
+/** The plan gate waits for the analysis's questions: leave them all to the AI. */
+function answerAll(wpId: number): void {
+  for (const q of mockTaskDetail(wpId).questions) mockFlowAction(wpId, { type: "answerQuestion", id: q.id, aiDecides: true });
+}
+
 const stateOf = (d: TaskDetail, kind: StepKind): StepState | undefined => d.steps.find((s) => s.kind === kind)?.state;
 
 describe("12-step flow in the preview", () => {
@@ -34,6 +39,7 @@ describe("12-step flow in the preview", () => {
     mockStarted(9, "t");
     mockFlowAction(9, { type: "run" });
     expect(finishStep(9).gate?.kind).toBe("planReview");
+    answerAll(9);
     mockFlowAction(9, { type: "approvePlan" });
 
     // Viết code → Kiểm tra and Harness are passed ("bỏ qua") → Tự review
@@ -81,6 +87,7 @@ describe("12-step flow in the preview", () => {
     mockStarted(9, "t");
     mockFlowAction(9, { type: "run" });
     finishStep(9);
+    answerAll(9);
     mockFlowAction(9, { type: "approvePlan" });
     finishStep(9);
     mockFlowAction(9, { type: "run" });

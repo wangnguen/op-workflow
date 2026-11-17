@@ -279,6 +279,196 @@ pub fn findings_from_text(text: &str) -> Option<Vec<RawFinding>> {
     NO_FINDINGS.is_match(text).then(Vec::new)
 }
 
+/// A question the analysis asks the user, as the AI wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawQuestion {
+    pub text: String,
+    /// Answers the AI suggests.
+    pub options: Vec<String>,
+}
+
+/// What the analysis advises for an optional step: `step` is `harness` or `browserTest`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawProposal {
+    pub step: &'static str,
+    pub recommend: bool,
+    pub reason: String,
+    /// What a harness would check, or the browser test scenario.
+    pub checks: String,
+}
+
+/// An analysis answer split into the plan the user reads and the trailing json block.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlanAnswer {
+    /// The markdown plan without the json block.
+    pub plan: String,
+    pub questions: Vec<RawQuestion>,
+    pub proposals: Vec<RawProposal>,
+}
+
+/// Keys of the analysis json block.
+const PLAN_KEYS: [&str; 3] = ["questions", "harness", "browserTest"];
+
+/// Fenced blocks with the line numbers of their opening and closing fences (closing = the line
+/// count when the block is unclosed).
+fn fenced_spans(lines: &[&str]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim_start();
+        let fence = if t.starts_with("```") {
+            "```"
+        } else if t.starts_with("~~~") {
+            "~~~"
+        } else {
+            i += 1;
+            continue;
+        };
+        let mut end = i + 1;
+        while end < lines.len() && !lines[end].trim_start().starts_with(fence) {
+            end += 1;
+        }
+        out.push((i, end));
+        i = end + 1;
+    }
+    out
+}
+
+fn proposal(v: &Value, key: &'static str) -> Option<RawProposal> {
+    let p = v.get(key)?;
+    let recommend = match p {
+        Value::Bool(b) => *b,
+        Value::Object(_) => p.get("recommend").and_then(Value::as_bool).unwrap_or(false),
+        _ => return None,
+    };
+    let checks = ["checks", "scenario"]
+        .iter()
+        .map(|k| match p.get(*k) {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|s| format!("- {}", s.trim()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => string_at(p, k),
+        })
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+    Some(RawProposal {
+        step: key,
+        recommend,
+        reason: string_at(p, "reason"),
+        checks,
+    })
+}
+
+fn questions_from_json(v: &Value) -> Vec<RawQuestion> {
+    let Some(items) = v.get("questions").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|q| {
+            let (text, options) = match q {
+                Value::String(s) => (s.trim().to_owned(), Vec::new()),
+                Value::Object(_) => (
+                    ["text", "question"]
+                        .iter()
+                        .map(|k| string_at(q, k))
+                        .find(|s| !s.is_empty())
+                        .unwrap_or_default(),
+                    q.get("options")
+                        .and_then(Value::as_array)
+                        .map(|o| {
+                            o.iter()
+                                .filter_map(Value::as_str)
+                                .map(|s| s.trim().to_owned())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
+                _ => return None,
+            };
+            (!text.is_empty()).then_some(RawQuestion { text, options })
+        })
+        .collect()
+}
+
+static QUESTION_HEADING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s*#{1,6}\s.*(câu hỏi|questions?)").expect("valid regex"));
+/// `- `, `* `, `> `, `2. `, `3) ` at the start of a line.
+static LIST_MARK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:[-*>]\s+|\d+[.)]\s+)+").expect("valid regex"));
+
+/// Fallback when there is no json block: lines ending in `?` under a heading that names
+/// questions ("## Rủi ro và câu hỏi"), up to the next heading.
+fn questions_from_markdown(plan: &str) -> Vec<RawQuestion> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in plan.lines() {
+        let t = line.trim();
+        if t.starts_with('#') {
+            inside = QUESTION_HEADING.is_match(line);
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let text = LIST_MARK.replace(t, "");
+        let text = text.trim().trim_matches('*').trim();
+        if text.ends_with('?') || text.ends_with('？') {
+            out.push(RawQuestion {
+                text: text.to_owned(),
+                options: Vec::new(),
+            });
+        }
+    }
+    out
+}
+
+/// Split an analysis answer: the last fenced json block with `questions` / `harness` /
+/// `browserTest` is taken out of the plan and read; without one, questions come from the
+/// plan's question section and there are no proposals.
+pub fn plan_answer(text: &str) -> PlanAnswer {
+    let lines: Vec<&str> = text.lines().collect();
+    let block = fenced_spans(&lines).into_iter().rev().find_map(|(open, close)| {
+        let body = lines[open + 1..close.min(lines.len())].join("\n");
+        let v: Value = serde_json::from_str(body.trim()).ok()?;
+        PLAN_KEYS
+            .iter()
+            .any(|k| v.get(k).is_some())
+            .then_some((open, close, v))
+    });
+    let Some((open, close, v)) = block else {
+        let plan = text.trim().to_owned();
+        return PlanAnswer {
+            questions: questions_from_markdown(&plan),
+            plan,
+            proposals: Vec::new(),
+        };
+    };
+    let mut kept: Vec<&str> = lines[..open].to_vec();
+    kept.extend_from_slice(&lines[(close + 1).min(lines.len())..]);
+    while kept.last().is_some_and(|l| l.trim().is_empty()) {
+        kept.pop();
+    }
+    let plan = kept.join("\n").trim().to_owned();
+    let questions = if v.get("questions").is_some() {
+        questions_from_json(&v)
+    } else {
+        questions_from_markdown(&plan)
+    };
+    PlanAnswer {
+        questions,
+        proposals: ["harness", "browserTest"]
+            .into_iter()
+            .filter_map(|k| proposal(&v, k))
+            .collect(),
+        plan,
+    }
+}
+
 /// GitHub issue number from a link such as `https://github.com/o/r/issues/279`.
 pub fn issue_number(url: &str) -> Option<u64> {
     let (_, tail) = url.split_once("/issues/")?;
@@ -358,6 +548,45 @@ mod tests {
         );
         assert_eq!(review_notes("## Kết quả\nKhông có lỗi nào."), None);
         assert_eq!(review_notes("{\"findings\":[],\"notes\":\"  \"}"), None);
+    }
+
+    #[test]
+    fn plan_json_block_gives_questions_and_proposals_and_leaves_the_plan() {
+        let text = "## Nguyên nhân\nx\n\n## Rủi ro\n- r\n\n```json\n{\"questions\":[{\"text\":\"Giữ API cũ?\",\"options\":[\"Có\",\" \",\"Không\"]},\"Đổi tên?\",{\"text\":\"\"}],\
+                    \"harness\":{\"recommend\":true,\"reason\":\"logic thuần\",\"checks\":[\"tính tổng\",\"rỗng\"]},\
+                    \"browserTest\":{\"recommend\":false,\"reason\":\"không có UI\",\"scenario\":\"\"}}\n```\n";
+        let a = plan_answer(text);
+        assert_eq!(a.plan, "## Nguyên nhân\nx\n\n## Rủi ro\n- r");
+        assert_eq!(a.questions.len(), 2);
+        assert_eq!(a.questions[0].options, vec!["Có", "Không"]);
+        assert_eq!(a.questions[1].text, "Đổi tên?");
+        assert_eq!(a.proposals.len(), 2);
+        assert_eq!(a.proposals[0].step, "harness");
+        assert!(a.proposals[0].recommend);
+        assert_eq!(a.proposals[0].checks, "- tính tổng\n- rỗng");
+        assert_eq!(a.proposals[1].step, "browserTest");
+        assert!(!a.proposals[1].recommend);
+        assert_eq!(a.proposals[1].reason, "không có UI");
+        // other code blocks stay in the plan
+        let code = "## Đề xuất\n```ts\nconst a = 1;\n```";
+        assert_eq!(plan_answer(code).plan, code);
+    }
+
+    #[test]
+    fn plan_questions_fall_back_to_the_question_section() {
+        let text = "## Nguyên nhân\nVì sao?\n## Rủi ro và câu hỏi\n- Rủi ro: chậm.\n- **Có cần giữ API cũ?**\n2. Dùng lib nào?\n## Khác\nx?";
+        let a = plan_answer(text);
+        assert_eq!(a.plan, text);
+        let qs: Vec<&str> = a.questions.iter().map(|q| q.text.as_str()).collect();
+        assert_eq!(qs, vec!["Có cần giữ API cũ?", "Dùng lib nào?"]);
+        assert!(a.proposals.is_empty());
+        // a json block without questions: the markdown ones count
+        let mixed = format!("{text}\n```json\n{{\"harness\": false}}\n```");
+        let a = plan_answer(&mixed);
+        assert_eq!(a.questions.len(), 2);
+        assert_eq!(a.proposals.len(), 1);
+        assert!(!a.proposals[0].recommend);
+        assert_eq!(plan_answer("## Rủi ro\nkhông").questions, vec![]);
     }
 
     #[test]

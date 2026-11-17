@@ -17,10 +17,12 @@ import type {
   GateKind,
   GateView,
   LogLine,
+  PlanQuestion,
   PushCheck,
   PushView,
   RunSummary,
   StepKind,
+  StepProposal,
   StepState,
   StepView,
   TaskCard,
@@ -128,8 +130,33 @@ Phương án 1, kèm log cảnh báo để còn thấy dữ liệu hỏng.
 - Test mới: user không có org → 200 + danh sách rỗng.
 - Chạy lại test hiện có của route.
 
-## Rủi ro và câu hỏi
-- Trang mobile có dựa vào lỗi 500 này không?`;
+## Rủi ro
+- Trang mobile có thể đang dựa vào lỗi 500 này để hiện màn "chưa có org".`;
+
+/** What the analysis asks (its json block), as the engine reads it. */
+const QUESTIONS: Omit<PlanQuestion, "id">[] = [
+  { text: "Trang mobile có dựa vào lỗi 500 này để hiện màn \"chưa có org\" không?", options: ["Có, giữ 500 cho mobile", "Không, trả danh sách rỗng cho cả hai"] },
+  { text: "Có cần ghi log cảnh báo khi user không có org không?", options: ["Có, mức warn", "Không cần"] },
+];
+
+/** The analysis's advice on the optional steps. */
+const PROPOSALS: StepProposal[] = [
+  {
+    step: "harness",
+    recommend: true,
+    reason: "Hàm lọc file theo org là logic thuần, thử được ngoài app với vài bộ dữ liệu.",
+    checks: "- user không có org → danh sách rỗng\n- org bị xoá giữa chừng → danh sách rỗng, có log",
+  },
+  {
+    step: "browserTest",
+    recommend: false,
+    reason: "Chỉ đổi API; màn hình web giữ nguyên.",
+  },
+];
+
+const ANSWERS_HEADING = "## Câu hỏi và trả lời";
+const AI_DECIDES = "AI tự quyết";
+const answered = (q: PlanQuestion) => q.aiDecides === true || (q.answer ?? "").trim() !== "";
 
 const PUSH = `### Commit message
 \`\`\`text
@@ -293,6 +320,12 @@ interface Flow {
   fixes: number;
   /** findings the running Sửa lỗi took */
   taking?: number;
+  /** the analysis's questions with the answers so far */
+  questions: PlanQuestion[];
+  proposals: StepProposal[];
+  /** optional steps the task runs; `picked` = switched by the user (the AI's advice no longer changes them) */
+  uses: StepKind[];
+  picked: StepKind[];
 }
 
 type Review = "reviewLocal" | "crossReview" | "finalReview";
@@ -375,15 +408,19 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo", seeded
       allow: [],
       checks: 0,
       fixes: 0,
+      questions: [],
+      proposals: [],
+      uses: [],
+      picked: [],
     };
     if (seeded && wpId === DEMO_ACTIVE_WP) {
       // the animated demo task: open it where the demo shows a gate, at the plan review
       f.title = "Không tải được danh sách file khi user chưa có org";
       f.states.analyze = "waitingUser";
-      f.plan = PLAN;
+      analyzed(f);
       toGate(f, "planReview", "analyze");
       f.started = iso(Date.now() - 12 * 60_000);
-      seedRun(f, "analyze", 9, 50, "plan: 2 file sẽ sửa, 1 câu hỏi");
+      seedRun(f, "analyze", 9, 50, "plan: 2 file sẽ sửa, 2 câu hỏi, đề xuất Harness");
     }
     if (seeded && wpId === DEMO_PUSH_WP) {
       // the demo card in "Chờ bạn push": every step done, the push summary written
@@ -538,6 +575,31 @@ function findingsGate(f: Flow, review: Review): void {
   toGate(f, "findings", review);
 }
 
+/** Analyze wrote its plan: questions (an earlier answer stays on the same question) and the
+ *  advice, which turns a step on or off unless the user switched it. */
+function analyzed(f: Flow): void {
+  f.plan = PLAN;
+  f.questions = QUESTIONS.map((q, i) => {
+    const old = f.questions.find((o) => o.text === q.text);
+    return { ...q, id: `q${i + 1}`, answer: old?.answer, aiDecides: old?.aiDecides };
+  });
+  f.proposals = PROPOSALS.map((p) => ({ ...p }));
+  for (const p of f.proposals) {
+    if (f.picked.includes(p.step) || f.states[p.step] !== "pending") continue;
+    f.uses = f.uses.filter((s) => s !== p.step);
+    if (p.recommend) f.uses.push(p.step);
+  }
+}
+
+/** plan.md with the answers as its last section (an older one is replaced). */
+function planWithAnswers(plan: string, questions: PlanQuestion[]): string {
+  const at = plan.indexOf(ANSWERS_HEADING);
+  const body = (at >= 0 ? plan.slice(0, at) : plan).trimEnd();
+  if (questions.length === 0) return body;
+  const lines = questions.map((q) => `- ${q.text}\n  → ${q.aiDecides ? AI_DECIDES : (q.answer ?? "").trim()}`);
+  return `${body}\n\n${ANSWERS_HEADING}\n\n${lines.join("\n")}`;
+}
+
 /** A whole round already behind the task: steps done, the optional ones and `unneeded` passed. */
 function passAll(f: Flow, unneeded: StepKind[]): void {
   for (const s of STEP_ORDER) f.states[s] = OPTIONAL_STEPS.includes(s) || unneeded.includes(s) ? "skipped" : "done";
@@ -548,7 +610,10 @@ function passAll(f: Flow, unneeded: StepKind[]): void {
 function enter(f: Flow, step: StepKind): void {
   let at = STEP_ORDER.indexOf(step);
   while (OPTIONAL_STEPS.includes(STEP_ORDER[at] as StepKind)) {
-    f.states[STEP_ORDER[at] as StepKind] = "skipped";
+    const passed = STEP_ORDER[at] as StepKind;
+    f.states[passed] = "skipped";
+    // turned on for this task, but this build cannot run it yet (parts 5c, 5e, 5f)
+    if (f.uses.includes(passed)) log(f, "info", `${LABEL[passed]} chưa chạy được ở bản này: bỏ qua`, passed);
     at += 1;
   }
   goTo(f, STEP_ORDER[at] ?? "pushSummary");
@@ -635,12 +700,14 @@ function complete(f: Flow): void {
     log(f, "ok", `${LABEL[step]} xong: ${note}${cost}`, step);
   };
   switch (step) {
-    case "analyze":
-      f.plan = PLAN;
+    case "analyze": {
+      analyzed(f);
       f.states.analyze = "waitingUser";
       toGate(f, "planReview", "analyze");
-      done("plan: 2 file sẽ sửa, 1 câu hỏi");
+      const advised = f.proposals.filter((p) => p.recommend).map((p) => LABEL[p.step]);
+      done(`plan: 2 file sẽ sửa, ${f.questions.length} câu hỏi${advised.length ? `, đề xuất ${advised.join(" + ")}` : ""}`);
       return;
+    }
     case "implement": {
       f.states.implement = "done";
       enter(f, "checks");
@@ -730,6 +797,8 @@ function status(f: Flow): FlowStatus {
   return f.phase;
 }
 
+const unanswered = (f: Flow) => f.questions.filter((q) => !answered(q)).length;
+
 function gateView(f: Flow): GateView | undefined {
   if (f.phase !== "gate" || !f.gate) return undefined;
   const open = f.findings.filter((x) => x.state === "open").length;
@@ -738,7 +807,9 @@ function gateView(f: Flow): GateView | undefined {
   const next = skipTarget(f);
   const ask = f.round === 0 ? "Chạy Review chéo (vòng 1)?" : `Chạy Review chéo lại (vòng ${f.round + 1})?`;
   const message: Record<GateKind, string> = {
-    planReview: "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.",
+    planReview: unanswered(f)
+      ? `Plan đã xong, AI hỏi ${unanswered(f)} câu: trả lời (hoặc để AI tự quyết) rồi duyệt.`
+      : "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.",
     findings: `${LABEL[f.fixFor ?? "finalReview"]} báo lỗi: ${open} lỗi đang mở, đã chọn ${picked} cho AI sửa. Chọn lỗi cần sửa, hoặc sang ${next ? LABEL[next] : "bước sau"} mà không sửa.${rounds}`,
     afterFix: `Sửa lỗi xong. ${ask}${rounds}`,
     selfCode: 'Bạn đang tự code trên nhánh này. Xong thì bấm "Tôi code xong" để app review.',
@@ -770,6 +841,9 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     autoAdvance: f.auto,
     brief: f.brief,
     plan: f.plan,
+    questions: f.questions.map((q) => ({ ...q })),
+    proposals: f.proposals.map((p) => ({ ...p })),
+    uses: OPTIONAL_STEPS.filter((s) => f.uses.includes(s)),
     findings: f.findings.map((x) => ({ ...x })),
     reviewNotes: STEP_ORDER.filter((s) => f.notes[s]).map((s) => ({ step: s, text: f.notes[s] ?? "" })),
     push: f.push,
@@ -836,6 +910,10 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       break;
     case "approvePlan":
       if (f.gate !== "planReview") throw fail("flow.notNow", "Lúc này chưa duyệt plan được");
+      if (unanswered(f) > 0) {
+        throw fail("plan.questions", `Còn ${unanswered(f)} câu hỏi chưa trả lời: trả lời hoặc chọn "${AI_DECIDES}" trước khi duyệt`);
+      }
+      if (f.plan) f.plan = planWithAnswers(f.plan, f.questions);
       f.states.analyze = "done";
       log(f, "ok", "Bạn duyệt plan: AI viết code", "analyze");
       goTo(f, "implement");
@@ -848,6 +926,27 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       goTo(f, "analyze");
       startRun(f);
       break;
+    case "answerQuestion": {
+      if (f.gate !== "planReview" || f.phase !== "gate") throw fail("flow.notNow", "Lúc này chưa trả lời câu hỏi của plan được");
+      const q = f.questions.find((x) => x.id === action.id);
+      if (!q) throw fail("plan.question", "Không thấy câu hỏi này nữa");
+      q.aiDecides = action.aiDecides === true || undefined;
+      q.answer = q.aiDecides ? undefined : action.answer?.trim() || undefined;
+      break;
+    }
+    case "setUses": {
+      if (action.step !== "harness" && action.step !== "browserTest") {
+        throw fail("flow.uses", `${LABEL[action.step]} không bật/tắt theo task được`);
+      }
+      if (f.states[action.step] !== "pending" || f.phase === "done") {
+        throw fail("flow.uses", `Đã qua ${LABEL[action.step]}: chỉ bật/tắt được trước khi tới bước này`);
+      }
+      f.uses = f.uses.filter((s) => s !== action.step);
+      if (action.on) f.uses.push(action.step);
+      if (!f.picked.includes(action.step)) f.picked.push(action.step);
+      log(f, "info", `Bạn ${action.on ? "bật" : "tắt"} ${LABEL[action.step]} cho task này`, action.step);
+      break;
+    }
     case "selfCode":
       if (f.gate !== "planReview") throw fail("flow.notNow", "Lúc này chưa chọn tự code được");
       f.states.analyze = "done";

@@ -793,6 +793,27 @@ export interface ChatView {
 }
 
 /** Everything the task window shows. */
+/** A question the analysis asks before coding. */
+export interface PlanQuestion {
+  /** q1, q2, … */
+  id: string;
+  text: string;
+  /** answers the AI suggests (the user may write another) */
+  options?: string[];
+  answer?: string;
+  /** "AI tự quyết" */
+  aiDecides?: boolean;
+}
+
+/** The analysis's advice for an optional step of this task. */
+export interface StepProposal {
+  step: StepKind;
+  recommend: boolean;
+  reason: string;
+  /** what a harness would check, or the browser test scenario */
+  checks?: string;
+}
+
 export interface TaskDetail {
   wpId: number;
   taskId: string;
@@ -817,6 +838,12 @@ export interface TaskDetail {
   autoAdvance: boolean;
   brief?: string;
   plan?: string;
+  /** the analysis's questions and the answers so far (Duyệt waits until each one is answered) */
+  questions: PlanQuestion[];
+  /** the analysis's advice on Harness and Test trình duyệt */
+  proposals: StepProposal[];
+  /** optional steps this task runs (Harness, Test trình duyệt) */
+  uses: StepKind[];
   findings: FindingView[];
   /** docs/test judgement of the latest review of each kind */
   reviewNotes?: ReviewNote[];
@@ -837,6 +864,10 @@ export type FlowAction =
   | { type: "approvePlan" }
   | { type: "rejectPlan"; feedback: string }
   | { type: "selfCode" }
+  /** plan gate: answer one question (`answer`), or leave it to the AI; neither = not answered */
+  | { type: "answerQuestion"; id: string; answer?: string; aiDecides?: boolean }
+  /** turn Harness / Test trình duyệt on or off for this task, before the flow gets there */
+  | { type: "setUses"; step: StepKind; on: boolean }
   | { type: "selfCodeDone" }
   /** findings gate: fix the picked findings, or go on without fixing */
   | { type: "pickFindings"; fix: boolean }
