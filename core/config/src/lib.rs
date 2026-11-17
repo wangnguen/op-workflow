@@ -134,7 +134,7 @@ pub struct RepoConfig {
     /// Kiểm tra (step 4): commands the app runs after code changes (`npx tsc --noEmit -p web`,
     /// `npx eslint {files}`; `{files}` = the changed files). Empty = guessed per package.
     pub checks: Vec<String>,
-    /// Harness (step 5): this repo's own harness library (`C:\tmp\collabkeeper-harness`).
+    /// Harness (step 5): this repo's own harness library (`C:\tmp\web-harness`).
     /// `None` = `C:\tmp\<repo name>-harness`, created the first time a task uses it.
     pub harness_dir: Option<String>,
     /// Test trình duyệt: how the app starts this repo's dev server (confirmed by the user at the
