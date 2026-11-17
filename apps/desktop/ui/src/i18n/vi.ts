@@ -154,25 +154,42 @@ export const vi = {
       model: "Model",
       effort: "Effort",
       permission: "Quyền",
-      appMode: (mode: string | undefined) => (mode ? `Theo app (${mode})` : "Theo app (allowlist)"),
+      appMode: (name: string | undefined) => (name ? `Theo app (${name})` : "Theo app (allowlist)"),
       modeNotListed: (mode: string) => `${mode} (CLI không còn chế độ này)`,
-      /** what each permission mode does when the app runs the step in the background */
-      modeHint: {
-        acceptEdits: "acceptEdits: sửa file không hỏi; Bash chỉ chạy lệnh trong allowlist, lệnh khác bị từ chối.",
-        auto: "auto: Claude tự duyệt lệnh nó cho là an toàn, lệnh rủi ro bị từ chối.",
-        bypassPermissions: "bypassPermissions: bỏ mọi kiểm tra quyền, lệnh nào cũng chạy; chỉ còn hook của app chặn commit / push.",
-        manual: "manual: chỉ chạy thứ đã cho phép sẵn, còn lại cần hỏi nên chạy nền bị chặn gần hết, kể cả sửa file.",
-        dontAsk: "dontAsk: không hỏi; thứ chưa cho phép sẵn bị từ chối ngay, kể cả sửa file.",
-        plan: "plan: chỉ đọc và lập kế hoạch, không sửa file; bước viết code sẽ không ra code.",
-        "read-only": "read-only: Codex chỉ đọc, lệnh không ghi được file nào.",
-        "workspace-write": "workspace-write: Codex ghi trong repo (và thư mục bước cho thêm); ngoài đó và mạng bị chặn.",
-        "danger-full-access": "danger-full-access: không sandbox, ghi mọi nơi, có mạng; hook git của app vẫn chặn commit / push.",
-        "approve-for-me": "approve-for-me: như workspace-write, lệnh cần thêm quyền thì bộ duyệt tự động của Codex quyết.",
-        "dangerously-bypass-approvals-and-sandbox":
-          "dangerously-bypass-approvals-and-sandbox: bỏ cả sandbox lẫn duyệt, lệnh nào cũng chạy.",
+      /** the two groups of the Quyền list: what the extension also offers, and the rest */
+      modeGroupExtension: (agent: "claude" | "codex") => `Như extension ${agent === "codex" ? "Codex" : "Claude Code"}`,
+      modeGroupCli: "Chỉ có ở CLI",
+      /** a mode's name as the extensions show it (CLI-only modes keep the CLI's name) */
+      modeName: {
+        manual: "Manual",
+        acceptEdits: "Edit automatically",
+        plan: "Plan",
+        auto: "Auto",
+        "read-only": "Chỉ đọc",
+        "workspace-write": "Ghi trong repo",
+        "danger-full-access": "Toàn quyền",
       } as Record<string, string>,
-      modeUnknown: (mode: string) => `${mode}: chế độ của CLI, app chưa có ghi chú cho chế độ này.`,
-      appModeHint: "Theo app: không truyền chế độ; Claude chạy với danh sách công cụ và allowlist app đặt cho bước này.",
+      /** what each permission mode is for and what it does when the app runs the step in the
+       *  background (shown under the mode's name in the list, and beside the picker) */
+      modeAbout: {
+        manual: "Hỏi trước mỗi lần sửa file / chạy lệnh; chạy nền không ai trả lời nên gần như mọi việc bị chặn.",
+        acceptEdits: "Sửa file không hỏi, lệnh chỉ chạy nếu có trong allowlist. Hợp cho Viết code, Sửa lỗi.",
+        plan: "Chỉ đọc và lập kế hoạch, không sửa file. Hợp cho Phân tích; bước viết code sẽ không ra code.",
+        auto: "Claude tự duyệt việc qua kiểm tra an toàn, việc rủi ro bị từ chối. Chạy được nhiều lệnh hơn allowlist.",
+        bypassPermissions: "Bỏ mọi kiểm tra, lệnh nào cũng chạy; chỉ còn hook của app chặn commit / push. Chỉ dùng khi tin repo.",
+        dontAsk: "Không hỏi: chỉ chạy thứ đã cho phép sẵn, còn lại (kể cả sửa file) bị từ chối ngay. Hợp cho bước chỉ đọc.",
+        "read-only": "Đọc code, chạy lệnh xem nhưng không ghi được file. Hợp cho Phân tích, review, Push summary.",
+        "workspace-write": "Sửa file trong repo (và thư mục bước cho thêm); ngoài đó và mạng bị chặn. Hợp cho Viết code.",
+        "danger-full-access": "Không sandbox: ghi mọi nơi, có mạng (cài package được). Hook git của app vẫn chặn commit / push.",
+        "approve-for-me": "Như Ghi trong repo; lệnh cần thêm quyền thì bộ duyệt tự động của Codex quyết thay bạn.",
+        "dangerously-bypass-approvals-and-sandbox": "Bỏ cả sandbox lẫn duyệt, lệnh nào cũng chạy. Rủi ro nhất, chỉ dùng trong máy ảo.",
+      } as Record<string, string>,
+      modeUnknown: "Chế độ mới của CLI, app chưa có ghi chú cho chế độ này.",
+      /** "Theo app": what the app passes for this step */
+      appModeAbout: (name: string | undefined) =>
+        name
+          ? `App truyền ${name} như từ trước tới giờ cho bước này.`
+          : "Không truyền chế độ; Claude chạy với danh sách công cụ và allowlist app đặt cho bước này.",
       codexNoAllow: "Codex không có allowlist (không có nút Cho phép lệnh này): sandbox quyết lệnh nào chạy.",
       codexReview: "Codex dùng prompt review của app (không chạy /review-local của repo, không có ghi chú docs / test).",
       codexPush: "Codex dùng prompt push summary của app (không chạy /push-summary của repo).",

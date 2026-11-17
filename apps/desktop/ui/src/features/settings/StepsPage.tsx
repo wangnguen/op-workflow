@@ -5,6 +5,7 @@ import type { AgentCatalog, AgentKind, SettingsView, StepChoiceRequest, StepMode
 import { formatDateTime, formatDuration, formatHourMinute, formatUsd } from "../../shared/format";
 import { stepNumber } from "../../shared/steps";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
+import { ModeSelect } from "./ModeSelect";
 import { agentNotes, effortForModel, effortOptions, modeHint, modelEntry, modelOptions, modeOptions } from "./stepChoice";
 
 const t = vi.settings.steps;
@@ -186,25 +187,20 @@ function StepRow({ number, row, catalog, saved, onSave }: {
       </div>
       {/* its own row in every step, so all rows look alike whatever the mode's name */}
       <div className="set-step-controls set-step-mode">
-        <label className="set-step-field set-step-field--mode">
+        <div className="set-step-field set-step-field--mode">
           <span className="faint">{t.permission}</span>
-          <select
-            className="input"
+          <ModeSelect
+            value={row.permissionMode ?? ""}
+            options={modes}
             disabled={loading}
             title={loading ? t.waitList : undefined}
-            value={row.permissionMode ?? ""}
-            onChange={(e) => {
+            label={`${t.permission} · ${stepLabel[row.step]}`}
+            onChange={(mode) => {
               setResetNote(null);
-              send({ permissionMode: e.target.value || undefined });
+              send({ permissionMode: mode });
             }}
-          >
-            {modes.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </label>
+          />
+        </div>
         <span className="set-row-hint set-step-mode-hint">{modeHint(row)}</span>
       </div>
       {resetNote && <span className="set-row-hint set-warn">{resetNote}</span>}

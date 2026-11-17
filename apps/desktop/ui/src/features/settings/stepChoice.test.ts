@@ -3,7 +3,7 @@ import { visibleAlerts } from "../../app/alerts";
 import { mockSetStepChoice, mockSettings, mockStepModels } from "../../ipc/mock";
 import type { AlertView, StepSetting } from "../../ipc/types";
 import { modelName, modelText } from "../../shared/models";
-import { agentNotes, effortForModel, effortOptions, modeHint, modelOptions, modeOptions } from "./stepChoice";
+import { agentNotes, effortForModel, effortOptions, grouped, modeHint, modelOptions, modeOptions } from "./stepChoice";
 
 const row = (over: Partial<StepSetting>): StepSetting => ({
   step: "fix",
@@ -68,24 +68,41 @@ describe("model and effort options", () => {
     expect(effortForModel(undefined, "xhigh", "claude-opus-4-6")).toBe("xhigh");
   });
 
-  it("permission modes come from the CLI, after what the app passes", () => {
+  it("permission modes come from the CLI: the extension's ones first, then the CLI-only ones", () => {
     const fix = modeOptions(row({ permissionDefault: "acceptEdits" }), claude);
-    expect(fix[0]).toEqual({ value: "", label: "Theo app (acceptEdits)" });
-    expect(values(fix)).toEqual(["", ...claude.modes]);
+    expect(fix[0]).toMatchObject({ value: "", label: "Theo app (Edit automatically)" });
+    expect(values(fix)).toEqual(["", "manual", "acceptEdits", "plan", "auto", "bypassPermissions", "dontAsk"]);
+    expect(grouped(fix).map((g) => [g.group, g.options.map((o) => o.label)])).toEqual([
+      [undefined, ["Theo app (Edit automatically)"]],
+      ["Như extension Claude Code", ["Manual", "Edit automatically", "Plan", "Auto"]],
+      ["Chỉ có ở CLI", ["bypassPermissions", "dontAsk"]],
+    ]);
     expect(modeOptions(row({ step: "reviewLocal" }), claude)[0]?.label).toBe("Theo app (allowlist)");
-    expect(values(modeOptions(row({ agent: "codex", permissionDefault: "read-only" }), codex))).toEqual(["", ...codex.modes]);
+    const cx = modeOptions(row({ agent: "codex", permissionDefault: "read-only" }), codex);
+    expect(cx[0]?.label).toBe("Theo app (Chỉ đọc)");
+    expect(grouped(cx).map((g) => [g.group, values(g.options)])).toEqual([
+      [undefined, [""]],
+      ["Như extension Codex", ["read-only", "workspace-write", "danger-full-access"]],
+      ["Chỉ có ở CLI", ["approve-for-me", "dangerously-bypass-approvals-and-sandbox"]],
+    ]);
+    // a CLI without some of the extension's modes: only what it lists
+    expect(values(modeOptions(row({}), { ...claude, modes: ["acceptEdits", "newMode"] }))).toEqual(["", "acceptEdits", "newMode"]);
     // a saved mode the CLI no longer lists, and the current pick while the list loads
     const old = modeOptions(row({ permissionMode: "yolo" }), claude);
-    expect(old[old.length - 1]).toEqual({ value: "yolo", label: "yolo (CLI không còn chế độ này)" });
-    expect(modeOptions(row({ permissionMode: "plan" }), undefined)).toEqual([
-      { value: "", label: "Theo app (allowlist)" },
-      { value: "plan", label: "plan" },
+    expect(old[old.length - 1]).toMatchObject({ value: "yolo", label: "yolo (CLI không còn chế độ này)" });
+    expect(modeOptions(row({ permissionMode: "plan" }), undefined).map((o) => [o.value, o.label])).toEqual([
+      ["", "Theo app (allowlist)"],
+      ["plan", "Plan"],
     ]);
   });
 
   it("says what the mode and the agent mean for the step", () => {
-    expect(modeHint(row({ permissionDefault: "acceptEdits" }))).toMatch(/^acceptEdits: sửa file không hỏi/);
-    expect(modeHint(row({ permissionDefault: "acceptEdits", permissionMode: "plan" }))).toMatch(/^plan:/);
+    expect(modeHint(row({ permissionDefault: "acceptEdits" }))).toMatch(/^Edit automatically: Sửa file không hỏi/);
+    expect(modeHint(row({ permissionDefault: "acceptEdits", permissionMode: "plan" }))).toMatch(/^Plan: Chỉ đọc/);
+    // every mode in the list says what it does under its name
+    const opts = modeOptions(row({ permissionDefault: "acceptEdits" }), claude);
+    expect(opts.every((o) => (o.about ?? "").length > 20)).toBe(true);
+    expect(opts[0]?.about).toBe("App truyền Edit automatically như từ trước tới giờ cho bước này.");
     expect(modeHint(row({ step: "reviewLocal" }))).toMatch(/^Theo app:/);
     expect(modeHint(row({ permissionMode: "newMode" }))).toMatch(/chưa có ghi chú/);
     expect(agentNotes(row({ step: "reviewLocal", agent: "codex" })).join(" ")).toMatch(/không chạy \/review-local/);

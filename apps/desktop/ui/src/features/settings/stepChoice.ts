@@ -9,6 +9,27 @@ const t = vi.settings.steps;
 export interface Option {
   value: string;
   label: string;
+  /** shown under this heading; none = before the groups */
+  group?: string;
+  /** what it does, shown under its name in the list */
+  about?: string;
+}
+
+/** The permission modes each extension offers, in its own order. The list itself still comes
+ *  from the CLI: a mode shows only when the CLI lists it, anything else goes under "Chỉ có ở CLI". */
+const EXTENSION_MODES: Record<"claude" | "codex", string[]> = {
+  claude: ["manual", "acceptEdits", "plan", "auto"],
+  codex: ["read-only", "workspace-write", "danger-full-access"],
+};
+
+/** A mode's name as the extension shows it; CLI-only modes keep the CLI's name. */
+export function modeName(mode: string): string {
+  return t.modeName[mode] ?? mode;
+}
+
+/** What a mode is for, in a background run. */
+export function modeAbout(mode: string): string {
+  return t.modeAbout[mode] ?? t.modeUnknown;
 }
 
 /** "Theo máy" with what it turns out to be: the CLI's configured default, else the last run. */
@@ -71,12 +92,31 @@ export function effortOptions(row: StepSetting, catalog: AgentCatalog | undefine
 /** Permission modes: "Theo app" (with what the app passes) first, then what the CLI lists, and
  *  the saved pick if the CLI no longer lists it. Without a catalog: the current pick only. */
 export function modeOptions(row: StepSetting, catalog: AgentCatalog | undefined): Option[] {
-  const out: Option[] = [{ value: "", label: t.appMode(row.permissionDefault) }];
-  const listed = (catalog?.modes ?? []).map((m) => ({ value: m, label: m }));
-  out.push(...listed);
-  if (row.permissionMode && !listed.some((o) => o.value === row.permissionMode)) {
-    const known = catalog !== undefined && catalog.modes.length > 0;
-    out.push({ value: row.permissionMode, label: known ? t.modeNotListed(row.permissionMode) : row.permissionMode });
+  const appName = row.permissionDefault && modeName(row.permissionDefault);
+  const out: Option[] = [{ value: "", label: t.appMode(appName), about: t.appModeAbout(appName) }];
+  const agent = row.agent === "codex" ? "codex" : "claude";
+  const cli = catalog?.modes ?? [];
+  const ext = EXTENSION_MODES[agent].filter((m) => cli.includes(m));
+  const extGroup = t.modeGroupExtension(agent);
+  out.push(...ext.map((m) => ({ value: m, label: modeName(m), group: extGroup, about: modeAbout(m) })));
+  out.push(
+    ...cli.filter((m) => !ext.includes(m)).map((m) => ({ value: m, label: m, group: t.modeGroupCli, about: modeAbout(m) })),
+  );
+  if (row.permissionMode && !cli.includes(row.permissionMode)) {
+    const known = catalog !== undefined && cli.length > 0;
+    const label = known ? t.modeNotListed(row.permissionMode) : modeName(row.permissionMode);
+    out.push({ value: row.permissionMode, label, about: modeAbout(row.permissionMode) });
+  }
+  return out;
+}
+
+/** Options split for rendering: those before any group, then each group in order. */
+export function grouped(options: Option[]): { group?: string; options: Option[] }[] {
+  const out: { group?: string; options: Option[] }[] = [];
+  for (const o of options) {
+    const last = out[out.length - 1];
+    if (last && last.group === o.group) last.options.push(o);
+    else out.push({ group: o.group, options: [o] });
   }
   return out;
 }
@@ -84,8 +124,8 @@ export function modeOptions(row: StepSetting, catalog: AgentCatalog | undefined)
 /** One line on what the step's mode does in a background run. */
 export function modeHint(row: StepSetting): string {
   const mode = row.permissionMode ?? row.permissionDefault;
-  if (!mode) return t.appModeHint;
-  return t.modeHint[mode] ?? t.modeUnknown(mode);
+  if (!mode) return `Theo app: ${t.appModeAbout(undefined)}`;
+  return `${modeName(mode)}: ${modeAbout(mode)}`;
 }
 
 /** Notes on the step's agent: what Codex cannot do there, how Review chéo picks one. */
