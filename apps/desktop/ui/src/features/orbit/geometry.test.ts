@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  FUEL_LABEL_W,
   FUEL_R,
   VIEW,
+  topLeftFuelLabelX,
   asteroidLayout,
   asteroidShape,
   atmosphereRadius,
@@ -101,6 +103,16 @@ describe("orbit geometry", () => {
     expect(arcs[0]?.remainingPct).toBe(0);
   });
 
+  it("tells the top-left status line where the Claude Tuần label starts", () => {
+    const week = fuelArcs(mockQuota(0, NOW), NOW).find((a) => a.key === "claude-sevenDay");
+    expect(week?.labelAnchor).toBe("end");
+    const left = topLeftFuelLabelX();
+    expect(left).toBeCloseTo((week?.label.x ?? 0) - FUEL_LABEL_W, 1);
+    // left of the centre, inside the map
+    expect(left).toBeLessThan(0);
+    expect(left).toBeGreaterThan(VIEW.x);
+  });
+
   it("spreads any number of inbox nebulae without piling them up", () => {
     for (const n of [1, 3, 6, 7, 12, 25, 40]) {
       const spots = nebulaLayout(n);
@@ -172,7 +184,7 @@ describe("orbit geometry", () => {
     type Box = { l: number; r: number; t: number; b: number; name: string };
     const hit = (a: Box, b: Box) => a.l < b.r && b.l < a.r && a.t < b.b && b.t < a.b;
     const fuel: Box[] = fuelArcs(mockQuota(0, NOW), NOW).map((a) => {
-      const w = 118;
+      const w = FUEL_LABEL_W;
       const l = a.labelAnchor === "start" ? a.label.x : a.label.x - w;
       return { l, r: l + w, t: a.label.y - 13, b: a.label.y + 5, name: a.key };
     });

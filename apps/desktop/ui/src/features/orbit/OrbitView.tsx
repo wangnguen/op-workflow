@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type CSSProperties } from "react";
 import { agentLabel, gateLabel, sessionStatusLabel, stepLabel, stepStateLabel, vi } from "../../i18n/vi";
 import type { OrbitSnapshot } from "../../ipc/types";
 import { useDismiss } from "../../shared/hooks";
@@ -9,7 +9,7 @@ import { DetailPanel } from "./DetailPanel";
 import { Legend } from "./Legend";
 import { HOME_VIEW, OrbitScene, type ViewState } from "./OrbitScene";
 import { focusSystem, systemsOf } from "./focus";
-import { clampZoom, planetDrift } from "./geometry";
+import { VIEW, clampZoom, planetDrift, topLeftFuelLabelX } from "./geometry";
 import { resolveSelection, type Selection } from "./selection";
 import { useCompactionMarkers } from "./useCompactionMarkers";
 import { useLayout } from "./useLayout";
@@ -32,6 +32,13 @@ interface Props {
   /** the map is hidden (Phiên shows Bảng): stop the motion, keep the angle */
   paused?: boolean;
 }
+
+/** Where the map's top-left status line has to stop, for orbit.css. */
+const STATUS_CLEAR = {
+  "--status-clear": topLeftFuelLabelX(),
+  "--view-w": VIEW.w,
+  "--view-h": VIEW.h,
+} as CSSProperties;
 
 function statusLine(s: OrbitSnapshot): string {
   const a = s.active;
@@ -88,9 +95,11 @@ export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, on
           rot={rot}
         />
 
+        {/* wraps before the "Claude Tuần" gauge label (map units → px in orbit.css) */}
         <div
           className={`orbit-status${snapshot.active?.gate ? " is-waiting" : snapshot.active ? "" : " is-idle"}`}
-          title={snapshot.active ? `${statusLine(snapshot)}\n${snapshot.active.title}` : statusLine(snapshot)}
+          style={STATUS_CLEAR}
+          title={snapshot.active?.title}
         >
           <span className="orbit-status-dot" />
           {statusLine(snapshot)}

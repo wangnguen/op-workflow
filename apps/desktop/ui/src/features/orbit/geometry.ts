@@ -490,6 +490,9 @@ export interface FuelArc {
   labelAnchor: "start" | "end";
 }
 
+/** Widest a fuel label gets ("Claude Tuần 100%"), in map units. */
+export const FUEL_LABEL_W = 118;
+
 // The fuel gauge spans the top half of the map, where no planet labels reach.
 const FUEL_SLOTS: { provider: QuotaSnapshot["provider"]; kind: QuotaWindow["kind"]; center: number }[] = [
   { provider: "claude", kind: "fiveHour", center: -152 },
@@ -518,6 +521,15 @@ export function fuelArcs(quota: QuotaSnapshot[], now: number): FuelArc[] {
       labelAnchor: label.x >= 0 ? "start" : "end",
     };
   });
+}
+
+/** Left edge (map units, x) of the fuel label nearest the map's top-left corner, "Claude Tuần".
+ *  The status line in that corner wraps before it (`--status-clear` in OrbitView). */
+export function topLeftFuelLabelX(): number {
+  const slot = FUEL_SLOTS.find((s) => s.provider === "claude" && s.kind === "sevenDay");
+  const x = polar(FUEL_R + 20, slot?.center ?? -112).x;
+  // labels left of the centre end at their anchor
+  return round2(x >= 0 ? x : x - FUEL_LABEL_W);
 }
 
 // ---------- nebulae, distant stars, starfield ----------

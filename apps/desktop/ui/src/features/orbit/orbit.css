@@ -9,6 +9,8 @@
 
 .orbit-stage {
   position: relative;
+  /* the status line converts map units with the stage size (cqw / cqh) */
+  container-type: size;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -50,29 +52,30 @@
   top: 12px;
   left: 14px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  max-width: calc(100% - 240px);
+  /* The map is drawn "meet" in the stage: one map unit is min(w / view-w, h / view-h) px and the
+     map's x = 0 is the stage's centre. The line stops 12px before the "Claude Tuần" label
+     (--status-clear, map units) and wraps instead of cutting. */
+  max-width: max(
+    140px,
+    calc(50cqw + var(--status-clear) * min(100cqw / var(--view-w), 100cqh / var(--view-h)) - 14px - 12px)
+  );
   padding: 6px 12px;
-  border-radius: 999px;
+  border-radius: 15px;
   border: 1px solid var(--border);
   background: var(--overlay);
   font-size: 12.5px;
+  line-height: 1.35;
   color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.orbit-status:hover {
-  z-index: 6;
-  max-width: calc(100% - 28px);
-  border-radius: 14px;
-  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .orbit-status-dot {
   flex: none;
   width: 8px;
   height: 8px;
+  /* centred on the first line when the status wraps */
+  margin-top: 4.5px;
   border-radius: 50%;
   background: var(--st-running);
   box-shadow: 0 0 8px var(--st-running);
