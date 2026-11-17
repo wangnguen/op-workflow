@@ -1345,3 +1345,19 @@
   background: var(--bg-elev);
   color: var(--text);
 }
+
+/* the next step costs tokens and the quota passed quota.warnAt */
+.task-status-quota {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--st-waiting);
+  font-size: 12px;
+}
+.task-status-quota > svg {
+  flex: none;
+}
+.task-status-quota--stop {
+  color: var(--st-failed);
+  font-weight: 600;
+}

@@ -329,6 +329,9 @@ interface Flow {
   picked: StepKind[];
   /** Harness / Test trình duyệt results */
   tests: TestView[];
+  /** Quota preview: one reset deadline, and whether auto-run stopped before an AI step. */
+  quotaUntil?: number;
+  quotaWaiting?: boolean;
 }
 
 type Review = "reviewLocal" | "crossReview" | "finalReview";
@@ -671,6 +674,7 @@ function toGate(f: Flow, kind: GateKind, step: StepKind): void {
 
 function startRun(f: Flow): void {
   if (!f.current) return;
+  f.quotaWaiting = false;
   f.phase = "running";
   f.error = undefined;
   f.runStarted = iso(Date.now());
@@ -853,10 +857,21 @@ function browserView(runs: number): TestView {
 
 /** Advance time: finish a run that is over, start the next step when auto-advance is on. */
 function tick(f: Flow): void {
+  if (f.quotaWaiting && f.phase === "ready" && f.quotaUntil !== undefined && Date.now() >= f.quotaUntil) {
+    f.quotaWaiting = false;
+    log(f, "info", "Hạn mức đã reset");
+    if (f.auto) startRun(f);
+    return;
+  }
   if (f.phase !== "running" || f.runEnds === undefined || Date.now() < f.runEnds) return;
   complete(f);
   // complete() moved the phase on; TypeScript still narrows it to "running"
-  if (f.auto && (f.phase as Flow["phase"]) === "ready") startRun(f);
+  if (f.auto && (f.phase as Flow["phase"]) === "ready") {
+    if (mockQuotaNote(f)?.stop) {
+      f.quotaWaiting = true;
+      log(f, "info", `Tự chạy dừng trước ${LABEL[f.current!]} vì hạn mức`, f.current);
+    } else startRun(f);
+  }
 }
 
 function tools(f: Flow): ToolEvent[] {
@@ -910,6 +925,34 @@ function gateView(f: Flow): GateView | undefined {
   return { kind: f.gate, since: f.gateSince, message: message[f.gate], review, next };
 }
 
+/** Preview: `?quotaWarn=87` (or 96) shows the quota line next to Chạy. */
+function mockQuotaNote(f: Flow): TaskDetail["quotaNote"] {
+  const params = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
+  const raw = params.get("quotaWarn");
+  const used = raw === null ? NaN : Number(raw);
+  let step = f.phase === "ready" ? f.current : undefined;
+  if (f.phase === "gate") {
+    if (f.gate === "error") step = f.current;
+    else if (f.gate === "planReview") step = "implement";
+    else if (f.gate === "afterFix") step = "crossReview";
+    else if (f.gate === "findings") step = f.findings.some(toFix) ? (f.fixFor === "reviewLocal" ? "fix" : "fixCross") : skipTarget(f);
+  }
+  if (!Number.isFinite(used) || used < 80 || !step || step === "checks" || step === "intake") return undefined;
+  if (step === "harness" && f.tests.some((t) => t.step === step && t.command)) return undefined;
+  const resetMs = Number(params.get("quotaResetMs") ?? 95 * 60_000);
+  f.quotaUntil ??= Date.now() + (Number.isFinite(resetMs) && resetMs > 0 ? resetMs : 95 * 60_000);
+  if (Date.now() >= f.quotaUntil) return undefined;
+  return {
+    step,
+    provider: agentOf(step) === "codex" ? "codex" : "claude",
+    window: params.get("quotaWindow") === "sevenDay" ? "sevenDay" : "fiveHour",
+    usedPct: used,
+    resetsAt: iso(f.quotaUntil),
+    stop: used >= 95,
+    lastCostUsd: COST[step] || undefined,
+  };
+}
+
 export function mockTaskDetail(wpId: number): TaskDetail {
   const f = flowOf(wpId);
   tick(f);
@@ -942,6 +985,7 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     costUsd: Object.values(f.costs).reduce((a, b) => a + (b ?? 0), 0),
     newComments: mockNewComments(wpId),
     tests: f.tests.map((t) => ({ ...t, cases: t.cases.map((c) => ({ ...c })) })),
+    quotaNote: mockQuotaNote(f),
   };
   if (f.phase === "running" && f.current && f.runStarted) {
     detail.running = {

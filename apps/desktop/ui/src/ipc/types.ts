@@ -700,6 +700,21 @@ export interface FlowError {
   message: string;
   /** signing in to this provider may help */
   provider?: Provider;
+  /** `quota.hit`: when the usage limit resets */
+  resetsAt?: string;
+}
+
+/** The step about to run costs tokens and a quota window passed `quota.warnAt`. */
+export interface QuotaNote {
+  step: StepKind;
+  provider: Provider;
+  window: "fiveHour" | "sevenDay";
+  usedPct: number;
+  resetsAt?: string;
+  /** at or over the highest level: "Tự chạy" stops here */
+  stop: boolean;
+  /** what this step cost the last time it ran (any task) */
+  lastCostUsd?: number;
 }
 
 export interface RunView {
@@ -878,6 +893,8 @@ export interface TaskDetail {
   newComments?: number;
   /** the last result of Harness and Test trình duyệt, when they ran */
   tests?: TestView[];
+  /** the next step costs tokens and the quota is high */
+  quotaNote?: QuotaNote;
 }
 
 /** What Harness (step 5) or Test trình duyệt (step 11) found the last time it ran. */

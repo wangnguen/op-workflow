@@ -206,7 +206,20 @@ pub fn parse_line(line: &str) -> AgentsResult<Vec<ClaudeEvent>> {
             vec![ClaudeEvent::Result(RunResult {
                 subtype: s("subtype"),
                 is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-                text: s("result"),
+                text: if s("result").trim().is_empty() {
+                    v.get("errors")
+                        .and_then(Value::as_array)
+                        .map(|errors| {
+                            errors
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default()
+                } else {
+                    s("result")
+                },
                 session_id: s("session_id"),
                 cost_usd: v
                     .get("total_cost_usd")
@@ -562,6 +575,17 @@ pub fn push_summary_default_args(budget_usd: f64) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_results_keep_errors_when_there_is_no_result_text() {
+        let events = parse_line(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Claude AI usage limit reached|1763380800"],"session_id":"cut-session"}"#).unwrap();
+        let [ClaudeEvent::Result(result)] = &events[..] else {
+            panic!("{events:?}")
+        };
+        assert!(result.is_error);
+        assert_eq!(result.text, "Claude AI usage limit reached|1763380800");
+        assert_eq!(result.session_id, "cut-session");
+    }
 
     /// Shapes captured from a real `claude -p` run on 2026-11-13 (content removed).
     #[test]

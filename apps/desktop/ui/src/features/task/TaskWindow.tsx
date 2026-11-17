@@ -23,9 +23,9 @@ import {
   openTaskPath,
   saveBrief,
 } from "../../ipc/client";
-import type { Decision, FindingView, FlowAction, TaskDetail } from "../../ipc/types";
+import type { Decision, FindingView, FlowAction, QuotaNote, TaskDetail } from "../../ipc/types";
 import { copyText } from "../../shared/clipboard";
-import { formatDuration, formatUsd } from "../../shared/format";
+import { formatDateTime, formatDuration, formatUsd } from "../../shared/format";
 import { usePolling, useNow } from "../../shared/hooks";
 import { ChatTab } from "./ChatTab";
 import { CommentsTab } from "./CommentsTab";
@@ -389,10 +389,12 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
       (last.state === "failed"
         ? t.progress.lastFailed(stepLabel[last.step], last.note)
         : t.progress.lastDone(stepLabel[last.step], last.note));
+    const q = d.quotaNote;
     text = (
       <>
         <strong title={stepHint[d.current]}>{t.ready(step)}</strong>
         <span className="faint">{said || stepHint[d.current]}</span>
+        {q && <QuotaLine note={q} />}
       </>
     );
     actions = (
@@ -445,13 +447,17 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
           {gateLabel[kind]}
           {step && <span className="faint"> · {step}</span>}
         </strong>
-        <span>{d.gate.message}</span>
+        <span>
+          {d.gate.message}
+          {kind === "error" && d.error?.resetsAt && <> {t.quota.resetAt(formatDateTime(d.error.resetsAt))}</>}
+        </span>
+        {d.quotaNote && <QuotaLine note={d.quotaNote} />}
       </>
     );
     if (kind === "error") {
       actions = (
         <>
-          {d.error?.provider && (
+          {d.error?.provider && d.error.code === "agent.signedOut" && (
             <button className="btn btn--sm" disabled={disabled} onClick={() => onLogin(d.error?.provider ?? "claude")}>
               {t.login}
             </button>
@@ -491,7 +497,8 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
       );
     } else if (kind === "afterFix") {
       const more = unpicked(d.findings);
-      const again = d.gate.review === "finalReview";
+      // after a fix of Review chốt / Test trình duyệt, "Không" runs that step again
+      const again = d.gate.review === "finalReview" || d.gate.review === "browserTest";
       actions = (
         <>
           <AutoToggle detail={d} disabled={disabled} onAction={onAction} />
@@ -508,10 +515,10 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
           <button
             className="btn btn--sm"
             disabled={disabled}
-            title={t.noCrossHint(again)}
+            title={t.noCrossHint(stepLabel[d.gate.next ?? "finalReview"], again)}
             onClick={() => onAction({ type: "afterFix", choice: "next" })}
           >
-            {t.noCross(stepLabel.finalReview, again)}
+            {t.noCross(stepLabel[d.gate.next ?? "finalReview"], again)}
           </button>
           <button
             className="btn btn--primary btn--sm"
@@ -613,6 +620,22 @@ function FindingsButtons({
         {t.pickFix(picked)}
       </button>
     </>
+  );
+}
+
+/** "Claude 5 giờ đã dùng 87% · reset 14/11 15:30 · lần trước bước này tốn $0.55" next to Chạy. */
+function QuotaLine({ note: q }: { note: QuotaNote }) {
+  const who = q.provider === "codex" ? "Codex" : "Claude";
+  const parts = [
+    `${stepLabel[q.step]}: ${t.quota.note(who, t.quota.window[q.window] ?? q.window, q.usedPct)}`,
+    q.resetsAt ? t.quota.reset(formatDateTime(q.resetsAt)) : undefined,
+    q.lastCostUsd !== undefined ? t.quota.lastCost(formatUsd(q.lastCostUsd)) : undefined,
+  ].filter(Boolean);
+  return (
+    <span className={`task-status-quota${q.stop ? " task-status-quota--stop" : ""}`} title={q.stop ? t.quota.stop : undefined}>
+      <Icon name="alert" size={12} />
+      {parts.join(" · ")}
+    </span>
   );
 }
 

@@ -20,6 +20,7 @@ pub mod live;
 pub mod models;
 pub mod os;
 pub mod pushcheck;
+pub mod quotagate;
 pub mod selftest;
 pub mod start;
 pub mod steps;
@@ -36,9 +37,9 @@ use opw_domain::task::display_id;
 use opw_domain::view::{
     AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CloseChoice, CommentsView, DataMode,
     DeleteBranchRequest, DiffView, FindingDecision, FlowAction, FlowStatus, HarnessLib, InboxItem,
-    IssueFetch, IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, PushCheck, QuotaSnapshot,
-    RepoState, SettingsView, StartOptions, StartRequest, StartResult, StepChoiceRequest, StepRef, StepView,
-    TaskCard, TaskColumn, TaskDetail, TaskSystem, TasksDirChange, TodayStats, UpdateView,
+    IssueFetch, IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, PushCheck, QuotaNote,
+    QuotaSnapshot, RepoState, SettingsView, StartOptions, StartRequest, StartResult, StepChoiceRequest,
+    StepRef, StepView, TaskCard, TaskColumn, TaskDetail, TaskSystem, TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
@@ -185,6 +186,14 @@ impl AppService {
             let flow = Flow::new(store.clone(), Arc::new(launcher), Some(dir.join("runs")));
             let quota = live.clone();
             flow.set_quota_sink(move |snap| quota.observe_claude(snap));
+            let gauges = live.clone();
+            flow.set_quota_source(move |provider| {
+                let state = gauges.snapshot();
+                match provider {
+                    Provider::Claude => state.claude,
+                    Provider::Codex => state.codex,
+                }
+            });
             let bell = alerts.clone();
             flow.set_alert_sink(move |a| {
                 bell.push(
@@ -862,7 +871,52 @@ impl AppService {
 
     fn with_counts(&self, mut detail: TaskDetail) -> TaskDetail {
         detail.new_comments = self.new_comments_of(detail.wp_id);
+        detail.quota_note = self.quota_note(&detail);
         detail
+    }
+
+    /// The step about to run costs tokens and its provider's quota passed `quota.warnAt`: say
+    /// so next to Chạy, with what the step cost last time.
+    fn quota_note(&self, d: &TaskDetail) -> Option<QuotaNote> {
+        let step = quotagate::note_step(d)?;
+        let config = self.config();
+        let provider = match flow::agent_for(step, &config) {
+            opw_domain::view::AgentKind::Codex => Provider::Codex,
+            opw_domain::view::AgentKind::Shell => return None,
+            opw_domain::view::AgentKind::Claude => Provider::Claude,
+        };
+        let state = self.live_state()?;
+        let snap = match provider {
+            Provider::Claude => state.claude,
+            Provider::Codex => state.codex,
+        }?;
+        let snap = quotagate::current(snap, &opw_quota::now_rfc3339());
+        let w = quotagate::worst(&snap)?;
+        let (warn, stop) = quotagate::levels(&config.quota.warn_at);
+        if w.used_pct < warn {
+            return None;
+        }
+        let agent = match provider {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+        };
+        let last_cost_usd = self
+            .done_step_runs()
+            .iter()
+            .rev()
+            .find(|r| {
+                r.step == flow::step_key(step) && r.agent.as_deref() == Some(agent) && r.cost_usd.is_some()
+            })
+            .and_then(|r| r.cost_usd);
+        Some(QuotaNote {
+            step,
+            provider,
+            window: w.kind,
+            used_pct: w.used_pct,
+            resets_at: w.resets_at.clone(),
+            stop: w.used_pct >= stop,
+            last_cost_usd,
+        })
     }
 
     /// A workflow button: run, stop, retry, approve the plan, …
@@ -1330,11 +1384,45 @@ impl AppService {
                 self.check_quota(&store, &live_quota(&state), &config.quota.warn_at, &now);
             }
         }
+        self.wake_after_quota(&config, &now);
         self.alerts
             .take_fresh()
             .into_iter()
             .filter(|a| alerts::toast_wanted(a.kind, &config.notify))
             .collect()
+    }
+
+    /// Tasks the usage limit stopped whose limit reset: run them again with "Tự chạy", else
+    /// ring the bell.
+    fn wake_after_quota(&self, config: &Config, now: &str) {
+        let Some(flow) = &self.flow else { return };
+        let (_, stop) = quotagate::levels(&config.quota.warn_at);
+        for wake in flow.quota_waits_due(now, stop) {
+            let wp_id = wake.wp_id;
+            let Ok((ctx, _)) = self.task_ctx(wp_id) else {
+                continue;
+            };
+            let task_id = ctx.row.display_id.clone();
+            let action = if wake.retry {
+                FlowAction::Retry
+            } else {
+                FlowAction::Run
+            };
+            if wake.auto.unwrap_or(config.steps.auto_advance) && flow.act(ctx, action).is_ok() {
+                continue;
+            }
+            self.alerts.push(
+                NewAlert {
+                    kind: AlertKind::Gate,
+                    wp_id: Some(wp_id),
+                    task_id: Some(task_id.clone()),
+                    title: format!("{task_id} · hạn mức đã reset"),
+                    body: "Bấm Chạy hoặc Thử lại để tiếp tục bước đang chờ hạn mức.".into(),
+                    tab: Some("progress".into()),
+                },
+                now,
+            );
+        }
     }
 
     /// Tasks that have a task window (started at least once).

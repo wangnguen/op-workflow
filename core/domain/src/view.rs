@@ -1016,16 +1016,36 @@ pub enum FlowStatus {
     Done,
 }
 
-/// Why the last step failed, and whether signing in may help.
+/// Why the last step failed, the provider involved and any quota reset time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowError {
     /// `agent.missing`, `agent.signedOut`, `step.failed`, `step.stopped`, `step.timeout`,
-    /// `step.budget`, `git.unexpected`, `findings.parse`, `repo.busy`, `repo.branch`, ...
+    /// `step.budget`, `quota.hit`, `git.unexpected`, `findings.parse`, `repo.busy`, `repo.branch`, ...
     pub code: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
+    /// `quota.hit`: when the usage limit resets (the UI shows it in local time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+}
+
+/// The step about to run costs tokens and a quota window passed `quota.warnAt`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaNote {
+    pub step: StepKind,
+    pub provider: Provider,
+    pub window: QuotaWindowKind,
+    pub used_pct: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+    /// At or over the highest level: "Tự chạy" stops here.
+    pub stop: bool,
+    /// What this step cost the last time it ran (any task).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_cost_usd: Option<f64>,
 }
 
 /// The AI process running a step right now.
@@ -1312,6 +1332,9 @@ pub struct TaskDetail {
     /// The last result of Harness and Test trình duyệt, when they ran.
     #[serde(default)]
     pub tests: Vec<TestView>,
+    /// The next step costs tokens and the quota is high (the facade fills it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_note: Option<QuotaNote>,
 }
 
 /// What Harness (step 5) or Test trình duyệt (step 11) found the last time it ran.
@@ -1488,6 +1511,34 @@ pub struct OrbitSnapshot {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn quota_dtos_keep_camel_case_and_load_old_errors() {
+        let old: FlowError =
+            serde_json::from_value(json!({"code": "step.failed", "message": "failed"})).unwrap();
+        assert_eq!(old.resets_at, None);
+        let note = QuotaNote {
+            step: StepKind::Implement,
+            provider: Provider::Claude,
+            window: QuotaWindowKind::SevenDay,
+            used_pct: 96.0,
+            resets_at: Some("2026-11-20T00:00:00Z".into()),
+            stop: true,
+            last_cost_usd: Some(0.55),
+        };
+        assert_eq!(
+            serde_json::to_value(note).unwrap(),
+            json!({
+                "step": "implement", "provider": "claude", "window": "sevenDay", "usedPct": 96.0,
+                "resetsAt": "2026-11-20T00:00:00Z", "stop": true, "lastCostUsd": 0.55
+            })
+        );
+        let error: FlowError = serde_json::from_value(json!({
+            "code": "quota.hit", "message": "wait", "provider": "codex", "resetsAt": "2026-11-20T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(error.resets_at.as_deref(), Some("2026-11-20T00:00:00Z"));
+    }
 
     /// Locks the JSON contract with `types.ts`.
     #[test]

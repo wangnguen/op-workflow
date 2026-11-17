@@ -168,6 +168,18 @@ pub fn implement(plan: &str, brief: Option<&str>, allowed: &[String], note: Opti
     p
 }
 
+/// Viết code / Sửa lỗi again after the usage limit cut its run: the session goes on.
+pub fn carry_on_cut(step: &str, allowed: &[String]) -> String {
+    let mut p = format!(
+        "Your previous run of this step ({step}) was cut off by the usage limit before it finished. \
+         Check the working tree (`git status`, `git diff`) to see what is already done, keep it, \
+         and finish what is left of the step.\n\n"
+    );
+    p.push_str(&code_rules(allowed));
+    p.push_str("\n\nEnd with the summary in Vietnamese that the step asked for.\n");
+    p
+}
+
 /// One finding to fix, as the fix prompt lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixItem {

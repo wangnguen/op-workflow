@@ -1,6 +1,6 @@
 # op-workflow
 
-App desktop (Tauri v2) chạy Claude Code và Codex theo quy trình làm task OpenProject: nhận task → phân tích → bạn duyệt plan → code → `/review-local` → Claude sửa → Codex review ⇄ Claude sửa → `/review-local` chốt → `/push-summary`. App chạy hoàn toàn trên máy, **không bao giờ tự commit hay push**.
+App desktop (Tauri v2) điều phối Claude Code và Codex theo luồng 12 bước: nhận task OpenProject → phân tích → bạn duyệt plan → code → kiểm tra → harness → review và sửa lỗi bạn chọn → test trình duyệt → Push summary. App chạy trên máy bạn, **không bao giờ tự commit hay push**.
 
 Kiến trúc: [docs/architecture.md](docs/architecture.md). Muốn sửa phần nào thì xem [docs/backend-guide.md](docs/backend-guide.md).
 
@@ -26,21 +26,26 @@ Lần đầu mở app: bấm biểu tượng bánh răng → **Cài đặt** →
 
 Ở màn **Phiên** cũng bắt đầu được: nút *Bắt đầu task* trên thanh trên (hoặc chọn một task Inbox trên bản đồ) mở cùng hộp đó; bắt đầu xong, bản đồ đưa task vào giữa. Tab *Bảng* của màn Phiên hiện các phiên theo Cần bạn / Đang chạy / Rảnh, kèm nút *Trên bản đồ*, *Mở task*, *Lấy issue*.
 
-**Các bước AI (2–8)** chạy ngay trong app, mỗi bước là một tiến trình `claude -p` / `codex exec` chạy nền trong repo của task (chưa có terminal; terminal tương tác là Phase 3):
+**Luồng 12 bước** chạy trong app. AI dùng tiến trình `claude -p` / `codex exec` chạy nền; terminal tương tác còn ở Phase 3. Kiểm tra dùng lệnh của app; Harness và Test trình duyệt bật/tắt theo task ở cổng Duyệt plan:
 
 | Bước | AI | Làm gì |
 |---|---|---|
 | Phân tích | Claude, chỉ đọc (`--restricted`, Read/Grep/Glob) | Đọc brief và code, ghi `plan.md`. Dừng ở cổng **Duyệt plan**: *Duyệt, AI viết code* / *Góp ý* (phân tích lại) / *Tự code* (bạn code, xong bấm *Tôi code xong*) |
+| Kiểm tra | App chạy lệnh | Sau Viết code và trong mỗi lần Sửa lỗi; typecheck / lint / prettier theo package hoặc `repos.<repo>.checks`. Chỉ tính lỗi thuộc file task đổi; Claude sửa lỗi kiểm tra tối đa 2 vòng |
+| Harness | Claude dựng, app chạy | Test ngoài repo, có negative control và PASS / FAIL; app chạy lại sau mỗi lần sửa; thư viện riêng cho từng repo |
 | Viết code, Sửa lỗi | Claude, tiếp phiên của bước Phân tích | Sửa file trong working tree. Bash chỉ chạy lệnh trong allowlist (`repos.<repo>.allowBash` và `.claude/settings.json` của repo); `git commit/push/merge/rebase/reset/clean/tag` bị chặn |
 | Tự review, Review chốt | Claude | `/review-local` của repo nếu có (`.claude/commands/review-local.md`), không thì prompt review của app (dải trạng thái ghi rõ cái nào đang chạy); kết quả về dạng lỗi review, viết bằng tiếng Việt. Phần reviewer đánh giá có cần cập nhật docs / test hiện ở cuối tab *Lỗi review* |
-| Review chéo | Codex (`--sandbox read-only`) | Review diff so với base; còn lỗi thì Claude sửa rồi Codex review lại, tối đa 3 vòng |
+| Review chéo | Codex (`--sandbox read-only`) | Review diff so với base; lỗi chờ bạn chọn. Sau Sửa lỗi bạn quyết có review lại không, không giới hạn số vòng |
+| Test trình duyệt | Claude + Chrome DevTools MCP | Thử kịch bản trong plan bằng Chrome riêng, ghi OK / NG và ảnh; NG chờ bạn chọn có sửa không |
 | Push summary | Claude | `/push-summary` của repo nếu có, không thì prompt của app: commit message + mô tả PR (giữ ngôn ngữ repo yêu cầu). App không push. Nút *Copy commit* / *Copy PR* trên thẻ và trong cửa sổ task copy thẳng vào clipboard |
 
-Bấm **Mở task** để xem cửa sổ task: các bước, nút cho bước kế tiếp, và các tab *Brief* (sửa được trước khi AI đọc), *Comment*, *Plan*, *Lỗi review* (mỗi lỗi: Sửa / Chấp nhận + lý do / Để sau), *Diff*, *Push summary*, *Log*. Dưới tên mỗi bước là model · effort của lần chạy gần nhất. Mặc định app **dừng sau mỗi bước** để bạn xem kết quả rồi bấm chạy bước tiếp; bật *Tự chạy* trong cửa sổ task (công tắc riêng của từng task; mặc định lấy từ `"steps": { "autoAdvance": true }`) thì app chạy liền tới chỗ cần bạn quyết, rồi dừng và báo (chuông + thông báo Windows). Mỗi lần review (Tự review, Review chéo, Review chốt) báo lỗi, app dừng để bạn chọn lỗi nào cho AI sửa (mỗi lỗi ghi nguồn: /review-local, prompt của app hay Codex, bước và vòng); app không tự sửa lỗi nào chỉ vì mức độ. Sau mỗi lần Sửa lỗi app hỏi *Review chéo lại?*: có thì Codex review thêm một vòng, không thì sang Review chốt (chạy lại Review chốt nếu vừa sửa lỗi của nó), hoặc chọn thêm lỗi để sửa. Không giới hạn số vòng. Bước lỗi có nút *Thử lại*, và *Đăng nhập* khi Claude/Codex bị đăng xuất; *Dừng* kill cả cây tiến trình.
+Bấm **Mở task** để xem cửa sổ task: các bước, nút cho bước kế tiếp, và các tab *Brief* (sửa được trước khi AI đọc), *Comment*, *Plan*, *Lỗi review* (mỗi lỗi: Sửa / Chấp nhận + lý do / Để sau), *Diff*, *Tiến trình*, *Chat*, *Push summary*, *Log*. Dưới tên mỗi bước là model · effort của lần chạy gần nhất. Mặc định app **dừng sau mỗi bước** để bạn xem kết quả rồi bấm chạy bước tiếp; bật *Tự chạy* trong cửa sổ task (công tắc riêng của từng task; mặc định lấy từ `"steps": { "autoAdvance": true }`) thì app chạy liền tới chỗ cần bạn quyết, rồi dừng và báo (chuông + thông báo Windows). Mỗi lần review (Tự review, Review chéo, Review chốt) báo lỗi, app dừng để bạn chọn lỗi nào cho AI sửa (mỗi lỗi ghi nguồn: /review-local, prompt của app hay Codex, bước và vòng); app không tự sửa lỗi nào chỉ vì mức độ. Sau mỗi lần Sửa lỗi app hỏi *Review chéo lại?*: có thì Codex review thêm một vòng, không thì sang Review chốt (chạy lại Review chốt / Test trình duyệt nếu vừa sửa lỗi của bước đó), hoặc chọn thêm lỗi để sửa. Không giới hạn số vòng. Bước lỗi có nút *Thử lại*, và *Đăng nhập* khi Claude/Codex bị đăng xuất; *Dừng* kill cả cây tiến trình.
 
-An toàn: trước và sau mỗi bước app so HEAD, nhánh hiện tại và các ref; bước chỉ đọc mà file trong working tree đổi thì app cũng dừng. Thấy gì lạ là app dừng và báo, không tự sửa. Giới hạn chi phí và thời gian của từng bước nằm ở `steps.<bước>.maxBudgetUsd` / `timeoutMin` (mặc định: Phân tích $1.5, Viết code $5, review $3, Sửa lỗi $2, Push summary $1; Review chốt dùng `steps.finalReview`, chưa đặt thì theo `steps.reviewLocal`). App không commit, không push: xong bước 8 bạn tự review diff, commit, push, rồi bấm *Đã push xong*. `plan.md`, `push.md` và kết quả Codex nằm cạnh `brief.md` trong thư mục task; output thô của từng lần chạy ở `<thư mục dữ liệu>/runs` (tự xoá sau 14 ngày).
+An toàn: trước và sau mỗi bước app so HEAD, nhánh và ref; bước chỉ đọc mà working tree đổi thì app dừng. Giới hạn chi phí và thời gian đặt ở `steps.<bước>.maxBudgetUsd` / `timeoutMin`. Sau bước 12 bạn tự review diff, commit, push rồi bấm *Đã push xong*. `plan.md`, `push.md`, kết quả Codex nằm cạnh brief; log AI ở `<dữ liệu>/runs` (xoá sau 14 ngày). App dọn tiến trình con và cổng AI để lại sau mỗi lần chạy. Bấm X hỏi **Thu xuống khay** (AI tiếp tục) hay **Thoát hẳn** (dừng AI cùng cây tiến trình), có ô *Nhớ lựa chọn*; đổi ở Cài đặt → Thông báo (`onClose`).
 
-**Model và effort theo bước:** Cài đặt → *Các bước AI*: mỗi bước chọn model (Claude: Opus 5.5 / Sonnet 5.5 / Haiku 5.5 / Fable 5.2; Codex: model trong `~/.codex/config.toml` hoặc gõ tên) và effort. Mặc định *Theo máy*: app không truyền cờ, CLI dùng mặc định trên máy như khi chạy tay (riêng Push summary vẫn `--effort low` như trước). Chọn rồi thì app luôn truyền cờ rõ ràng: Claude `--model` / `--effort`, Codex `-m` / `-c model_reasoning_effort=…`; lưu ở `steps.<bước>.model` / `effort` trong `config.json`. Cạnh mỗi lựa chọn chỉ có thông tin tham khảo: giá mỗi 1M token vào / ra và chi phí, thời gian trung bình của bước đó ở các lần chạy trước. Review chéo đổi được agent (Codex / Claude).
+**Hạn mức trước bước AI:** khi cửa sổ 5 giờ hoặc tuần vượt `quota.warnAt` (mặc định 80 / 95%), cạnh nút chạy hiện provider, % đã dùng, giờ reset và chi phí lần chạy có số liệu gần nhất của bước đó trên cùng provider. Mức thấp chỉ nhắc; mức cao nhất dừng Tự chạy trước bước AI tiếp theo, bạn vẫn bấm Chạy được. Lệnh Kiểm tra và chạy lại harness không bị chặn. Hết quota giữa bước được ghi thành `quota.hit`; Thử lại giữ đúng bước và phiên code đang dở. Sau reset, task bật Tự chạy tiếp tục, task tắt Tự chạy nhận chuông/toast một lần; chưa biết giờ reset thì chờ gauge có chỗ trống. Lịch chờ được lưu qua lần mở app lại, chỉ áp dụng task đang hoạt động.
+
+**Model và effort theo bước:** Cài đặt → *Các bước AI*: mỗi bước chọn model từ danh sách CLI trên máy (hoặc nhập tên) và effort. Mặc định *Theo máy*: app không truyền cờ, CLI dùng mặc định trên máy như khi chạy tay (riêng Push summary vẫn `--effort low` như trước). Chọn rồi thì app luôn truyền cờ rõ ràng: Claude `--model` / `--effort`, Codex `-m` / `-c model_reasoning_effort=…`; lưu ở `steps.<bước>.model` / `effort` trong `config.json`. Cạnh mỗi lựa chọn chỉ có thông tin tham khảo: giá mỗi 1M token vào / ra và chi phí, thời gian trung bình của bước đó ở các lần chạy trước. Review chéo đổi được agent (Codex / Claude).
 
 **Comment:** tab *Comment* đọc comment của task trên OpenProject lúc mở tab và issue GitHub của lần *Lấy issue* gần nhất (*Lấy lại issue* đọc lại qua Chrome). Comment của người khác viết sau lần xem trước có dấu *cần xem*. Comment của bạn (OpenProject: tác giả trùng chủ token, `users/me`; GitHub: cờ `viewerDidAuthor` của trang, không lấy tên) thu gọn một dòng, bấm để đọc hết, và không bao giờ tính là mới hay báo chuông. Mỗi comment có nút *Mở trên OpenProject* (mở đúng comment đó trong trình duyệt; comment issue thì *Mở trên GitHub*, mở trang issue), nhãn *OpenProject #id* ở đầu tab mở task. App chỉ mở link do chính nó dựng cho task đó. App không dịch comment. Có comment của người khác mới hơn phần comment trong brief thì *Cập nhật brief* ghi lại riêng mục đó (đã che email, token), phần bạn sửa ở chỗ khác giữ nguyên. Thẻ task hiện "N comment mới" (chỉ đếm comment của người khác); bấm vào là mở tab này. Task ở Inbox (chưa bắt đầu) thì bấm "N comment mới" mở hộp *Comment* ngay trên bảng (cũng có link mở từng comment), không cần bắt đầu task; dòng chuông của task Inbox cũng mở hộp này. Mỗi thẻ hiện độ ưu tiên của task đúng như trên OpenProject (tên và màu admin đặt; không có màu thì chữ trơn). Bấm mã task trên thẻ (hoặc ở đầu cửa sổ task) để mở task trên OpenProject.
 
@@ -77,7 +82,7 @@ scripts/check-core-deps.sh      # core/ không được phụ thuộc tauri (có
 apps/desktop/ui         React + TypeScript; chỉ src/ipc/ được gọi Tauri
 apps/desktop/src-tauri  vỏ mỏng: cửa sổ, lệnh IPC (*_api.rs)
 core/                   Rust, không phụ thuộc Tauri
-  domain                task, quy trình 8 bước (state machine), finding, DTO
+  domain                task, quy trình 12 bước (state machine), finding, DTO
   config                đường dẫn, ~/.op-workflow/config.json
   storage               SQLite + migration theo user_version
   quota                 quota Claude/Codex từ các nguồn không cần token
@@ -89,7 +94,7 @@ core/                   Rust, không phụ thuộc Tauri
   browser               đọc issue GitHub qua Chrome của bạn (DevTools, chỉ đọc)
   pty                   terminal tương tác (portable-pty, ADR 0003); --pty-selftest
   monitor               Phase 3
-  orchestrator          nơi duy nhất ghép các crate; flow.rs chạy các bước 2–8
+  orchestrator          ghép các crate; flow.rs chạy bước 2–12 và các cổng quyết định
 tools/opw-hook          hook + statusline bridge, chỉ ghi số liệu
 tools/fake-agent        phát lại stream-json để test không tốn token
 ```

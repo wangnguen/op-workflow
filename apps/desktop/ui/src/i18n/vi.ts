@@ -431,10 +431,18 @@ export const vi = {
     crossAgain: (round: number) => (round === 0 ? "Review chéo (vòng 1)" : `Review chéo lại (vòng ${round + 1})`),
     crossAgainHint: "AI còn lại (mặc định Codex) review toàn bộ thay đổi thêm một vòng; lỗi mới lại chờ bạn chọn",
     noCross: (step: string, again: boolean) => (again ? `Không, chạy lại ${step}` : `Không, sang ${step}`),
-    noCrossHint: (again: boolean) =>
+    quota: {
+      note: (who: string, window: string, used: number) => `${who} ${window} đã dùng ${Math.round(used)}%`,
+      window: { fiveHour: "5 giờ", sevenDay: "tuần" } as Record<string, string>,
+      reset: (at: string) => `reset ${at}`,
+      lastCost: (usd: string) => `lần trước bước này tốn ${usd}`,
+      stop: "Tự chạy dừng ở mức này; bấm Chạy nếu vẫn muốn chạy",
+      resetAt: (at: string) => `Hạn mức reset lúc ${at}.`,
+    },
+    noCrossHint: (step: string, again: boolean) =>
       again
-        ? "Bỏ qua Review chéo, chạy lại Review chốt (bước đã tìm ra các lỗi vừa sửa)"
-        : "Bỏ qua Review chéo, chạy Review chốt",
+        ? `Bỏ qua Review chéo, chạy lại ${step} (bước đã tìm ra các lỗi vừa sửa)`
+        : `Bỏ qua Review chéo, chạy ${step}`,
     pickMore: (n: number) => `Chọn thêm lỗi (${n})`,
     pickMoreHint: "Quay lại các lỗi chưa sửa của lần review vừa rồi để chọn sửa thêm",
     showFindings: "Xem lỗi",

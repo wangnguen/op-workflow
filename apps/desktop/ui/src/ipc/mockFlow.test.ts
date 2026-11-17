@@ -18,6 +18,7 @@ const inbox: TaskCard = { id: "WP-9", wpId: 9, title: "t", project: "p", nxStatu
 afterEach(() => {
   resetMockFlows();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 /** Let the running mock step finish, then read the task. */
@@ -34,6 +35,47 @@ function answerAll(wpId: number): void {
 const stateOf = (d: TaskDetail, kind: StepKind): StepState | undefined => d.steps.find((s) => s.kind === kind)?.state;
 
 describe("12-step flow in the preview", () => {
+  it("warns before approving the plan and pauses auto-run until quota resets", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("location", { search: "?quotaWarn=96&quotaWindow=sevenDay&quotaResetMs=10000" });
+    mockStarted(9, "t");
+    mockFlowAction(9, { type: "run" });
+    const plan = finishStep(9);
+    expect(plan.quotaNote).toMatchObject({ step: "implement", provider: "claude", window: "sevenDay", usedPct: 96, stop: true });
+    const reset = Date.parse(plan.quotaNote!.resetsAt!);
+    answerAll(9);
+    mockFlowAction(9, { type: "setAuto", on: true });
+    mockFlowAction(9, { type: "approvePlan" });
+    const paused = finishStep(9);
+    expect([paused.status, paused.current]).toEqual(["ready", "harness"]);
+    expect(stateOf(paused, "checks")).toBe("done");
+    expect(paused.log.some((l) => l.text.includes("Tự chạy dừng trước Harness"))).toBe(true);
+    vi.setSystemTime(reset);
+    const resumed = mockTaskDetail(9);
+    expect(resumed.quotaNote).toBeUndefined();
+    expect([resumed.status, resumed.current]).toEqual(["running", "harness"]);
+    expect(resumed.log.filter((l) => l.text === "Hạn mức đã reset")).toHaveLength(1);
+    mockTaskDetail(9);
+    expect(mockTaskDetail(9).log.filter((l) => l.text === "Hạn mức đã reset")).toHaveLength(1);
+  });
+
+  it("continues auto-run at the warning level and omits notices below it", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("location", { search: "?quotaWarn=85" });
+    mockStarted(9, "t");
+    expect(mockTaskDetail(9).quotaNote).toMatchObject({ step: "analyze", stop: false });
+    mockFlowAction(9, { type: "run" });
+    expect(mockTaskDetail(9).quotaNote).toBeUndefined();
+    finishStep(9);
+    answerAll(9);
+    mockFlowAction(9, { type: "setAuto", on: true });
+    mockFlowAction(9, { type: "approvePlan" });
+    expect(finishStep(9).status).toBe("running");
+    vi.stubGlobal("location", { search: "?quotaWarn=79" });
+    mockStarted(10, "t");
+    expect(mockTaskDetail(10).quotaNote).toBeUndefined();
+  });
+
   it("passes the steps not turned on, asks after every fix and runs Review chốt again after its fix", () => {
     vi.useFakeTimers();
     mockStarted(9, "t");

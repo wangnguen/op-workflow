@@ -21,6 +21,7 @@ use std::time::Duration;
 use crate::browsertest;
 use crate::checks::{self, Check, CheckKind, CheckResult, CheckRunner, ProcessRunner};
 use crate::harness;
+use crate::quotagate;
 use opw_agents::ModelChoice;
 use opw_agents::claude::{self, ClaudeEvent, Denial, RunResult};
 use opw_agents::codex::{self, CodexEvent};
@@ -176,6 +177,23 @@ struct Saved {
     harness: Option<HarnessState>,
     /// Test trình duyệt (step 11): how it went last.
     browser: Option<BrowserState>,
+    /// The usage limit ended a run in the middle: which, and when it can go on.
+    cut: Option<CutRun>,
+}
+
+/// A run the usage limit ended in the middle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CutRun {
+    step: StepKind,
+    provider: Provider,
+    /// Claude's session of the cut run: Viết code / Sửa lỗi go on in it.
+    session: Option<String>,
+    /// When the limit resets (`None` = unknown: the quota gauges decide).
+    until: Option<String>,
+    /// The reset was announced (or the step started again).
+    #[serde(default)]
+    notified: bool,
 }
 
 /// The task's harness: the command the app runs again after each fix, and its last result.
@@ -516,6 +534,7 @@ fn flow_error(code: &str, message: impl Into<String>) -> FlowError {
         code: code.into(),
         message: message.into(),
         provider: None,
+        resets_at: None,
     }
 }
 
@@ -559,6 +578,7 @@ fn signed_out(agent: AgentKind) -> FlowError {
             "{name} chưa đăng nhập hoặc phiên đăng nhập đã hết hạn. Bấm Đăng nhập (mở `{cmd}`), xong thì bấm Thử lại."
         ),
         provider: Some(provider_of(agent)),
+        resets_at: None,
     }
 }
 
@@ -743,6 +763,8 @@ pub struct FlowAlert {
 }
 
 type AlertSink = Arc<dyn Fn(FlowAlert) + Send + Sync>;
+/// The latest quota reading of a provider (the live gauges).
+type QuotaSource = Arc<dyn Fn(Provider) -> Option<QuotaSnapshot> + Send + Sync>;
 
 struct Inner {
     tasks: Mutex<HashMap<u64, Entry>>,
@@ -756,12 +778,21 @@ struct Inner {
     checker: Mutex<Arc<dyn CheckRunner>>,
     /// The user quit the app: running steps were stopped and no new one starts.
     quitting: AtomicBool,
+    quota_source: Mutex<Option<QuotaSource>>,
 }
 
 /// The workflow engine shared by the Tauri commands.
 #[derive(Clone)]
 pub struct Flow {
     inner: Arc<Inner>,
+}
+
+/// A quota wait that ended: retry a cut step, or start the step paused before launch.
+#[derive(Debug, PartialEq)]
+pub struct QuotaWake {
+    pub wp_id: u64,
+    pub auto: Option<bool>,
+    pub retry: bool,
 }
 
 impl std::fmt::Debug for Flow {
@@ -882,6 +913,7 @@ impl Flow {
                 alert_sink: Mutex::new(None),
                 checker: Mutex::new(Arc::new(ProcessRunner)),
                 quitting: AtomicBool::new(false),
+                quota_source: Mutex::new(None),
             }),
         }
     }
@@ -898,6 +930,73 @@ impl Flow {
         if let Ok(mut s) = self.inner.alert_sink.lock() {
             *s = Some(Arc::new(sink));
         }
+    }
+
+    /// Where the flow reads the quota (auto-run stops at the highest `quota.warnAt` level; a
+    /// usage limit hit mid-step gets its reset time).
+    pub fn set_quota_source(
+        &self,
+        source: impl Fn(Provider) -> Option<QuotaSnapshot> + Send + Sync + 'static,
+    ) {
+        if let Ok(mut s) = self.inner.quota_source.lock() {
+            *s = Some(Arc::new(source));
+        }
+    }
+
+    /// Tasks stopped by the usage limit whose limit has reset now (each returned once): the
+    /// facade runs them again (with "Tự chạy") or rings the bell. `None` = the task follows
+    /// `steps.autoAdvance`.
+    pub fn quota_waits_due(&self, now: &str, stop_level: f64) -> Vec<QuotaWake> {
+        let mut due = Vec::new();
+        let mut tasks = self.inner.lock_tasks();
+        for (wp_id, entry) in tasks.iter_mut() {
+            let retry = entry.saved.workflow.phase() == Phase::Gate(GateKind::Error)
+                && entry.saved.error.as_ref().is_some_and(|e| e.code == "quota.hit");
+            let waiting = entry.run.is_none()
+                && !entry.saved.finished
+                && (retry || matches!(entry.saved.workflow.phase(), Phase::Running(_)));
+            let Some(cut) = entry.saved.cut.as_ref().filter(|c| waiting && !c.notified) else {
+                continue;
+            };
+            if entry.saved.workflow.current_step() != Some(cut.step) {
+                continue;
+            }
+            let active = self
+                .inner
+                .store
+                .lock()
+                .ok()
+                .and_then(|s| s.task(*wp_id).ok().flatten())
+                .is_some_and(|t| t.column == "active");
+            if !active {
+                continue;
+            }
+            let snap = self
+                .inner
+                .quota_of(cut.provider)
+                .map(|s| quotagate::current(s, now));
+            let room = snap
+                .as_ref()
+                .and_then(quotagate::worst)
+                .map(|w| w.used_pct < stop_level);
+            let reset = cut.until.as_ref().map_or(room == Some(true), |until| {
+                opw_quota::seconds_between(until, now).is_some_and(|s| s >= 0.0) && room != Some(false)
+            });
+            if !reset {
+                continue;
+            }
+            if let Some(c) = entry.saved.cut.as_mut() {
+                c.notified = true;
+            }
+            push_log(entry, None, "info", "Hạn mức đã reset");
+            self.inner.persist(*wp_id, entry);
+            due.push(QuotaWake {
+                wp_id: *wp_id,
+                auto: entry.saved.auto,
+                retry,
+            });
+        }
+        due
     }
 
     /// Where `rate_limit_event`s of Claude runs go (the quota gauges).
@@ -1124,7 +1223,14 @@ impl Flow {
                 r.context.map(|c| c as f64 * 100.0 / window as f64)
             }),
             login: (gate == Some(GateKind::Error))
-                .then(|| entry.saved.error.as_ref().and_then(|e| e.provider))
+                .then(|| {
+                    entry
+                        .saved
+                        .error
+                        .as_ref()
+                        .filter(|e| e.code == "agent.signedOut")
+                        .and_then(|e| e.provider)
+                })
                 .flatten(),
             gate,
             note,
@@ -1177,9 +1283,11 @@ impl Flow {
     /// Everything the task window shows. Reads the task files; call it off the UI thread.
     pub fn detail(&self, ctx: &TaskCtx) -> TaskDetail {
         self.ensure(ctx);
+        // Keep the run rows and phase in the same snapshot: finish writes its note before
+        // releasing this lock and making the step appear idle.
+        let tasks = self.inner.lock_tasks();
         let runs = self.inner.runs(ctx.row.wp_id);
         let findings = self.inner.findings(ctx.row.wp_id);
-        let tasks = self.inner.lock_tasks();
         let entry = tasks.get(&ctx.row.wp_id);
         let empty = Entry::default();
         let entry = entry.unwrap_or(&empty);
@@ -1248,6 +1356,8 @@ impl Flow {
                 .map(HarnessState::view)
                 .chain(entry.saved.browser.iter().map(BrowserState::view))
                 .collect(),
+            // the facade fills this from the live quota
+            quota_note: None,
         }
     }
 
@@ -2419,6 +2529,12 @@ impl Inner {
         let Phase::Running(step) = entry.saved.workflow.phase() else {
             return Err(not_now("chạy bước tiếp"));
         };
+        if let Some(cut) = entry.saved.cut.as_mut() {
+            cut.notified = true;
+            if cut.step != step {
+                entry.saved.cut = None;
+            }
+        }
         let agent = ctx.agent_for(step);
         let choice = model_choice(step, &ctx.config);
         let command = command_label(step, agent, ctx.repo().as_deref());
@@ -2508,6 +2624,9 @@ impl Inner {
             Ok(done) => match entry.saved.workflow.apply(done.event) {
                 Ok(()) => {
                     entry.saved.error = None;
+                    if entry.saved.cut.as_ref().is_some_and(|c| c.step == step) {
+                        entry.saved.cut = None;
+                    }
                     if step == StepKind::Analyze {
                         entry.saved.feedback = None;
                     }
@@ -2560,7 +2679,75 @@ impl Inner {
                 Phase::Running(_) => after_checks || ctx.auto(&entry.saved),
                 _ => false,
             };
-        let alert = (!go_on).then(|| stop_alert(ctx, step, entry, &text)).flatten();
+        // "Tự chạy" stops before a step that costs tokens once a window passed the highest level
+        let quota_stop = match entry.saved.workflow.phase() {
+            Phase::Running(next)
+                if go_on
+                    && next != StepKind::Checks
+                    && !(next == StepKind::Harness
+                        && entry.saved.harness.as_ref().is_some_and(|h| !h.run.is_empty())) =>
+            {
+                let provider = provider_of(ctx.agent_for(next));
+                let (warn, stop) = quotagate::levels(&ctx.config.quota.warn_at);
+                self.quota_of(provider)
+                    .as_ref()
+                    .and_then(quotagate::worst)
+                    .filter(|w| w.used_pct >= warn)
+                    .map(|w| {
+                        (
+                            w.used_pct >= stop,
+                            quotagate::describe(provider, w),
+                            next,
+                            provider,
+                        )
+                    })
+            }
+            _ => None,
+        };
+        let mut alert = None;
+        let mut go_on = go_on;
+        match quota_stop {
+            Some((true, said, next, provider)) => {
+                go_on = false;
+                let (_, stop) = quotagate::levels(&ctx.config.quota.warn_at);
+                entry.saved.cut = Some(CutRun {
+                    step: next,
+                    provider,
+                    session: None,
+                    until: self
+                        .quota_of(provider)
+                        .as_ref()
+                        .and_then(|s| quotagate::stop_reset(s, stop)),
+                    notified: false,
+                });
+                let line = format!(
+                    "Tự chạy dừng trước {}: {said}. Bấm Chạy khi bạn muốn chạy tiếp.",
+                    step_label(next)
+                );
+                push_log(entry, Some(next), "info", &line);
+                alert = Some(FlowAlert {
+                    wp_id,
+                    task_id: ctx.row.display_id.clone(),
+                    kind: AlertKind::Gate,
+                    title: format!("{} · Tự chạy dừng vì hạn mức", ctx.row.display_id),
+                    body: line,
+                    tab: "progress",
+                });
+            }
+            Some((false, said, next, _)) => {
+                push_log(
+                    entry,
+                    Some(next),
+                    "info",
+                    &format!("{said}: Tự chạy vẫn chạy tiếp"),
+                );
+            }
+            None => {}
+        }
+        if alert.is_none() {
+            alert = (!go_on).then(|| stop_alert(ctx, step, entry, &text)).flatten();
+        }
+        self.persist(wp_id, entry);
         let next = go_on.then(|| self.claim_in(&mut tasks, ctx));
         drop(tasks);
         if let Some(alert) = alert {
@@ -2617,6 +2804,77 @@ impl Inner {
         if let Some(run) = self.lock_tasks().get_mut(&wp_id).and_then(|e| e.run.as_mut()) {
             run.context = Some(tokens);
         }
+    }
+
+    fn quota_of(&self, provider: Provider) -> Option<QuotaSnapshot> {
+        let source = self.quota_source.lock().ok().and_then(|s| s.clone())?;
+        source(provider).map(|s| quotagate::current(s, &now()))
+    }
+
+    /// The usage limit ended a run: remember it (session, reset time) and say so.
+    fn quota_hit(
+        &self,
+        ctx: &TaskCtx,
+        step: StepKind,
+        provider: Provider,
+        session: Option<&str>,
+        text: &str,
+    ) -> FlowError {
+        let snap = self.quota_of(provider);
+        let until = quotagate::reset_time(text, snap.as_ref());
+        let auto = self
+            .lock_tasks()
+            .get(&ctx.row.wp_id)
+            .is_some_and(|e| ctx.auto(&e.saved));
+        self.with_saved(ctx.row.wp_id, |s| {
+            let session = session
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    s.cut
+                        .as_ref()
+                        .filter(|c| c.step == step && c.provider == provider)
+                        .and_then(|c| c.session.clone())
+                });
+            s.cut = Some(CutRun {
+                step,
+                provider,
+                session,
+                until: until.clone(),
+                notified: false,
+            });
+        });
+        let then = if auto {
+            "Tới giờ reset app tự chạy tiếp (Tự chạy đang bật)."
+        } else {
+            "Tới giờ reset app báo chuông; bấm Thử lại để chạy tiếp."
+        };
+        let carry = if step == StepKind::Implement || step.is_fix() {
+            " AI sẽ tiếp tục trong phiên cũ, từ chỗ code đang dở."
+        } else {
+            ""
+        };
+        FlowError {
+            code: "quota.hit".into(),
+            message: format!(
+                "Hết hạn mức {} giữa bước {}. {then}{carry}",
+                quotagate::provider_name(provider),
+                step_label(step)
+            ),
+            provider: Some(provider),
+            resets_at: until,
+        }
+    }
+
+    /// Keep the cut session until the step succeeds, including after a failed launch/retry.
+    fn cut_session(&self, wp_id: u64, step: StepKind, provider: Provider) -> Option<String> {
+        self.with_saved(wp_id, |s| {
+            let cut = s.cut.as_ref()?;
+            (cut.step == step && cut.provider == provider)
+                .then(|| cut.session.clone())
+                .flatten()
+        })
+        .flatten()
     }
 
     /// What a run left running and the app killed: a line in the log (kept), and the step's
@@ -2686,6 +2944,17 @@ impl Inner {
         job: &Job,
         claim: &Claim,
     ) -> Result<RunResult, FlowError> {
+        let mut job = job.clone();
+        if !job
+            .args
+            .iter()
+            .any(|a| a == "--resume" || a == "--no-session-persistence")
+        {
+            if let Some(id) = self.cut_session(ctx.row.wp_id, step, Provider::Claude) {
+                job.args.extend(["--resume".into(), id]);
+            }
+        }
+        let job = &job;
         let stop: &AtomicBool = &claim.stop;
         use std::io::Write;
         let wp_id = ctx.row.wp_id;
@@ -2695,6 +2964,8 @@ impl Inner {
         let mut result: Option<RunResult> = None;
         let mut session = String::new();
         let mut used_model = String::new();
+        let quota_hit =
+            |session: &str, why: &str| self.quota_hit(ctx, step, Provider::Claude, Some(session), why);
         let mut on_line = |line: &str| {
             if let Some(f) = raw.as_mut() {
                 let _ = writeln!(f, "{line}");
@@ -2778,6 +3049,14 @@ impl Inner {
                 };
                 if looks_signed_out(&why) || looks_signed_out(&outcome.stderr_tail) {
                     Err(signed_out(AgentKind::Claude))
+                } else if quotagate::looks_quota_hit(&why) || quotagate::looks_quota_hit(&outcome.stderr_tail)
+                {
+                    let sid = if r.session_id.is_empty() {
+                        session.as_str()
+                    } else {
+                        r.session_id.as_str()
+                    };
+                    Err(quota_hit(sid, &format!("{why}\n{}", outcome.stderr_tail)))
                 } else {
                     Err(flow_error(
                         "step.failed",
@@ -2787,6 +3066,9 @@ impl Inner {
             }
             Some(r) => Ok(r),
             None if looks_signed_out(&outcome.stderr_tail) => Err(signed_out(AgentKind::Claude)),
+            None if quotagate::looks_quota_hit(&outcome.stderr_tail) => {
+                Err(quota_hit(&session, &outcome.stderr_tail))
+            }
             None => Err(flow_error(
                 "step.failed",
                 format!("Claude dừng mà không trả kết quả: {}", exit_why(&outcome)),
@@ -2853,6 +3135,14 @@ impl Inner {
         let outcome = launched.map_err(|e| launch_failed(AgentKind::Codex, &e))?;
         if let Some(err) = stop_error(&outcome, timeout, key) {
             return Err(err);
+        }
+        let quota_text = format!(
+            "{}\n{}",
+            failed.as_deref().unwrap_or_default(),
+            outcome.stderr_tail
+        );
+        if (failed.is_some() || !outcome.success()) && quotagate::looks_quota_hit(&quota_text) {
+            return Err(self.quota_hit(ctx, step, Provider::Codex, Some(&thread), &quota_text));
         }
         if let Some(m) = failed {
             if looks_signed_out(&m) || looks_signed_out(&outcome.stderr_tail) {
@@ -2930,6 +3220,7 @@ fn launch_failed(agent: AgentKind, e: &LaunchError) -> FlowError {
             code: "agent.missing".into(),
             message: format!("Không thấy lệnh `{cli}` trên PATH. Cài {install} rồi bấm Thử lại."),
             provider: Some(provider_of(agent)),
+            resets_at: None,
         },
         LaunchError::Spawn(e) => flow_error("step.failed", format!("Không chạy được {cli}: {e}")),
     }
@@ -3662,13 +3953,22 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .read(PLAN_FILE)
                 .ok_or_else(|| flow_error("plan.missing", "Không đọc được plan.md"))?;
             let allowed = ctx.repo_config().allow_bash;
-            let prompt = prompts::implement(
-                &plan,
-                session.is_none().then_some(brief.as_str()),
+            // the usage limit cut the last run: go on in its session, from where the code is
+            let cut = inner.cut_session(wp_id, step, Provider::Claude);
+            let prompt = match &cut {
+                Some(_) => prompts::carry_on_cut(step_label(step), &allowed),
+                None => prompts::implement(
+                    &plan,
+                    session.is_none().then_some(brief.as_str()),
+                    &allowed,
+                    note.as_deref(),
+                ),
+            };
+            let args = cl(claude::code_args(
+                cut.as_deref().or(session.as_deref()),
+                budget,
                 &allowed,
-                note.as_deref(),
-            );
-            let args = cl(claude::code_args(session.as_deref(), budget, &allowed));
+            ));
             let r = inner.run_claude(ctx, step, &job(Provider::Claude, args, Some(prompt)), claim)?;
             set_session(&r.session_id);
             if note.is_some() {
@@ -3736,13 +4036,17 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 })
                 .collect();
             let allowed = ctx.repo_config().allow_bash;
-            let args = cl(claude::code_args(session.as_deref(), budget, &allowed));
-            let r = inner.run_claude(
-                ctx,
-                step,
-                &job(Provider::Claude, args, Some(prompts::fix(&list, &allowed))),
-                claim,
-            )?;
+            let cut = inner.cut_session(wp_id, step, Provider::Claude);
+            let prompt = match &cut {
+                Some(_) => prompts::carry_on_cut(step_label(step), &allowed),
+                None => prompts::fix(&list, &allowed),
+            };
+            let args = cl(claude::code_args(
+                cut.as_deref().or(session.as_deref()),
+                budget,
+                &allowed,
+            ));
+            let r = inner.run_claude(ctx, step, &job(Provider::Claude, args, Some(prompt)), claim)?;
             set_session(&r.session_id);
             let fixes = inner
                 .with_saved(wp_id, |s| {
@@ -3804,10 +4108,15 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     .map_err(|e| flow_error("task.write", e.to_string()))?;
                 let out = dir.join(format!("codex-r{round}.json"));
                 let _ = std::fs::remove_file(&out);
-                let args = codex::with_model(
+                let mut args = codex::with_model(
                     codex::cross_review_args(&schema.to_string_lossy(), &out.to_string_lossy()),
                     &claim.choice,
                 );
+                if let Some(id) = inner.cut_session(wp_id, step, Provider::Codex) {
+                    // `exec` options (including read-only sandbox) stay on the parent command.
+                    args.pop(); // the stdin prompt marker
+                    args.extend(["resume".into(), id, "-".into()]);
+                }
                 let answer = inner.run_codex(
                     ctx,
                     step,
@@ -5386,6 +5695,293 @@ mod tests {
                 .filter(|f| f.source == "browserTest")
                 .all(|f| f.state == opw_domain::finding::FindingState::Fixed)
         );
+    }
+
+    fn quota_at(used: f64) -> QuotaSnapshot {
+        QuotaSnapshot {
+            provider: Provider::Claude,
+            windows: vec![opw_domain::view::QuotaWindow {
+                kind: opw_domain::view::QuotaWindowKind::FiveHour,
+                used_pct: used,
+                resets_at: Some("2099-11-17T10:00:00Z".into()),
+            }],
+            source: "probe".into(),
+            observed_at: "2026-11-17T08:00:00Z".into(),
+            plan: None,
+        }
+    }
+
+    /// The usage limit ends Viết code half way: the step says so with the reset time, and Thử
+    /// lại goes on in the cut run's session from where the code is. The reset is announced once.
+    #[test]
+    fn a_usage_limit_mid_step_waits_for_the_reset_and_goes_on_where_it_stopped() {
+        let Some(s) = setup() else { return };
+        let codes = AtomicUsize::new(0);
+        let (flow, fake) = flow_with(&s, false, move |job, stop, out| {
+            let attempt = if kind(job) == "code" {
+                codes.fetch_add(1, Ordering::SeqCst)
+            } else {
+                usize::MAX
+            };
+            if attempt == 0 {
+                out(
+                    r#"{"type":"system","subtype":"init","session_id":"s-cut","model":"m","tools":["Edit"]}"#,
+                );
+                out(
+                    r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude AI usage limit reached|1763380800","session_id":"s-cut","total_cost_usd":0.4}"#,
+                );
+                return RunOutcome {
+                    code: Some(1),
+                    ..RunOutcome::default()
+                };
+            }
+            if attempt == 1 {
+                return RunOutcome {
+                    code: Some(1),
+                    stderr_tail: "429 Too Many Requests".into(),
+                    ..RunOutcome::default()
+                };
+            }
+            (happy(CLEAN))(job, stop, out)
+        });
+        flow.set_quota_source(|_| Some(quota_at(0.0)));
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        let err = d.error.clone().unwrap();
+        assert_eq!(err.code, "quota.hit", "{}", err.message);
+        assert_eq!(err.provider, Some(Provider::Claude));
+        assert_eq!(err.resets_at.as_deref(), Some("2025-11-17T12:00:00Z"));
+        assert!(
+            err.message.contains("Hết hạn mức Claude giữa bước Viết code"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("từ chỗ code đang dở"));
+        assert_eq!(d.current, Some(StepKind::Implement));
+
+        // the reset time passed: announced once, the task follows the default (no Tự chạy)
+        assert_eq!(flow.quota_waits_due("2025-11-17T11:00:00Z", 95.0), vec![]);
+        assert_eq!(
+            flow.quota_waits_due("2026-11-17T12:00:00Z", 95.0),
+            vec![QuotaWake {
+                wp_id: 1,
+                auto: None,
+                retry: true
+            }]
+        );
+        assert_eq!(flow.quota_waits_due("2026-11-17T12:00:05Z", 95.0), vec![]);
+
+        // A restart and a retry failing before init must both keep the interrupted session.
+        let flow = Flow::new(s.store.clone(), fake.clone(), None);
+        assert_eq!(
+            run(&flow, &ctx, FlowAction::Retry).error.unwrap().code,
+            "quota.hit"
+        );
+        // Thử lại: the cut session goes on, told to finish what is left
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        assert!(d.error.is_none(), "{:?}", d.error);
+        let jobs = fake.jobs.lock().unwrap().clone();
+        for again in jobs.iter().filter(|j| kind(j) == "code").skip(1) {
+            assert!(
+                again.args.windows(2).any(|w| w == ["--resume", "s-cut"]),
+                "{:?}",
+                again.args
+            );
+            assert!(
+                again
+                    .stdin
+                    .as_deref()
+                    .unwrap()
+                    .contains("cut off by the usage limit")
+            );
+        }
+    }
+
+    /// "Tự chạy" goes on past the warning level and stops before a step that costs tokens at the
+    /// highest one, and says why.
+    #[test]
+    fn auto_run_stops_before_an_ai_step_when_the_quota_is_almost_gone() {
+        let Some(s) = setup() else { return };
+        let (flow, fake) = flow_with(&s, false, happy(CLEAN));
+        let used = Arc::new(Mutex::new(85.0));
+        let level = used.clone();
+        flow.set_quota_source(move |_| Some(quota_at(*level.lock().unwrap())));
+        let alerts = Arc::new(Mutex::new(Vec::<FlowAlert>::new()));
+        let bell = alerts.clone();
+        flow.set_alert_sink(move |a| bell.lock().unwrap().push(a));
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        flow.act(ctx.clone(), FlowAction::SetAuto { on: true }).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        // 85%: past the warning, Tự chạy goes on from Viết code through Kiểm tra to Tự review
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::Findings),
+            "{:?}",
+            d.error
+        );
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text == "Claude 5 giờ đã dùng 85%: Tự chạy vẫn chạy tiếp")
+        );
+        // 96%: a step the user starts still runs, but Tự chạy stops before the next AI step
+        *used.lock().unwrap() = 96.0;
+        let two = s.ctx(2, &Config::default());
+        flow.started(&two, None).unwrap();
+        flow.act(two.clone(), FlowAction::SetAuto { on: true }).unwrap();
+        run(&flow, &two, FlowAction::Run);
+        let d = run(&flow, &two, FlowAction::ApprovePlan);
+        assert_eq!(
+            (d.current, d.status),
+            (Some(StepKind::ReviewLocal), FlowStatus::Ready),
+            "{:?}",
+            d.error
+        );
+        assert!(
+            d.log.iter().any(|l| l
+                .text
+                .starts_with("Tự chạy dừng trước Tự review: Claude 5 giờ đã dùng 96%")),
+            "{:?}",
+            d.log
+        );
+        let last = alerts.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(last.title, "WP-2 · Tự chạy dừng vì hạn mức");
+
+        // The pre-launch wait survives a restart. Parking the task prevents any automatic run.
+        let flow = Flow::new(s.store.clone(), fake, None);
+        let level = used.clone();
+        flow.set_quota_source(move |_| Some(quota_at(*level.lock().unwrap())));
+        assert!(flow.quota_waits_due("2099-11-17T09:00:00Z", 95.0).is_empty());
+        let mut parked = two.row.clone();
+        parked.column = "inbox".into();
+        s.store.lock().unwrap().upsert_task(&parked).unwrap();
+        assert!(flow.quota_waits_due("2099-11-17T10:00:00Z", 95.0).is_empty());
+        s.store.lock().unwrap().upsert_task(&two.row).unwrap();
+        let due = flow.quota_waits_due("2099-11-17T10:00:00Z", 95.0);
+        assert_eq!(
+            due,
+            vec![QuotaWake {
+                wp_id: 2,
+                auto: Some(true),
+                retry: false
+            }]
+        );
+        assert!(flow.quota_waits_due("2099-11-17T10:00:01Z", 95.0).is_empty());
+        *used.lock().unwrap() = 0.0;
+        let d = run(&flow, &two, FlowAction::Run);
+        assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
+    }
+
+    #[test]
+    fn codex_quota_failure_retries_the_same_step_and_thread() {
+        let Some(s) = setup() else { return };
+        let calls = AtomicUsize::new(0);
+        let (flow, fake) = flow_with(&s, false, move |job, stop, out| {
+            if job.agent == Provider::Codex && calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                out(r#"{"type":"thread.started","thread_id":"cut-thread"}"#);
+                out(r#"{"type":"turn.failed","error":{"message":"You've hit your usage limit"}}"#);
+                return RunOutcome {
+                    code: Some(1),
+                    ..RunOutcome::default()
+                };
+            }
+            (happy(CLEAN))(job, stop, out)
+        });
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        run(&flow, &ctx, FlowAction::ApprovePlan);
+        run(&flow, &ctx, FlowAction::Run); // Tự review
+        run(&flow, &ctx, FlowAction::PickFindings { fix: false }); // Review chéo
+        let d = settle(&flow, &ctx);
+        assert_eq!(d.error.as_ref().map(|e| e.code.as_str()), Some("quota.hit"));
+        assert_eq!(d.error.as_ref().unwrap().provider, Some(Provider::Codex));
+        assert_eq!(flow.card(&ctx).unwrap().login, None);
+        assert!(flow.quota_waits_due("2099-11-17T12:00:00Z", 95.0).is_empty());
+        flow.set_quota_source(|p| (p == Provider::Codex).then(|| quota_at(40.0)));
+        assert_eq!(
+            flow.quota_waits_due("2099-11-17T12:00:00Z", 95.0),
+            vec![QuotaWake {
+                wp_id: 1,
+                auto: None,
+                retry: true
+            }]
+        );
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        assert!(d.error.is_none(), "{:?}", d.error);
+        assert_eq!(d.current, Some(StepKind::FinalReview));
+        let jobs = fake.jobs.lock().unwrap();
+        let again = jobs.iter().filter(|j| j.agent == Provider::Codex).nth(1).unwrap();
+        assert!(again.args.windows(2).any(|w| w == ["--sandbox", "read-only"]));
+        assert!(again.args.windows(3).any(|w| w == ["resume", "cut-thread", "-"]));
+    }
+
+    #[test]
+    fn reset_runs_auto_tasks_and_notifies_manual_tasks_once() {
+        for auto in [false, true] {
+            let Some(s) = setup() else { return };
+            let codes = AtomicUsize::new(0);
+            let (flow, fake) = flow_with(&s, false, move |job, stop, out| {
+                if kind(job) == "code" && codes.fetch_add(1, Ordering::SeqCst) == 0 {
+                    out(
+                        r#"{"type":"result","is_error":true,"result":"Claude AI usage limit reached|1763380800","session_id":"cut-session"}"#,
+                    );
+                    return RunOutcome {
+                        code: Some(1),
+                        ..RunOutcome::default()
+                    };
+                }
+                (happy(CLEAN))(job, stop, out)
+            });
+            let config = Config::default();
+            let ctx = s.ctx(1, &config);
+            flow.started(&ctx, None).unwrap();
+            flow.act(ctx.clone(), FlowAction::SetAuto { on: auto }).unwrap();
+            let plan = run(&flow, &ctx, FlowAction::Run);
+            assert_eq!(quotagate::note_step(&plan), Some(StepKind::Implement));
+            let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+            assert_eq!(d.error.unwrap().code, "quota.hit");
+            let svc =
+                crate::AppService::with_flow(s.store.clone(), flow.clone(), config.clone(), s.tasks.clone());
+            svc.wake_after_quota(&config, "2026-11-17T12:00:00Z");
+            let d = settle(&flow, &ctx);
+            if auto {
+                assert_eq!(d.gate.unwrap().kind, GateKind::Findings);
+                assert_eq!(
+                    quotagate::note_step(&flow.detail(&ctx)),
+                    Some(StepKind::CrossReview)
+                );
+                pick_all(&flow, &ctx);
+                assert_eq!(quotagate::note_step(&flow.detail(&ctx)), Some(StepKind::Fix));
+                assert_eq!(
+                    fake.jobs
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|j| kind(j) == "code")
+                        .count(),
+                    2
+                );
+            } else {
+                assert_eq!(d.error.unwrap().code, "quota.hit");
+                assert_eq!(svc.alerts().len(), 1);
+                svc.wake_after_quota(&config, "2026-11-17T12:00:05Z");
+                assert_eq!(svc.alerts().len(), 1);
+                assert_eq!(
+                    fake.jobs
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|j| kind(j) == "code")
+                        .count(),
+                    1
+                );
+            }
+        }
     }
 
     #[test]
