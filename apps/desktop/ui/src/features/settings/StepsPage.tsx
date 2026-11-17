@@ -47,18 +47,21 @@ export function StepsPage({ view, onSaved, models, modelsBusy, onReadModels }: P
         </button>
       </div>
       {error && <p className="note note--error">{error}</p>}
-      <div className="set-group">
-        {rows.map((row, i) => (
-          <StepRow
-            key={row.step}
-            index={i + 2}
-            row={row}
-            catalog={models ? (row.agent === "codex" ? models.codex : models.claude) : undefined}
-            saved={savedStep === row.step}
-            onSave={save}
-          />
-        ))}
-      </div>
+      {/* in a section like the other pages, so the note below sits under the box, not on its border */}
+      <section className="set-section">
+        <div className="set-group">
+          {rows.map((row, i) => (
+            <StepRow
+              key={row.step}
+              index={i + 2}
+              row={row}
+              catalog={models ? (row.agent === "codex" ? models.codex : models.claude) : undefined}
+              saved={savedStep === row.step}
+              onSave={save}
+            />
+          ))}
+        </div>
+      </section>
       <p className="set-note">{t.flags}</p>
     </>
   );
