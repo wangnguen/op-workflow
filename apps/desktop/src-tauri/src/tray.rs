@@ -1,6 +1,6 @@
 //! System tray icon (quota gauge) and the background loop that turns new alerts into Windows
-//! notifications. The picture, the tooltip and what counts as an alert come from the core
-//! (`AppService::tray_view`, `AppService::poll_alerts`); this file only hands them to Windows.
+//! notifications (`toast.rs`). The picture, the tooltip and what counts as an alert come from the
+//! core (`AppService::tray_view`, `AppService::poll_alerts`); this file only hands them to Windows.
 
 use std::time::Duration;
 
@@ -10,7 +10,6 @@ use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, AppHandle, Emitter, Manager};
-use tauri_plugin_notification::NotificationExt;
 
 const TRAY_ID: &str = "quota";
 /// Event the UI listens to: open the quota popover.
@@ -18,11 +17,15 @@ pub const OPEN_QUOTA_EVENT: &str = "opw://open-quota";
 /// How often new alerts and the tray picture are checked.
 const TICK: Duration = Duration::from_secs(3);
 
-/// Bring the main window to the front.
+/// Bring the main window to the front. Windows does not let a window take the foreground from
+/// another app on its own (a window opened from a terminal stays behind it, only its taskbar
+/// button blinks), so it is put on top for a moment and then back to normal.
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_always_on_top(false);
         let _ = w.set_focus();
     }
 }
@@ -77,12 +80,7 @@ pub fn spawn_watcher(app: AppHandle) {
                 std::thread::sleep(TICK);
                 let service = app.state::<AppService>();
                 for alert in service.poll_alerts() {
-                    let _ = app
-                        .notification()
-                        .builder()
-                        .title(&alert.title)
-                        .body(&alert.body)
-                        .show();
+                    crate::toast::show(&app, &alert);
                 }
                 let view = service.tray_view();
                 if view.key != last_key {

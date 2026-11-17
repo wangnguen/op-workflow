@@ -10,7 +10,10 @@ mod app_api;
 mod flow_api;
 mod settings_api;
 mod start_api;
+mod toast;
 mod tray;
+
+use tauri::Manager;
 
 fn main() {
     // PTY spike from inside the app binary (PLAN.md §12): `op-workflow-desktop --pty-selftest`.
@@ -31,15 +34,31 @@ fn main() {
         return;
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // First, as the plugin asks: launching the installed app again (Start menu, desktop icon)
+    // only brings the running one to the front, so there is never a second tray, Codex
+    // app-server or flow engine on the same database. Release builds only: the dev build has its
+    // own data folder (`~/.op-workflow-dev`) and the same identifier, and must run next to the
+    // installed app.
+    #[cfg(not(debug_assertions))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        tray::show_main(app);
+    }));
+    builder
         .plugin(tauri_plugin_notification::init())
-        .manage(opw_orchestrator::AppService::start())
         .setup(|app| {
+            // Started here, after the single-instance check: a second launch quits before it
+            // opens the database (it would mark the running app's step as interrupted and its
+            // run as failed) or starts its own Codex app-server and Claude probes.
+            app.manage(opw_orchestrator::AppService::start());
             // no tray (e.g. a shell without one) must not keep the app from opening
             if let Err(e) = tray::install(app) {
                 eprintln!("tray icon unavailable: {e}");
             }
             tray::spawn_watcher(app.handle().clone());
+            // started from a terminal (or with another app in front), the window would open
+            // behind it
+            tray::show_main(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

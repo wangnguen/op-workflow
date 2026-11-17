@@ -210,12 +210,12 @@ export const markAlertsRead = (ids: number[] = []): Promise<null> =>
 export const setNotify = (kind: NotifyKind, on: boolean): Promise<SettingsView> =>
   call("set_notify", () => ({ ...mockSettings(), notify: mockSetNotify(kind, on) }), { kind, on });
 
-/** The tray icon asks to open the quota popover. Returns the unsubscribe function. */
-export function onOpenQuota(handler: () => void): () => void {
+/** Subscribes to a Tauri event (nothing in the browser preview). Returns the unsubscribe function. */
+function onEvent<T>(name: string, handler: (payload: T) => void): () => void {
   if (!isTauri()) return () => undefined;
   let stop: (() => void) | undefined;
   let done = false;
-  void listen("opw://open-quota", () => handler()).then((unlisten) => {
+  void listen<T>(name, (e) => handler(e.payload)).then((unlisten) => {
     if (done) unlisten();
     else stop = unlisten;
   });
@@ -224,6 +224,14 @@ export function onOpenQuota(handler: () => void): () => void {
     stop?.();
   };
 }
+
+/** The tray icon asks to open the quota popover. Returns the unsubscribe function. */
+export const onOpenQuota = (handler: () => void): (() => void) => onEvent("opw://open-quota", () => handler());
+
+/** A Windows notification was clicked (the window is already in front): open what it is about.
+ *  Returns the unsubscribe function. */
+export const onAlertClicked = (handler: (alert: AlertView) => void): (() => void) =>
+  onEvent<AlertView>("opw://open-alert", handler);
 
 // ---------- update check ----------
 

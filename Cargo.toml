@@ -43,6 +43,10 @@ tungstenite = { version = "0.30.0", default-features = false, features = ["hands
 tauri = { version = "2.12.5", features = ["tray-icon"] }
 # Windows toasts for new comments, steps that wait, quota levels
 tauri-plugin-notification = "2.4.0"
+# the toasts themselves on Windows: the plugin above never reports a click, this one does
+tauri-winrt-notification = "0.7.3"
+# a second launch (Start menu, toast) focuses the running app instead of starting another one
+tauri-plugin-single-instance = "2.5.0"
 tauri-build = { version = "2.7.4", features = [] }
 
 [workspace.lints.rust]

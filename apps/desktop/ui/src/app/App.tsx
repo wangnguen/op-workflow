@@ -1,5 +1,16 @@
-import { useCallback, useState } from "react";
-import { POLL_MS, getAppInfo, getBoard, getOrbit, getUpdateStatus, isMockMode, openReleasePage } from "../ipc/client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  POLL_MS,
+  getAppInfo,
+  getBoard,
+  getOrbit,
+  getUpdateStatus,
+  isMockMode,
+  markAlertsRead,
+  onAlertClicked,
+  openReleasePage,
+} from "../ipc/client";
+import { OPEN_QUOTA_EVENT } from "../features/quota/quota";
 import { CommentsPeek } from "../features/board/CommentsPeek";
 import { TaskBoard } from "../features/board/TaskBoard";
 import { SessionsView } from "../features/sessions/SessionsView";
@@ -35,6 +46,29 @@ export function App() {
     refreshOrbit();
   }, [refreshBoard, refreshOrbit]);
   const openRelease = useCallback(() => void openReleasePage().catch(() => setSettingsOpen(true)), []);
+  /** A task from the bell or a clicked notification: its window, or its comments while it is
+   *  still in the Inbox (no task window yet). */
+  const openTask = (wpId: number, alertTab: string | undefined) => {
+    const known = board.data?.tasks.find((c) => c.wpId === wpId);
+    if (known && known.column !== "inbox") setOpened({ wpId, tab: asTab(alertTab) });
+    else {
+      // inbox tasks have no task window yet: the board, with the task's comments on top
+      setTab("task");
+      if (known) setPeeking({ wpId, taskId: known.id, title: known.title });
+    }
+  };
+  // the latest board, for a notification clicked whenever
+  const openTaskRef = useRef(openTask);
+  openTaskRef.current = openTask;
+  useEffect(
+    () =>
+      onAlertClicked((a) => {
+        void markAlertsRead([a.id]).then(refreshAll);
+        if (a.kind === "quota") window.dispatchEvent(new Event(OPEN_QUOTA_EVENT));
+        else if (a.wpId !== undefined) openTaskRef.current(a.wpId, a.tab);
+      }),
+    [refreshAll],
+  );
 
   return (
     <div className="app">
@@ -47,15 +81,7 @@ export function App() {
         demo={isMockMode() || board.data?.mode === "demo"}
         needsYou={[orbit.data?.active, ...(orbit.data?.others ?? [])].some((s) => s?.gate !== undefined)}
         unreadAlerts={board.data?.unreadAlerts ?? 0}
-        onOpenTask={(wpId, tab) => {
-          const known = board.data?.tasks.find((c) => c.wpId === wpId);
-          if (known && known.column !== "inbox") setOpened({ wpId, tab: asTab(tab) });
-          else {
-            // inbox tasks have no task window yet: the board, with the task's comments on top
-            setTab("task");
-            if (known) setPeeking({ wpId, taskId: known.id, title: known.title });
-          }
-        }}
+        onOpenTask={openTask}
         update={update.data}
         onRefresh={refreshAll}
         onSettings={() => setSettingsOpen(true)}

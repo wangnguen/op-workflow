@@ -14,6 +14,10 @@ opw-domain.workspace = true
 opw-orchestrator.workspace = true
 tauri.workspace = true
 tauri-plugin-notification.workspace = true
+tauri-plugin-single-instance.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification.workspace = true
 
 # Not inheriting workspace lints: tauri's macros expand code we don't control.
 [lints.clippy]
