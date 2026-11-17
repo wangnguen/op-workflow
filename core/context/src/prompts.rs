@@ -212,6 +212,23 @@ pub fn fix(items: &[FixItem], allowed: &[String]) -> String {
     p
 }
 
+/// [4] Kiểm tra found type / lint / format errors in the files the task changed: fix them.
+/// `report` is what the app's check commands printed (only errors in changed files).
+pub fn fix_checks(report: &str, allowed: &[String]) -> String {
+    let mut p = String::from(
+        "The app ran the type check, lint and prettier on the files this task changed and found \
+         the errors below. Fix them in the working tree without changing what the code does. \
+         For formatting, follow the project's prettier and eslint settings; when they disagree \
+         (line length), eslint wins. Do not touch files the task did not change, and do not \
+         disable lint rules to silence an error.\n\n",
+    );
+    p.push_str(&code_rules(allowed));
+    p.push_str("\n\nEnd with one short line in Vietnamese saying what you fixed.\n\n");
+    p.push_str(&tagged("check_output", report));
+    p.push('\n');
+    p
+}
+
 fn review_body(base: &str, brief: &str) -> String {
     format!(
         "Review the change of this task against the base branch `{base}`.\n{}\n\n{RUBRIC}\n\n\

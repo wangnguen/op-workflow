@@ -369,7 +369,10 @@ const iso = (ms: number) => new Date(ms).toISOString();
 /** Branch of a mock task: the two demo cards of mock.ts keep their own names. */
 const branchOf = (f: { wpId: number; taskId: string }) =>
   f.wpId === DEMO_ACTIVE_WP ? "feature/187716" : f.wpId === DEMO_PUSH_WP ? "feature/186196" : `f/${f.taskId}`;
-const agentOf = (step: StepKind): AgentKind => (step === "crossReview" ? "codex" : "claude");
+const agentOf = (step: StepKind): AgentKind => (step === "crossReview" ? "codex" : step === "checks" ? "shell" : "claude");
+
+/** What the mock's Kiểm tra commands report (the app runs them; no tokens). */
+const CHECKS_NOTE = "0 lỗi (tsc, eslint, prettier), bỏ qua 3 lỗi cũ ở file khác";
 const settled = (f: FindingView) => f.state === "fixed" || f.state === "accepted" || f.state === "deferred";
 /** Picked by the user and still open, like `to_fix` in flow.rs. */
 const toFix = (f: FindingView) => f.chosen === true && f.state === "open";
@@ -609,6 +612,11 @@ function passAll(f: Flow, unneeded: StepKind[]): void {
  *  part: Kiểm tra, Harness, Test trình duyệt) as "bỏ qua", like the Rust state machine. */
 function enter(f: Flow, step: StepKind): void {
   let at = STEP_ORDER.indexOf(step);
+  // Kiểm tra is the app's own commands: it runs at once (like the engine, even without Tự chạy)
+  if (STEP_ORDER[at] === "checks") {
+    runChecks(f);
+    at += 1;
+  }
   while (OPTIONAL_STEPS.includes(STEP_ORDER[at] as StepKind)) {
     const passed = STEP_ORDER[at] as StepKind;
     f.states[passed] = "skipped";
@@ -617,6 +625,17 @@ function enter(f: Flow, step: StepKind): void {
     at += 1;
   }
   goTo(f, STEP_ORDER[at] ?? "pushSummary");
+}
+
+/** Kiểm tra right away: a short run of its own in Tiến trình, clean. */
+function runChecks(f: Flow): void {
+  const run = beginRun(f, "checks");
+  run.state = "done";
+  run.endedAt = run.startedAt;
+  run.note = CHECKS_NOTE;
+  run.hasChat = false;
+  f.states.checks = "done";
+  log(f, "ok", `${LABEL.checks} xong: ${CHECKS_NOTE}`, "checks");
 }
 
 /** A Sửa lỗi that was not needed: passed, so it shows "bỏ qua" rather than "chưa tới". */
@@ -710,7 +729,6 @@ function complete(f: Flow): void {
     }
     case "implement": {
       f.states.implement = "done";
-      enter(f, "checks");
       // the type check is refused until the user allows both commands
       const refused = DENIED_RULES.some((r) => !f.allow.includes(r));
       if (refused) {
@@ -718,6 +736,7 @@ function complete(f: Flow): void {
         log(f, "info", `Bị từ chối (ngoài allowlist): Bash: ${DENIED}`, step);
       }
       done(`2 file thay đổi (+38 −6)${refused ? ", 1 lệnh bị chặn" : ""}`);
+      enter(f, "checks");
       return;
     }
     case "fix":
@@ -728,7 +747,9 @@ function complete(f: Flow): void {
       f.fixFor ??= step === "fix" ? "reviewLocal" : "crossReview";
       f.states[step] = "waitingUser";
       toGate(f, "afterFix", step);
-      done(`lần sửa thứ ${f.fixes}: xử lý ${fixing} lỗi; ${step === "fix" ? "2 file thay đổi (+41 −6)" : "1 file thay đổi (+4 −1)"}`);
+      done(
+        `lần sửa thứ ${f.fixes}: xử lý ${fixing} lỗi; ${step === "fix" ? "2 file thay đổi (+41 −6)" : "1 file thay đổi (+4 −1)"}; Kiểm tra lại: ${CHECKS_NOTE}`,
+      );
       return;
     }
     case "pushSummary":
@@ -1114,7 +1135,9 @@ function toolItem(name: string, run: MockRun): ChatItem {
 export function mockStepChat(wpId: number, runId?: number): ChatView {
   const f = flowOf(wpId);
   tick(f);
-  const run = runId === undefined ? f.history[f.history.length - 1] : f.history.find((r) => r.id === runId);
+  // the latest AI run (Kiểm tra's own command rows have no chat)
+  const run =
+    runId === undefined ? ([...f.history].reverse().find((r) => r.agent !== "shell") ?? f.history[f.history.length - 1]) : f.history.find((r) => r.id === runId);
   if (!run) throw fail("run.missing", "Chưa có lần chạy nào");
   const live = run.state === "running";
   const names = live ? tools(f).map((t) => t.name) : TOOLS[run.step];

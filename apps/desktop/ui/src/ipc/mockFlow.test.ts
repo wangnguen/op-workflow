@@ -42,10 +42,11 @@ describe("12-step flow in the preview", () => {
     answerAll(9);
     mockFlowAction(9, { type: "approvePlan" });
 
-    // Viết code → Kiểm tra and Harness are passed ("bỏ qua") → Tự review
+    // Viết code → Kiểm tra runs at once (the app's commands), Harness is passed ("bỏ qua") → Tự review
     let d = finishStep(9);
     expect([d.status, d.current]).toEqual(["ready", "reviewLocal"]);
-    expect([stateOf(d, "checks"), stateOf(d, "harness")]).toEqual(["skipped", "skipped"]);
+    expect([stateOf(d, "checks"), stateOf(d, "harness")]).toEqual(["done", "skipped"]);
+    expect(d.runs.find((r) => r.step === "checks")).toMatchObject({ agent: "shell", state: "done" });
     expect(stateOf(d, "browserTest")).toBe("pending");
 
     // Tự review finds a high → the user picks it → the first Sửa lỗi (7) → "Review chéo?"
@@ -55,7 +56,7 @@ describe("12-step flow in the preview", () => {
     mockFlowAction(9, { type: "pickFindings", fix: true });
     d = finishStep(9);
     expect([d.current, d.gate?.kind, stateOf(d, "fix")]).toEqual(["fix", "afterFix", "waitingUser"]);
-    expect(d.runs.at(-1)?.note).toBe("lần sửa thứ 1: xử lý 1 lỗi; 2 file thay đổi (+41 −6)");
+    expect(d.runs.at(-1)?.note).toBe("lần sửa thứ 1: xử lý 1 lỗi; 2 file thay đổi (+41 −6); Kiểm tra lại: 0 lỗi (tsc, eslint, prettier), bỏ qua 3 lỗi cũ ở file khác");
     d = mockFlowAction(9, { type: "afterFix", choice: "crossReview" });
     expect([d.current, d.steps.find((s) => s.kind === "crossReview")?.round]).toEqual(["crossReview", 1]);
 

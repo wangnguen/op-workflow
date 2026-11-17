@@ -794,13 +794,14 @@ export const stepHint: Record<StepKind, string> = {
   intake: "App lấy task và comment từ OpenProject, tạo nhánh ở máy và ghi brief.md",
   analyze: "AI đọc brief và code, viết plan; bạn duyệt plan trước khi code",
   implement: "AI code theo plan đã duyệt",
-  checks: "App tự chạy tsc, lint, prettier trên file đã đổi, không tốn token. Chưa bật: sẽ có ở phần sau, giờ luồng bỏ qua bước này",
+  checks:
+    "App tự chạy tsc, eslint, prettier trên file đã đổi ngay sau Viết code và sau mỗi lần Sửa lỗi (không tốn token). Lỗi ở file đã đổi thì AI sửa, tối đa 2 lần; lỗi cũ ở file khác bỏ qua. Lệnh riêng của repo: `repos.<repo>.checks` trong config.json",
   harness: "Không bắt buộc: AI đề xuất ở Phân tích có nên dựng harness không, bạn bật/tắt ở cổng Duyệt plan. Chưa bật: giờ luồng bỏ qua",
   reviewLocal: "/review-local lần đầu, ngay sau khi code",
   fix: "AI sửa các lỗi của Tự review",
   crossReview: "AI còn lại (Codex) review chéo phần đã sửa, chỉ đọc",
   fixCross: "AI sửa các lỗi của Review chéo / Review chốt",
-  finalReview: "/review-local lần chốt; finding medium chờ bạn quyết",
+  finalReview: "/review-local lần chốt; lỗi nào cũng chờ bạn chọn có cho AI sửa không",
   browserTest: "Test trên trình duyệt bằng Chrome DevTools MCP; bật/tắt ở cổng Duyệt plan. Chưa bật: giờ luồng bỏ qua",
   pushSummary: "Soạn commit message và mô tả PR. App không push: bạn tự commit và push",
 };

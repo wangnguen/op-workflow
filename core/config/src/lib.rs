@@ -131,6 +131,9 @@ pub struct RepoConfig {
     /// Commands the AI may run while coding in this repo (`npm run lint *`, `npx tsc *`), on top
     /// of the repo's own `.claude/settings.json` allow list. Anything else is refused.
     pub allow_bash: Vec<String>,
+    /// Kiểm tra (step 4): commands the app runs after code changes (`npx tsc --noEmit -p web`,
+    /// `npx eslint {files}`; `{files}` = the changed files). Empty = guessed per package.
+    pub checks: Vec<String>,
 }
 
 /// Limits of one workflow step (`steps.<step>` in config). Unset fields use the app's defaults.

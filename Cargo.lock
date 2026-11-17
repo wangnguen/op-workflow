@@ -2670,6 +2670,7 @@ dependencies = [
  "opw-tracker",
  "opw-update",
  "opw-vcs",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

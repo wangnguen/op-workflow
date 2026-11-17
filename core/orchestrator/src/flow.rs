@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::checks::{self, CheckResult, CheckRunner, ProcessRunner};
 use opw_agents::ModelChoice;
 use opw_agents::claude::{self, ClaudeEvent, Denial, RunResult};
 use opw_agents::codex::{self, CodexEvent};
@@ -59,8 +60,10 @@ const NOTE_CHARS: usize = 400;
 const RUN_LOG_DAYS: u64 = 14;
 /// Optional steps the user turns on or off per task (the analysis proposes them).
 const SWITCHABLE: [StepKind; 2] = [StepKind::Harness, StepKind::BrowserTest];
-/// Steps this build cannot run yet (parts 5c, 5e, 5f): turned on, they are passed as "bỏ qua".
-const NOT_YET: [StepKind; 3] = [StepKind::Checks, StepKind::Harness, StepKind::BrowserTest];
+/// Steps this build cannot run yet (parts 5e, 5f): turned on, they are passed as "bỏ qua".
+const NOT_YET: [StepKind; 2] = [StepKind::Harness, StepKind::BrowserTest];
+/// Times Claude may fix what Kiểm tra reports before the step stops for the user.
+const CHECK_FIX_ROUNDS: usize = 2;
 /// What a question left to the AI says in plan.md.
 const AI_DECIDES: &str = "AI tự quyết";
 
@@ -165,6 +168,8 @@ struct Saved {
     proposals: Vec<StepProposal>,
     /// Optional steps the user turned on or off by hand: a new analysis no longer changes them.
     picked: Vec<StepKind>,
+    /// "Tôi code xong" asked for the review: run it after Kiểm tra even without "Tự chạy".
+    review_after_checks: bool,
 }
 
 #[derive(Debug)]
@@ -241,6 +246,8 @@ pub fn agent_for(step: StepKind, config: &Config) -> AgentKind {
             AgentKind::Claude
         }
         StepKind::CrossReview => AgentKind::Codex,
+        // the app runs the commands; Claude only steps in to fix what they report
+        StepKind::Checks => AgentKind::Shell,
         _ => AgentKind::Claude,
     }
 }
@@ -370,8 +377,9 @@ fn limits(step: StepKind, config: &Config) -> (f64, Duration, &'static str) {
         StepKind::CrossReview => (&steps.cross_review, 3.0, 30, "crossReview"),
         StepKind::PushSummary => (&steps.push_summary, 1.0, 10, "pushSummary"),
         StepKind::Intake => (&steps.analyze, 0.0, 1, "intake"),
+        // each command and each AI fix round of Kiểm tra gets this much
+        StepKind::Checks => return (2.0, Duration::from_secs(15 * 60), "checks"),
         // not run yet (later parts): the app's defaults
-        StepKind::Checks => return (0.0, Duration::from_secs(10 * 60), "checks"),
         StepKind::Harness => return (2.0, Duration::from_secs(30 * 60), "harness"),
         StepKind::BrowserTest => return (3.0, Duration::from_secs(30 * 60), "browserTest"),
     };
@@ -572,7 +580,11 @@ fn git_snap(repo: &Path) -> Result<GitSnap, String> {
 }
 
 fn read_only(step: StepKind) -> bool {
-    !matches!(step, StepKind::Implement | StepKind::Fix | StepKind::FixCross)
+    // Kiểm tra lets Claude fix what the commands report
+    !matches!(
+        step,
+        StepKind::Implement | StepKind::Checks | StepKind::Fix | StepKind::FixCross
+    )
 }
 
 /// What changed that should not have.
@@ -622,6 +634,8 @@ struct Inner {
     runs_dir: Option<PathBuf>,
     quota_sink: Mutex<Option<QuotaSink>>,
     alert_sink: Mutex<Option<AlertSink>>,
+    /// Runs the Kiểm tra commands (tests swap in a fake).
+    checker: Mutex<Arc<dyn CheckRunner>>,
 }
 
 /// The workflow engine shared by the Tauri commands.
@@ -716,12 +730,18 @@ impl Flow {
                         })
                     })
                     .collect();
+                // tasks from before Kiểm tra could run: turn it on where it is still ahead
+                let checks_ahead = saved.workflow.state_of(StepKind::Checks) == StepState::Pending
+                    && !saved.workflow.uses(StepKind::Checks);
+                if checks_ahead {
+                    saved.workflow.set_uses(StepKind::Checks, true);
+                }
                 let mut entry = Entry {
                     saved,
                     run: None,
                     log,
                 };
-                if pass_not_yet(&mut entry) {
+                if pass_not_yet(&mut entry) || checks_ahead {
                     if let Ok(json) = serde_json::to_string(&entry.saved) {
                         let _ = s.save_flow(wp_id, &json, &at);
                     }
@@ -740,7 +760,15 @@ impl Flow {
                 runs_dir,
                 quota_sink: Mutex::new(None),
                 alert_sink: Mutex::new(None),
+                checker: Mutex::new(Arc::new(ProcessRunner)),
             }),
+        }
+    }
+
+    /// What runs the Kiểm tra commands (the real processes by default).
+    pub fn set_check_runner(&self, runner: Arc<dyn CheckRunner>) {
+        if let Ok(mut c) = self.inner.checker.lock() {
+            *c = runner;
         }
     }
 
@@ -1080,7 +1108,12 @@ impl Flow {
         let runs = self.inner.runs(ctx.row.wp_id);
         let row = match run_id {
             Some(id) => runs.iter().find(|r| r.id == id),
-            None => runs.last(),
+            // the latest AI run (Kiểm tra's own command rows have no chat)
+            None => runs
+                .iter()
+                .rev()
+                .find(|r| r.agent.as_deref() != Some("shell"))
+                .or(runs.last()),
         }
         .ok_or_else(|| ApiError::new("run.missing", "Chưa có lần chạy nào"))?;
         let summary = {
@@ -1162,6 +1195,8 @@ impl Flow {
 
 fn new_saved() -> Saved {
     let mut workflow = Workflow::new();
+    // Kiểm tra always runs (it passes as "bỏ qua" when the repo has nothing to check)
+    workflow.set_uses(StepKind::Checks, true);
     let _ = workflow.apply(WorkflowEvent::Start);
     let _ = workflow.apply(WorkflowEvent::StepSucceeded(StepKind::Intake));
     Saved {
@@ -1592,6 +1627,7 @@ fn apply_action(
         }
         FlowAction::SelfCodeDone => {
             event(entry, E::SelfCodeDone)?;
+            entry.saved.review_after_checks = true;
             push_log(
                 entry,
                 Some(StepKind::Implement),
@@ -2282,6 +2318,19 @@ impl Inner {
         result: Result<Done, FlowError>,
     ) -> Option<Result<Claim, ApiError>> {
         let wp_id = ctx.row.wp_id;
+        // the run's note is on its row before the task stops showing "running"
+        let early = self
+            .lock_tasks()
+            .get(&wp_id)
+            .and_then(|e| e.run.as_ref())
+            .and_then(|r| r.run_id);
+        let early_note = match &result {
+            Ok(done) => done.note.clone(),
+            Err(err) => short(&err.message),
+        };
+        if let (Some(id), Ok(store)) = (early.filter(|_| !early_note.is_empty()), self.store.lock()) {
+            let _ = store.set_step_run_note(id, &early_note);
+        }
         let mut tasks = self.lock_tasks();
         let entry = tasks.get_mut(&wp_id)?;
         let run_id = entry.run.take().and_then(|r| r.run_id);
@@ -2333,9 +2382,14 @@ impl Inner {
         push_log(entry, Some(step), kind, &text);
         pass_not_yet(entry);
         self.persist(wp_id, entry);
+        // Kiểm tra costs no tokens: it follows Viết code even without "Tự chạy"
+        let after_checks = step == StepKind::Checks && std::mem::take(&mut entry.saved.review_after_checks);
         let go_on = kind == "ok"
-            && ctx.auto(&entry.saved)
-            && matches!(entry.saved.workflow.phase(), Phase::Running(_));
+            && match entry.saved.workflow.phase() {
+                Phase::Running(StepKind::Checks) => true,
+                Phase::Running(_) => after_checks || ctx.auto(&entry.saved),
+                _ => false,
+            };
         let alert = (!go_on).then(|| stop_alert(ctx, step, entry, &text)).flatten();
         let next = go_on.then(|| self.claim_in(&mut tasks, ctx));
         drop(tasks);
@@ -2795,6 +2849,165 @@ fn execute(inner: &Inner, ctx: &TaskCtx, claim: &Claim) -> Result<Done, FlowErro
     result
 }
 
+/// What Kiểm tra did.
+struct ChecksDone {
+    /// Something was checked (`false` = no command for the changed files).
+    ran: bool,
+    note: String,
+    cost: f64,
+}
+
+/// Run the checks on the changed files; Claude fixes what they report (resuming the code
+/// session) up to [`CHECK_FIX_ROUNDS`] times. In Kiểm tra itself every round gets its own row in
+/// Tiến trình and errors left at the end stop the step; after a Sửa lỗi they only go in its note.
+fn run_checks(
+    inner: &Inner,
+    ctx: &TaskCtx,
+    claim: &Claim,
+    repo: &Path,
+    base: &str,
+    step: StepKind,
+) -> Result<ChecksDone, FlowError> {
+    let wp_id = ctx.row.wp_id;
+    let own_step = step == StepKind::Checks;
+    let config = ctx.repo_config();
+    let (budget, timeout, _) = limits(StepKind::Checks, &ctx.config);
+    let checker = inner
+        .checker
+        .lock()
+        .map(|c| c.clone())
+        .map_err(|_| flow_error("checks.runner", "Không chạy được lệnh kiểm tra"))?;
+    let dir = ctx.task_dir.join("checks");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut cost = 0.0;
+    let mut fixed = 0_usize;
+    let mut round = 0_usize;
+    loop {
+        let changed = checks::changed_files(repo, base);
+        let list = checks::plan(repo, &config.checks, &changed);
+        if list.is_empty() {
+            return Ok(ChecksDone {
+                ran: false,
+                note: "không có lệnh kiểm tra cho các file đã đổi (thêm `repos.<repo>.checks` trong config.json nếu cần)"
+                    .into(),
+                cost,
+            });
+        }
+        let run_id = own_step
+            .then(|| inner.begin_run(ctx, step, "shell", None))
+            .flatten();
+        let mut results: Vec<CheckResult> = Vec::new();
+        let mut log = String::new();
+        for check in &list {
+            inner.on_tool(wp_id, step, "Kiểm tra", &check.label);
+            let r = match checker.run(repo, check, timeout, &claim.stop) {
+                Ok((code, output)) => checks::read(repo, check, code, &output, &changed),
+                Err(why) => CheckResult {
+                    label: check.label.clone(),
+                    broken: Some(why),
+                    ..CheckResult::default()
+                },
+            };
+            log.push_str(&format!(
+                "$ {} {}\n{}\n",
+                check.program,
+                check.args.join(" "),
+                r.output
+            ));
+            results.push(r);
+            if claim.stop.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        let _ = std::fs::write(dir.join(format!("{}-{}.log", step_key(step), round + 1)), &log);
+        let clean = results.iter().all(CheckResult::ok);
+        let mut note = checks::summary(&results);
+        if fixed > 0 {
+            note.push_str(&format!(" sau {fixed} lần AI sửa"));
+        }
+        if let (Some(id), Ok(store)) = (run_id, inner.store.lock()) {
+            let _ = store.end_step_run(
+                id,
+                &StepRunEnd {
+                    state: if clean { "done" } else { "failed" },
+                    session_id: None,
+                    cost_usd: None,
+                    tokens_in: None,
+                    tokens_out: None,
+                    ended_at: &now(),
+                    model: None,
+                    effort: None,
+                    denials: None,
+                },
+            );
+            let _ = store.set_step_run_note(id, &note);
+        }
+        if claim.stop.load(Ordering::Relaxed) {
+            return Err(flow_error(
+                "step.stopped",
+                "Bạn đã dừng bước này. Bấm Thử lại để chạy lại.",
+            ));
+        }
+        inner.log(
+            wp_id,
+            Some(step),
+            if clean { "ok" } else { "info" },
+            &format!("Kiểm tra: {note}"),
+            false,
+        );
+        if clean {
+            return Ok(ChecksDone {
+                ran: true,
+                note,
+                cost,
+            });
+        }
+        let broken: Vec<&CheckResult> = results.iter().filter(|r| r.broken.is_some()).collect();
+        if !broken.is_empty() || round >= CHECK_FIX_ROUNDS {
+            if !own_step {
+                return Ok(ChecksDone {
+                    ran: true,
+                    note: format!("{note} (xem tab Tiến trình; chạy lại Kiểm tra sau khi sửa tay)"),
+                    cost,
+                });
+            }
+            let message = match broken.first() {
+                Some(b) => format!(
+                    "Không chạy được {}: {}. Sửa lệnh trong `repos.<repo>.checks` (config.json) hoặc cài công cụ còn thiếu, rồi bấm Thử lại.",
+                    b.label,
+                    short(b.broken.as_deref().unwrap_or_default())
+                ),
+                None => format!(
+                    "Kiểm tra còn lỗi sau {fixed} lần AI sửa: {}. Sửa tay rồi bấm Thử lại.",
+                    short(&checks::report(&results))
+                ),
+            };
+            return Err(flow_error("checks.failed", message));
+        }
+        // Claude fixes them in the code session
+        let allowed = config.allow_bash.clone();
+        let session = inner.with_saved(wp_id, |s| s.session.clone()).flatten();
+        let args = claude::with_model(
+            claude::code_args(session.as_deref(), budget, &allowed),
+            &model_choice(StepKind::Fix, &ctx.config),
+        );
+        let job = Job {
+            agent: Provider::Claude,
+            args,
+            cwd: repo.to_path_buf(),
+            stdin: Some(prompts::fix_checks(&checks::report(&results), &allowed)),
+            timeout,
+        };
+        let r = inner.run_claude(ctx, step, &job, claim)?;
+        if !r.session_id.is_empty() {
+            inner.with_saved(wp_id, |s| s.session = Some(r.session_id.clone()));
+        }
+        cost += r.cost_usd;
+        fixed += 1;
+        round += 1;
+    }
+}
+
 fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<Done, FlowError> {
     use WorkflowEvent as E;
     let step = claim.step;
@@ -3003,19 +3216,41 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     s.fixes
                 })
                 .unwrap_or(fixes + 1);
+            // Kiểm tra again on what the fix changed; it belongs to this step (no own row)
+            let again = run_checks(inner, ctx, claim, repo, &base, step)?;
+            let again_note = if again.ran {
+                format!("; Kiểm tra lại: {}", again.note)
+            } else {
+                String::new()
+            };
             Ok(Done {
                 event: E::StepSucceeded(step),
                 note: format!(
-                    "lần sửa thứ {fixes}: xử lý {} lỗi; {}{}",
+                    "lần sửa thứ {fixes}: xử lý {} lỗi; {}{}{again_note}",
                     list.len(),
                     change_note(repo),
                     denied_note(r.denials.len())
                 ),
-                cost: Some(r.cost_usd),
+                cost: Some(r.cost_usd + again.cost),
+            })
+        }
+        StepKind::Checks => {
+            let c = run_checks(inner, ctx, claim, repo, &base, step)?;
+            if !c.ran {
+                return Ok(Done {
+                    event: E::StepSkipped(StepKind::Checks),
+                    note: format!("bỏ qua: {}", c.note),
+                    cost: None,
+                });
+            }
+            Ok(Done {
+                event: E::StepSucceeded(StepKind::Checks),
+                note: c.note,
+                cost: (c.cost > 0.0).then_some(c.cost),
             })
         }
         // turned on by later parts; until then the workflow skips them
-        StepKind::Checks | StepKind::Harness | StepKind::BrowserTest => Err(flow_error(
+        StepKind::Harness | StepKind::BrowserTest => Err(flow_error(
             "step.notYet",
             format!("{} chưa chạy được ở bản này", step_label(step)),
         )),
@@ -4174,6 +4409,146 @@ mod tests {
             }
             ok()
         }
+    }
+
+    /// Plays the Kiểm tra commands.
+    struct FakeChecks<F: Fn(usize, &checks::Check) -> Result<(Option<i32>, String), String> + Send + Sync> {
+        calls: AtomicUsize,
+        answer: F,
+    }
+
+    impl<F: Fn(usize, &checks::Check) -> Result<(Option<i32>, String), String> + Send + Sync> CheckRunner
+        for FakeChecks<F>
+    {
+        fn run(
+            &self,
+            _repo: &Path,
+            check: &checks::Check,
+            _t: Duration,
+            _s: &AtomicBool,
+        ) -> Result<(Option<i32>, String), String> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            (self.answer)(n, check)
+        }
+    }
+
+    fn with_checks(commands: &[&str]) -> Config {
+        let mut config = Config::default();
+        config.repos.insert(
+            String::new(),
+            RepoConfig {
+                checks: commands.iter().map(|c| (*c).to_owned()).collect(),
+                ..RepoConfig::default()
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn checks_run_after_coding_and_claude_fixes_what_they_report() {
+        let Some(s) = setup() else { return };
+        let (flow, fake) = flow_with(&s, false, happy(HIGH));
+        flow.set_check_runner(Arc::new(FakeChecks {
+            calls: AtomicUsize::new(0),
+            answer: |n, check: &checks::Check| {
+                assert_eq!(check.args, vec!["eslint", "a.ts"]);
+                Ok(if n == 0 {
+                    (
+                        Some(1),
+                        "a.ts\n  1:1  error  'x' is unused  no-unused-vars\n".to_owned(),
+                    )
+                } else {
+                    (Some(0), String::new())
+                })
+            },
+        }));
+        let mut config = with_checks(&["npx eslint {files}"]);
+        let repo_key = s.repo.to_string_lossy().into_owned();
+        let section = config.repos.remove("").unwrap();
+        config.repos.insert(repo_key, section);
+        let ctx = s.ctx(1, &config);
+        flow.started(&ctx, None).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        // Viết code, then Kiểm tra by itself (no tokens): one error, Claude fixes it, clean
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(
+            (d.current, d.status),
+            (Some(StepKind::ReviewLocal), FlowStatus::Ready),
+            "{:?}",
+            d.error
+        );
+        let checks: Vec<&RunSummary> = d.runs.iter().filter(|r| r.step == StepKind::Checks).collect();
+        assert_eq!(checks.len(), 3, "{:?}", d.runs);
+        assert_eq!(checks[0].state, RunState::Failed);
+        assert!(checks[0].note.as_deref().unwrap().starts_with("1 lỗi"));
+        assert_eq!(checks[1].agent, AgentKind::Claude);
+        assert_eq!(
+            checks[2].note.as_deref(),
+            Some("0 lỗi (npx eslint {files}) sau 1 lần AI sửa")
+        );
+        let step = d.steps.iter().find(|v| v.kind == StepKind::Checks).unwrap();
+        assert_eq!(step.state, StepState::Done);
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let fix = jobs[2].stdin.as_deref().unwrap();
+        assert!(
+            fix.contains("<check_output>\n### npx eslint {files}\na.ts: 1:1  error  'x' is unused"),
+            "{fix}"
+        );
+        // the code session goes on
+        assert!(
+            jobs[2].args.windows(2).any(|w| w == ["--resume", "s-1"]),
+            "{:?}",
+            jobs[2].args
+        );
+        assert!(s.tasks.join("WP-1").join("checks").join("checks-1.log").is_file());
+
+        // a Sửa lỗi checks again inside its own step
+        run(&flow, &ctx, FlowAction::Run);
+        pick_all(&flow, &ctx);
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        let fix = d.runs.iter().rev().find(|r| r.step == StepKind::Fix).unwrap();
+        assert!(
+            fix.note
+                .as_deref()
+                .unwrap()
+                .ends_with("; Kiểm tra lại: 0 lỗi (npx eslint {files})"),
+            "{:?}",
+            fix.note
+        );
+        assert!(
+            !d.runs
+                .iter()
+                .any(|r| r.step == StepKind::Checks && r.started_at > fix.started_at)
+        );
+    }
+
+    #[test]
+    fn checks_that_cannot_run_stop_the_step() {
+        let Some(s) = setup() else { return };
+        let (flow, _fake) = flow_with(&s, false, happy(CLEAN));
+        flow.set_check_runner(Arc::new(FakeChecks {
+            calls: AtomicUsize::new(0),
+            answer: |_, _: &checks::Check| Err("không thấy `npx` trên PATH".to_owned()),
+        }));
+        let mut config = with_checks(&["npx tsc --noEmit"]);
+        let section = config.repos.remove("").unwrap();
+        config
+            .repos
+            .insert(s.repo.to_string_lossy().into_owned(), section);
+        let ctx = s.ctx(1, &config);
+        flow.started(&ctx, None).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(d.gate.map(|g| g.kind), Some(GateKind::Error));
+        let err = d.error.unwrap();
+        assert_eq!(err.code, "checks.failed");
+        assert!(
+            err.message
+                .contains("Không chạy được npx tsc --noEmit: không thấy `npx`"),
+            "{}",
+            err.message
+        );
+        assert_eq!(d.current, Some(StepKind::Checks));
     }
 
     #[test]
