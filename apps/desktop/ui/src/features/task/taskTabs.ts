@@ -17,7 +17,10 @@ export function defaultTab(d: TaskDetail): TaskTab {
   if (d.gate?.kind === "mediumTriage") return "findings";
   if (d.status === "awaitingPush" || d.status === "done") return "push";
   if (d.status === "running" || d.gate?.kind === "error") return "progress";
-  if (d.findings.length > 0 && (d.current === "fix" || d.current === "crossReview" || d.current === "finalReview")) {
+  if (
+    d.findings.length > 0 &&
+    (d.current === "fix" || d.current === "fixCross" || d.current === "crossReview" || d.current === "finalReview")
+  ) {
     return "findings";
   }
   if (d.runs.length === 0 && !d.plan) return "brief";

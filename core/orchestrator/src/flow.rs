@@ -245,10 +245,14 @@ pub fn step_key(step: StepKind) -> &'static str {
         StepKind::Intake => "intake",
         StepKind::Analyze => "analyze",
         StepKind::Implement => "implement",
+        StepKind::Checks => "checks",
+        StepKind::Harness => "harness",
         StepKind::ReviewLocal => "reviewLocal",
         StepKind::Fix => "fix",
         StepKind::CrossReview => "crossReview",
+        StepKind::FixCross => "fixCross",
         StepKind::FinalReview => "finalReview",
+        StepKind::BrowserTest => "browserTest",
         StepKind::PushSummary => "pushSummary",
     }
 }
@@ -263,10 +267,13 @@ pub fn step_label(step: StepKind) -> &'static str {
         StepKind::Intake => "Nhận task",
         StepKind::Analyze => "Phân tích",
         StepKind::Implement => "Viết code",
+        StepKind::Checks => "Kiểm tra",
+        StepKind::Harness => "Harness",
         StepKind::ReviewLocal => "Tự review",
-        StepKind::Fix => "Sửa lỗi",
+        StepKind::Fix | StepKind::FixCross => "Sửa lỗi",
         StepKind::CrossReview => "Review chéo",
         StepKind::FinalReview => "Review chốt",
+        StepKind::BrowserTest => "Test trình duyệt",
         StepKind::PushSummary => "Push summary",
     }
 }
@@ -274,11 +281,13 @@ pub fn step_label(step: StepKind) -> &'static str {
 /// The `steps.<step>` section of a step (intake has none).
 pub fn step_config(step: StepKind, steps: &StepsConfig) -> Option<&StepConfig> {
     Some(match step {
-        StepKind::Intake => return None,
+        // Kiểm tra runs no AI; Harness and Test trình duyệt get their settings when they run
+        StepKind::Intake | StepKind::Checks | StepKind::Harness | StepKind::BrowserTest => return None,
         StepKind::Analyze => &steps.analyze,
         StepKind::Implement => &steps.implement,
         StepKind::ReviewLocal => &steps.review_local,
-        StepKind::Fix => &steps.fix,
+        // both Sửa lỗi steps share one setting
+        StepKind::Fix | StepKind::FixCross => &steps.fix,
         StepKind::CrossReview => &steps.cross_review,
         StepKind::FinalReview => &steps.final_review,
         StepKind::PushSummary => &steps.push_summary,
@@ -351,10 +360,14 @@ fn limits(step: StepKind, config: &Config) -> (f64, Duration, &'static str) {
         StepKind::Implement => (&steps.implement, 5.0, 60, "implement"),
         StepKind::ReviewLocal => (&steps.review_local, 3.0, 30, "reviewLocal"),
         StepKind::FinalReview => (&steps.final_review, 3.0, 30, "finalReview"),
-        StepKind::Fix => (&steps.fix, 2.0, 45, "fix"),
+        StepKind::Fix | StepKind::FixCross => (&steps.fix, 2.0, 45, "fix"),
         StepKind::CrossReview => (&steps.cross_review, 3.0, 30, "crossReview"),
         StepKind::PushSummary => (&steps.push_summary, 1.0, 10, "pushSummary"),
         StepKind::Intake => (&steps.analyze, 0.0, 1, "intake"),
+        // not run yet (later parts): the app's defaults
+        StepKind::Checks => return (0.0, Duration::from_secs(10 * 60), "checks"),
+        StepKind::Harness => return (2.0, Duration::from_secs(30 * 60), "harness"),
+        StepKind::BrowserTest => return (3.0, Duration::from_secs(30 * 60), "browserTest"),
     };
     // the final review used to share `reviewLocal`; its limits still apply when unset
     let shared = (step == StepKind::FinalReview).then_some(&steps.review_local);
@@ -552,7 +565,7 @@ fn git_snap(repo: &Path) -> Result<GitSnap, String> {
 }
 
 fn read_only(step: StepKind) -> bool {
-    !matches!(step, StepKind::Implement | StepKind::Fix)
+    !matches!(step, StepKind::Implement | StepKind::Fix | StepKind::FixCross)
 }
 
 /// What changed that should not have.
@@ -2071,7 +2084,7 @@ impl Inner {
                 let text = format!("{} lỗi: {}", step_label(step), err.message);
                 note = short(&err.message);
                 entry.saved.error = Some(err);
-                if step == StepKind::Fix {
+                if step.is_fix() {
                     // what was being fixed is open again
                     if let Ok(store) = self.store.lock() {
                         for f in store.findings(wp_id).unwrap_or_default() {
@@ -2693,7 +2706,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 cost: Some(r.cost_usd),
             })
         }
-        StepKind::Fix => {
+        StepKind::Fix | StepKind::FixCross => {
             let cap = u32::from(ctx.max_rounds()) * 2 + 2;
             if fixes >= cap {
                 return Err(flow_error(
@@ -2707,7 +2720,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             let items: Vec<&FindingRow> = findings.iter().filter(|f| to_fix(f, policy)).collect();
             if items.is_empty() {
                 return Ok(Done {
-                    event: E::StepSucceeded(StepKind::Fix),
+                    event: E::StepSucceeded(step),
                     note: "không còn lỗi cần sửa".into(),
                     cost: None,
                 });
@@ -2742,7 +2755,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             set_session(&r.session_id);
             inner.with_saved(wp_id, |s| s.fixes += 1);
             Ok(Done {
-                event: E::StepSucceeded(StepKind::Fix),
+                event: E::StepSucceeded(step),
                 note: format!(
                     "xử lý {} lỗi; {}{}",
                     list.len(),
@@ -2752,6 +2765,11 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 cost: Some(r.cost_usd),
             })
         }
+        // turned on by later parts; until then the workflow skips them
+        StepKind::Checks | StepKind::Harness | StepKind::BrowserTest => Err(flow_error(
+            "step.notYet",
+            format!("{} chưa chạy được ở bản này", step_label(step)),
+        )),
         StepKind::CrossReview => {
             let round = inner.round_of(wp_id);
             let (raw, source, cost) = if claim.agent == AgentKind::Codex {
@@ -3131,7 +3149,12 @@ mod tests {
         assert_eq!(d.findings[0].state, opw_domain::finding::FindingState::Fixed);
         let system = flow.system(&ctx).unwrap();
         assert_eq!(system.agents[0].status, SessionStatus::Idle);
-        assert_eq!(system.steps[5].round, Some(1));
+        let cross = system
+            .steps
+            .iter()
+            .find(|s| s.kind == StepKind::CrossReview)
+            .unwrap();
+        assert_eq!(cross.round, Some(1));
 
         let d = run(&flow, &ctx, FlowAction::Run);
         assert_eq!(d.current, Some(StepKind::PushSummary), "{:?}", d.error);

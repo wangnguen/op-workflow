@@ -168,6 +168,10 @@
   stroke: var(--orbit-line-hot);
   stroke-width: 1.4;
 }
+/* a step the flow passed without running ("bỏ qua") */
+.orbit-ring--skipped {
+  stroke-dasharray: 3 6;
+}
 .orbit-ring--waitingUser.orbit-ring--current {
   stroke: rgba(255, 213, 79, 0.45);
 }
@@ -282,7 +286,7 @@
 }
 .planet--skipped .planet-body {
   fill: transparent;
-  stroke: #3b4160;
+  stroke: #6b7396;
   stroke-dasharray: 2 2;
 }
 .planet-check {
@@ -325,6 +329,14 @@
 }
 .planet--pending .planet-sub {
   fill: #4c5370;
+}
+.planet--skipped .planet-label {
+  fill: var(--text-faint);
+  font-weight: 500;
+}
+.planet--skipped .planet-sub {
+  fill: var(--text-faint);
+  font-style: italic;
 }
 .planet--running .planet-sub {
   fill: var(--st-running);

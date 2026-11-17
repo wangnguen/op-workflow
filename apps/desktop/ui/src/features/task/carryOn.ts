@@ -17,9 +17,11 @@ export interface CarryOnOptions {
 }
 
 export function carryOnOptions(d: Pick<TaskDetail, "status" | "steps" | "current">, to?: TaskColumn): CarryOnOptions {
-  // a step waiting to run shows as pending, but the task stands on it
+  // a step waiting to run shows as pending, but the task stands on it; a step the flow passed
+  // without running ("bỏ qua": Kiểm tra, Harness, Test trình duyệt, a Sửa lỗi not needed) is not
+  // somewhere to run again from
   const steps = d.steps
-    .filter((s) => s.kind !== "intake" && (s.state !== "pending" || s.kind === d.current))
+    .filter((s) => s.kind !== "intake" && s.state !== "skipped" && (s.state !== "pending" || s.kind === d.current))
     .map((s) => s.kind);
   const keep = d.status === "done" ? (d.current ?? "pushSummary") : undefined;
   const implement = steps.includes("implement");

@@ -1,13 +1,15 @@
-//! The eight-step task workflow as a pure state machine (review order chosen by the user,
-//! PLAN.md §4).
+//! The twelve-step task workflow as a pure state machine (order chosen by the user, PLAN.md §12
+//! "Luồng mới 12 bước").
 //!
 //! ```text
-//! intake -> analyze -> <plan review gate> -> implement
+//! intake -> analyze -> <plan review gate> -> implement -> checks -> harness
 //!   -> reviewLocal (first pass) -> fix if it found anything
-//!   -> crossReview (Codex) <-> fix (max rounds)
-//!   -> finalReview (/review-local again) -> <critical/high: fix, then crossReview again
-//!                                           | medium: triage gate> -> pushSummary -> done
+//!   -> crossReview (Codex) <-> fixCross (max rounds)
+//!   -> finalReview (/review-local again) -> <critical/high: fixCross, then finalReview again
+//!                                           | medium: triage gate> -> browserTest -> pushSummary
 //! ```
+//! Checks, harness and browserTest are optional: a task that does not use one marks it skipped
+//! and moves on (nothing turns them on yet; later parts do).
 //! At the plan gate the user can also code by hand (`SelfCode`): the workflow waits until they
 //! say they are done, then reviews their change like an AI implementation.
 //! The machine never commits or pushes; after `pushSummary` the task waits for the user.
@@ -21,8 +23,11 @@ use crate::view::GateKind;
 /// `/review-local`.
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u8 = 3;
 
-/// Number of steps; the UI shows "x/8".
-pub const STEP_COUNT: usize = 8;
+/// Number of steps; the UI shows "x/12".
+pub const STEP_COUNT: usize = 12;
+
+/// Steps before the 12-step flow; tasks saved then are upgraded when read.
+const LEGACY_STEP_COUNT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,14 +35,22 @@ pub enum StepKind {
     Intake,
     Analyze,
     Implement,
+    /// Type check, lint and prettier, run by the app (no tokens). Optional.
+    Checks,
+    /// A scratch harness outside the repo. Optional: the AI proposes it, the user decides.
+    Harness,
     /// First `/review-local`, right after implement.
     ReviewLocal,
-    /// The AI that implemented (Claude by default) fixes findings from either review.
+    /// The AI that implemented (Claude by default) fixes what the first review found.
     Fix,
     /// The other AI (Codex by default) reviews the fixed code.
     CrossReview,
+    /// Fixes what the cross review or the final review found.
+    FixCross,
     /// `/review-local` again once Codex is clean; its result goes through gate G2.
     FinalReview,
+    /// Chrome DevTools MCP test of the app. Optional.
+    BrowserTest,
     PushSummary,
 }
 
@@ -46,10 +59,14 @@ impl StepKind {
         StepKind::Intake,
         StepKind::Analyze,
         StepKind::Implement,
+        StepKind::Checks,
+        StepKind::Harness,
         StepKind::ReviewLocal,
         StepKind::Fix,
         StepKind::CrossReview,
+        StepKind::FixCross,
         StepKind::FinalReview,
+        StepKind::BrowserTest,
         StepKind::PushSummary,
     ];
 
@@ -59,12 +76,31 @@ impl StepKind {
             StepKind::Intake => 1,
             StepKind::Analyze => 2,
             StepKind::Implement => 3,
-            StepKind::ReviewLocal => 4,
-            StepKind::Fix => 5,
-            StepKind::CrossReview => 6,
-            StepKind::FinalReview => 7,
-            StepKind::PushSummary => 8,
+            StepKind::Checks => 4,
+            StepKind::Harness => 5,
+            StepKind::ReviewLocal => 6,
+            StepKind::Fix => 7,
+            StepKind::CrossReview => 8,
+            StepKind::FixCross => 9,
+            StepKind::FinalReview => 10,
+            StepKind::BrowserTest => 11,
+            StepKind::PushSummary => 12,
         }
+    }
+
+    /// Steps a task may leave out (skipped instead of run).
+    pub fn is_optional(self) -> bool {
+        matches!(self, StepKind::Checks | StepKind::Harness | StepKind::BrowserTest)
+    }
+
+    /// Either Sửa lỗi step.
+    pub fn is_fix(self) -> bool {
+        matches!(self, StepKind::Fix | StepKind::FixCross)
+    }
+
+    /// The step after this one; `None` after the push summary.
+    pub fn next(self) -> Option<StepKind> {
+        StepKind::ALL.get(self.slot() + 1).copied()
     }
 
     fn slot(self) -> usize {
@@ -136,7 +172,7 @@ pub enum WorkflowEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "SavedWorkflow")]
 pub struct Workflow {
     states: [StepState; STEP_COUNT],
     phase: Phase,
@@ -144,6 +180,91 @@ pub struct Workflow {
     paused_from: Option<Phase>,
     round: u8,
     max_rounds: u8,
+    /// The review a running `FixCross` answers: after a final-review fix the final review runs
+    /// again; otherwise Codex reviews the fix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fix_for: Option<StepKind>,
+    /// Optional steps this task runs; the other optional steps are skipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    uses: Vec<StepKind>,
+}
+
+/// What a saved workflow looks like on disk: 12 states now, 8 before the 12-step flow.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedWorkflow {
+    states: Vec<StepState>,
+    phase: Phase,
+    paused_from: Option<Phase>,
+    round: u8,
+    max_rounds: u8,
+    #[serde(default)]
+    fix_for: Option<StepKind>,
+    #[serde(default)]
+    uses: Vec<StepKind>,
+}
+
+impl TryFrom<SavedWorkflow> for Workflow {
+    type Error = String;
+
+    fn try_from(s: SavedWorkflow) -> Result<Self, Self::Error> {
+        let legacy = s.states.len() == LEGACY_STEP_COUNT;
+        let states = if legacy {
+            upgrade_states(&s.states, s.round)
+        } else {
+            s.states
+                .try_into()
+                .map_err(|v: Vec<StepState>| format!("{} step states, expected {STEP_COUNT}", v.len()))?
+        };
+        // before the 12-step flow one "fix" served every review: after Codex had reviewed (round
+        // > 0) it was the fix that is now step 9
+        let phase = |p: Phase| match p {
+            Phase::Running(StepKind::Fix) if legacy && s.round > 0 => Phase::Running(StepKind::FixCross),
+            p => p,
+        };
+        Ok(Workflow {
+            states,
+            phase: phase(s.phase),
+            paused_from: s.paused_from.map(phase),
+            round: s.round,
+            max_rounds: s.max_rounds.max(1),
+            fix_for: s.fix_for,
+            uses: s.uses,
+        })
+    }
+}
+
+/// The 8 states of a task saved before the 12-step flow, in the 12-step layout. Steps it already
+/// went past without them (Kiểm tra, Harness, Test trình duyệt) show as skipped, the ones ahead
+/// stay pending. Its one "fix" becomes step 9 once Codex had reviewed (`round` > 0); step 7 then
+/// shows as skipped (the old data cannot tell whether the first review needed a fix).
+fn upgrade_states(old: &[StepState], round: u8) -> [StepState; STEP_COUNT] {
+    use StepState::{Pending, Skipped};
+    let at = |i: usize| old.get(i).copied().unwrap_or(Pending);
+    let (intake, analyze, implement, review, fix, cross, fin, push) =
+        (at(0), at(1), at(2), at(3), at(4), at(5), at(6), at(7));
+    let reached = |s: StepState| s != Pending;
+    let past_implement = [review, fix, cross, fin, push].into_iter().any(reached);
+    let optional = |past: bool| if past { Skipped } else { Pending };
+    let (fix7, fix9) = if round == 0 {
+        (fix, Pending)
+    } else {
+        (optional(reached(review)), fix)
+    };
+    [
+        intake,
+        analyze,
+        implement,
+        optional(past_implement),
+        optional(past_implement),
+        review,
+        fix7,
+        cross,
+        fix9,
+        fin,
+        optional(reached(push)),
+        push,
+    ]
 }
 
 impl Default for Workflow {
@@ -160,6 +281,21 @@ impl Workflow {
             paused_from: None,
             round: 0,
             max_rounds: max_rounds.max(1),
+            fix_for: None,
+            uses: Vec::new(),
+        }
+    }
+
+    /// Whether the task runs this optional step (Kiểm tra, Harness, Test trình duyệt).
+    pub fn uses(&self, step: StepKind) -> bool {
+        self.uses.contains(&step)
+    }
+
+    /// Turn an optional step on or off for this task; it takes effect when the flow gets there.
+    pub fn set_uses(&mut self, step: StepKind, on: bool) {
+        self.uses.retain(|s| *s != step);
+        if on && step.is_optional() {
+            self.uses.push(step);
         }
     }
 
@@ -236,7 +372,7 @@ impl Workflow {
             }
             (Phase::Gate(GateKind::SelfCode), E::SelfCodeDone) => {
                 self.set(StepKind::Implement, StepState::Done);
-                self.run(StepKind::ReviewLocal)
+                self.run(StepKind::Checks)
             }
 
             (Phase::Running(StepKind::ReviewLocal), E::ReviewLocalFinished { blocking }) => {
@@ -244,6 +380,7 @@ impl Workflow {
                 if blocking > 0 {
                     self.run(StepKind::Fix)
                 } else {
+                    self.pass(StepKind::Fix);
                     self.start_cross_review()
                 }
             }
@@ -251,8 +388,10 @@ impl Workflow {
             (Phase::Running(StepKind::CrossReview), E::CrossReviewFinished { blocking }) => {
                 self.set(StepKind::CrossReview, StepState::Done);
                 if blocking > 0 && self.round < self.max_rounds {
-                    self.run(StepKind::Fix)
+                    self.fix_for = Some(StepKind::CrossReview);
+                    self.run(StepKind::FixCross)
                 } else {
+                    self.pass(StepKind::FixCross);
                     self.run(StepKind::FinalReview)
                 }
             }
@@ -266,22 +405,22 @@ impl Workflow {
             ) => {
                 if critical_or_high > 0 {
                     self.set(StepKind::FinalReview, StepState::Done);
-                    self.run(StepKind::Fix)
+                    self.fix_final_review()
                 } else if medium_undecided > 0 {
                     self.set(StepKind::FinalReview, StepState::WaitingUser);
                     self.phase = Phase::Gate(GateKind::MediumTriage);
                     Ok(())
                 } else {
                     self.set(StepKind::FinalReview, StepState::Done);
-                    self.run(StepKind::PushSummary)
+                    self.run(StepKind::BrowserTest)
                 }
             }
             (Phase::Gate(GateKind::MediumTriage), E::MediumTriaged { fix }) => {
                 self.set(StepKind::FinalReview, StepState::Done);
                 if fix > 0 {
-                    self.run(StepKind::Fix)
+                    self.fix_final_review()
                 } else {
-                    self.run(StepKind::PushSummary)
+                    self.run(StepKind::BrowserTest)
                 }
             }
 
@@ -290,13 +429,18 @@ impl Workflow {
             // `Running` here also means "ready to run": the caller checks no step process is
             // running. Only a step the task already reached can be run again.
             (phase, E::Reopen(step)) if phase != Phase::NotStarted => {
-                if step == StepKind::Intake || self.state_of(step) == StepState::Pending {
+                if step == StepKind::Intake
+                    || matches!(self.state_of(step), StepState::Pending | StepState::Skipped)
+                {
                     return Err(DomainError::NotCurrentStep(step));
                 }
                 for later in StepKind::ALL.into_iter().filter(|s| s.index() >= step.index()) {
                     self.set(later, StepState::Pending);
                 }
                 self.paused_from = None;
+                if step != StepKind::FixCross {
+                    self.fix_for = None;
+                }
                 // review rounds count again from a step before the cross review; the cross
                 // review itself starts a fresh first round
                 if step.index() < StepKind::CrossReview.index() {
@@ -335,14 +479,26 @@ impl Workflow {
                 self.phase = Phase::Gate(GateKind::PlanReview);
                 Ok(())
             }
-            StepKind::Implement => {
+            StepKind::Implement | StepKind::Checks | StepKind::Harness | StepKind::BrowserTest => {
                 self.set(step, StepState::Done);
-                self.run(StepKind::ReviewLocal)
+                match step.next() {
+                    Some(next) => self.run(next),
+                    None => Ok(()),
+                }
             }
-            // A fix, whichever review it answered, is always checked by Codex next.
+            // The first review's fix is checked by Codex next.
             StepKind::Fix => {
                 self.set(step, StepState::Done);
                 self.start_cross_review()
+            }
+            // A fix of the final review: that review runs again; of Codex's: Codex again.
+            StepKind::FixCross => {
+                self.set(step, StepState::Done);
+                if self.fix_for.take() == Some(StepKind::FinalReview) {
+                    self.run(StepKind::FinalReview)
+                } else {
+                    self.start_cross_review()
+                }
             }
             StepKind::PushSummary => {
                 self.set(step, StepState::Done);
@@ -359,6 +515,18 @@ impl Workflow {
         }
     }
 
+    /// The flow went past a Sửa lỗi step with nothing to fix: it shows "bỏ qua", not "chưa tới".
+    fn pass(&mut self, step: StepKind) {
+        if self.state_of(step) == StepState::Pending {
+            self.set(step, StepState::Skipped);
+        }
+    }
+
+    fn fix_final_review(&mut self) -> DomainResult<()> {
+        self.fix_for = Some(StepKind::FinalReview);
+        self.run(StepKind::FixCross)
+    }
+
     fn start_cross_review(&mut self) -> DomainResult<()> {
         self.round = self.round.saturating_add(1);
         self.run(StepKind::CrossReview)
@@ -372,7 +540,15 @@ impl Workflow {
         }
     }
 
+    /// Move to `step`; an optional step the task does not use is skipped on the way.
     fn run(&mut self, step: StepKind) -> DomainResult<()> {
+        if step.is_optional() && !self.uses(step) {
+            self.set(step, StepState::Skipped);
+            return match step.next() {
+                Some(next) => self.run(next),
+                None => Ok(()),
+            };
+        }
         self.set(step, StepState::Running);
         self.phase = Phase::Running(step);
         Ok(())
@@ -415,7 +591,9 @@ mod tests {
     #[test]
     fn steps_are_numbered_in_order() {
         let indexes: Vec<u8> = StepKind::ALL.iter().map(|s| s.index()).collect();
-        assert_eq!(indexes, (1..=8).collect::<Vec<u8>>());
+        assert_eq!(indexes, (1..=12).collect::<Vec<u8>>());
+        assert_eq!(StepKind::BrowserTest.next(), Some(StepKind::PushSummary));
+        assert_eq!(StepKind::PushSummary.next(), None);
     }
 
     #[test]
@@ -428,17 +606,22 @@ mod tests {
         wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
         wf.apply(clean_final()).unwrap();
+        // Test trình duyệt is not used by this task: skipped on the way to the push summary
+        assert_eq!(wf.phase(), Phase::Running(StepKind::PushSummary));
         wf.apply(E::StepSucceeded(StepKind::PushSummary)).unwrap();
         assert_eq!(wf.phase(), Phase::AwaitingPush);
         let mut again = wf.clone();
         again.apply(E::RedoPushSummary).unwrap();
         assert_eq!(again.phase(), Phase::Running(StepKind::PushSummary));
-        assert!(
-            StepKind::ALL
-                .iter()
-                .all(|s| matches!(wf.state_of(*s), StepState::Done | StepState::Pending))
-        );
-        assert_eq!(wf.state_of(StepKind::Fix), StepState::Pending);
+        // nothing to fix and the optional steps not used: all of them "bỏ qua"
+        for s in StepKind::ALL {
+            let expected = if s.is_optional() || s.is_fix() {
+                StepState::Skipped
+            } else {
+                StepState::Done
+            };
+            assert_eq!(wf.state_of(s), expected, "{s:?}");
+        }
     }
 
     /// The order the user chose: review-local -> Claude fixes -> Codex ⇄ Claude -> review-local.
@@ -452,9 +635,12 @@ mod tests {
         assert_eq!(wf.phase(), Phase::Running(StepKind::CrossReview));
         assert_eq!(wf.round(), 1);
         wf.apply(E::CrossReviewFinished { blocking: 1 }).unwrap();
-        wf.apply(E::StepSucceeded(StepKind::Fix)).unwrap();
+        // Codex's findings are fixed in step 9, then Codex reviews again
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
+        wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::CrossReview));
         assert_eq!(wf.round(), 2);
+        assert_eq!(wf.state_of(StepKind::Fix), StepState::Done);
         wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
     }
@@ -477,8 +663,8 @@ mod tests {
         for expected_round in 1..DEFAULT_MAX_REVIEW_ROUNDS {
             assert_eq!(wf.round(), expected_round);
             wf.apply(E::CrossReviewFinished { blocking: 2 }).unwrap();
-            assert_eq!(wf.phase(), Phase::Running(StepKind::Fix));
-            wf.apply(E::StepSucceeded(StepKind::Fix)).unwrap();
+            assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
+            wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
         }
         assert_eq!(wf.round(), DEFAULT_MAX_REVIEW_ROUNDS);
         wf.apply(E::CrossReviewFinished { blocking: 1 }).unwrap();
@@ -486,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn final_review_blocking_goes_back_through_codex_and_medium_waits_for_user() {
+    fn final_review_blocking_is_fixed_then_reviewed_again_and_medium_waits_for_user() {
         let mut wf = started_to_review();
         wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
         wf.apply(E::FinalReviewFinished {
@@ -494,10 +680,11 @@ mod tests {
             medium_undecided: 3,
         })
         .unwrap();
-        assert_eq!(wf.phase(), Phase::Running(StepKind::Fix));
-        wf.apply(E::StepSucceeded(StepKind::Fix)).unwrap();
-        assert_eq!(wf.phase(), Phase::Running(StepKind::CrossReview));
-        wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
+        wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+        // fixed in step 9, then the final review runs again (not Codex)
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
+        assert_eq!(wf.round(), 1);
         wf.apply(E::FinalReviewFinished {
             critical_or_high: 0,
             medium_undecided: 2,
@@ -519,9 +706,20 @@ mod tests {
         })
         .unwrap();
         wf.apply(E::MediumTriaged { fix: 1 }).unwrap();
-        assert_eq!(wf.phase(), Phase::Running(StepKind::Fix));
-        wf.apply(E::StepSucceeded(StepKind::Fix)).unwrap();
-        assert_eq!(wf.phase(), Phase::Running(StepKind::CrossReview));
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
+        wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
+        // survives a save while the fix runs
+        let mut wf = started_to_review();
+        wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
+        wf.apply(E::FinalReviewFinished {
+            critical_or_high: 1,
+            medium_undecided: 0,
+        })
+        .unwrap();
+        let mut back: Workflow = serde_json::from_str(&serde_json::to_string(&wf).unwrap()).unwrap();
+        back.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+        assert_eq!(back.phase(), Phase::Running(StepKind::FinalReview));
     }
 
     #[test]
@@ -543,10 +741,10 @@ mod tests {
     fn state_survives_a_round_trip_through_json() {
         let mut wf = started_to_review();
         wf.apply(E::CrossReviewFinished { blocking: 1 }).unwrap();
-        wf.apply(E::StepFailed(StepKind::Fix)).unwrap();
+        wf.apply(E::StepFailed(StepKind::FixCross)).unwrap();
         let back: Workflow = serde_json::from_str(&serde_json::to_string(&wf).unwrap()).unwrap();
         assert_eq!(back, wf);
-        assert_eq!(back.failed_step(), Some(StepKind::Fix));
+        assert_eq!(back.failed_step(), Some(StepKind::FixCross));
     }
 
     #[test]
@@ -601,6 +799,95 @@ mod tests {
         assert_eq!(push.state_of(StepKind::FinalReview), StepState::Done);
         assert!(wf.clone().apply(E::Reopen(StepKind::Intake)).is_err());
         assert!(Workflow::default().apply(E::Reopen(StepKind::Analyze)).is_err());
+    }
+
+    #[test]
+    fn optional_steps_are_skipped_unless_the_task_uses_them() {
+        let wf = implemented();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::ReviewLocal));
+        assert_eq!(wf.state_of(StepKind::Checks), StepState::Skipped);
+        assert_eq!(wf.state_of(StepKind::Harness), StepState::Skipped);
+        assert_eq!(wf.state_of(StepKind::BrowserTest), StepState::Pending);
+
+        let mut wf = Workflow::default();
+        wf.set_uses(StepKind::Harness, true);
+        wf.set_uses(StepKind::Fix, true); // not optional: ignored
+        wf.apply(E::Start).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Intake)).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Analyze)).unwrap();
+        wf.apply(E::PlanApproved).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Implement)).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::Harness));
+        assert_eq!(wf.state_of(StepKind::Checks), StepState::Skipped);
+        wf.apply(E::StepSucceeded(StepKind::Harness)).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::ReviewLocal));
+        assert!(wf.uses(StepKind::Harness) && !wf.uses(StepKind::Fix));
+        // only steps that ran can run again
+        assert!(wf.clone().apply(E::Reopen(StepKind::Checks)).is_err());
+        let mut again = wf.clone();
+        again.apply(E::Reopen(StepKind::Harness)).unwrap();
+        assert_eq!(again.phase(), Phase::Running(StepKind::Harness));
+    }
+
+    fn legacy(states: &str, phase: &str, round: u8) -> String {
+        format!(r#"{{"states":[{states}],"phase":{phase},"pausedFrom":null,"round":{round},"maxRounds":3}}"#)
+    }
+
+    #[test]
+    fn tasks_saved_with_eight_steps_are_upgraded() {
+        // waiting for the push: the steps it went past without are skipped
+        let push: Workflow = serde_json::from_str(&legacy(
+            r#""done","done","done","done","pending","done","done","done""#,
+            r#""awaitingPush""#,
+            1,
+        ))
+        .unwrap();
+        assert_eq!(push.phase(), Phase::AwaitingPush);
+        for (s, want) in [
+            (StepKind::Implement, StepState::Done),
+            (StepKind::Checks, StepState::Skipped),
+            (StepKind::Harness, StepState::Skipped),
+            (StepKind::ReviewLocal, StepState::Done),
+            (StepKind::Fix, StepState::Skipped),
+            (StepKind::CrossReview, StepState::Done),
+            (StepKind::FixCross, StepState::Pending),
+            (StepKind::FinalReview, StepState::Done),
+            (StepKind::BrowserTest, StepState::Skipped),
+            (StepKind::PushSummary, StepState::Done),
+        ] {
+            assert_eq!(push.state_of(s), want, "{s:?}");
+        }
+        // fixing Codex's findings: that fix is step 9 now
+        let fixing: Workflow = serde_json::from_str(&legacy(
+            r#""done","done","done","done","running","done","pending","pending""#,
+            r#"{"running":"fix"}"#,
+            2,
+        ))
+        .unwrap();
+        assert_eq!(fixing.phase(), Phase::Running(StepKind::FixCross));
+        assert_eq!(fixing.state_of(StepKind::FixCross), StepState::Running);
+        assert_eq!(fixing.state_of(StepKind::BrowserTest), StepState::Pending);
+        // the first review's fix (no Codex yet) stays step 7; Kiểm tra / Harness are behind it
+        let first: Workflow = serde_json::from_str(&legacy(
+            r#""done","done","done","done","running","pending","pending","pending""#,
+            r#"{"running":"fix"}"#,
+            0,
+        ))
+        .unwrap();
+        assert_eq!(first.phase(), Phase::Running(StepKind::Fix));
+        assert_eq!(first.state_of(StepKind::Checks), StepState::Skipped);
+        // still at the plan gate: nothing to skip yet
+        let plan: Workflow = serde_json::from_str(&legacy(
+            r#""done","waitingUser","pending","pending","pending","pending","pending","pending""#,
+            r#"{"gate":"planReview"}"#,
+            0,
+        ))
+        .unwrap();
+        assert_eq!(plan.state_of(StepKind::Checks), StepState::Pending);
+        // saved again, it is a 12-step workflow
+        let json = serde_json::to_string(&push).unwrap();
+        assert_eq!(serde_json::from_str::<Workflow>(&json).unwrap(), push);
+        assert!(serde_json::from_str::<Workflow>(&legacy(r#""done""#, r#""notStarted""#, 0)).is_err());
     }
 
     #[test]

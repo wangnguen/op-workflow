@@ -38,7 +38,7 @@ import type {
   TasksDirChange,
   UpdateView,
 } from "./types";
-import { STEP_COUNT, STEP_ORDER } from "../shared/steps";
+import { AI_STEPS, OPTIONAL_STEPS, STEP_COUNT, STEP_ORDER, stepIndex } from "../shared/steps";
 import { mockDoneCards, mockFlowCard, mockFlowSystem, mockMoved, mockPlaceCard, mockRegisterFlow, mockStarted } from "./mockFlow";
 import { mockNewComments, mockNotify, mockUnreadAlerts } from "./mockTask";
 
@@ -53,10 +53,14 @@ const FIRST_FRAME: Record<StepKind, number> = {
   intake: 0,
   analyze: 1,
   implement: 3,
+  checks: 7,
+  harness: 7,
   reviewLocal: 7,
   fix: 8,
   crossReview: 9,
+  fixCross: 11,
   finalReview: 13,
+  browserTest: 15,
   pushSummary: 15,
 };
 
@@ -86,12 +90,11 @@ interface AgentSpec {
 
 interface Frame {
   active: boolean;
-  step: number;
+  /** the step the demo stands on; earlier steps are done (the optional ones passed) */
+  step: StepKind;
   state: StepState;
   overrides?: Partial<Record<StepKind, StepState>>;
   round?: number;
-  /** times fix has run: after the first review-local, then after each Codex round */
-  fixRound?: number;
   gate?: { kind: GateKind; message: string };
   agent?: AgentSpec;
   findings: Partial<Record<FindingKey, FindingState>>;
@@ -105,75 +108,75 @@ const ALL_OPEN = { f1: "open", f2: "open", f3: "open", f4: "open" } as const;
 const AFTER_R2 = { f1: "fixed", f2: "fixed", f3: "accepted", f4: "deferred" } as const;
 
 export const DEMO_FRAMES: readonly Frame[] = [
-  { active: true, step: 0, state: "running", findings: {}, newComments: 0, cost: 0 },
+  { active: true, step: "intake", state: "running", findings: {}, newComments: 0, cost: 0 },
   {
-    active: true, step: 1, state: "running", findings: {}, newComments: 0, cost: 0.05,
+    active: true, step: "analyze", state: "running", findings: {}, newComments: 0, cost: 0.05,
     agent: { kind: "claude", status: "running", ctxPct: 8, compactions: 0, subagents: [sub("Explore")], tools: ["Grep", "Read", "Glob"] },
   },
   {
-    active: true, step: 1, state: "waitingUser", findings: {}, newComments: 0, cost: 0.09,
+    active: true, step: "analyze", state: "waitingUser", findings: {}, newComments: 0, cost: 0.09,
     gate: { kind: "planReview", message: "plan.md đã sẵn sàng: 2 phương án, đề xuất phương án A" },
     agent: { kind: "claude", status: "waiting", ctxPct: 14, compactions: 0, subagents: [sub("Explore", "done")], tools: ["Write", "Read", "Grep"] },
   },
   {
-    active: true, step: 2, state: "running", findings: {}, newComments: 0, cost: 0.18,
+    active: true, step: "implement", state: "running", findings: {}, newComments: 0, cost: 0.18,
     agent: { kind: "claude", status: "running", ctxPct: 31, compactions: 0, subagents: [sub("Explore")], tools: ["Edit", "Read", "Grep"] },
   },
   {
-    active: true, step: 2, state: "running", findings: {}, newComments: 1, cost: 0.31,
+    active: true, step: "implement", state: "running", findings: {}, newComments: 1, cost: 0.31,
     agent: { kind: "claude", status: "running", ctxPct: 58, compactions: 0, subagents: [sub("Explore", "done"), sub("general-purpose"), sub("Plan")], tools: ["Edit", "Bash", "Edit"] },
   },
   {
-    active: true, step: 2, state: "running", findings: {}, newComments: 1, cost: 0.42,
+    active: true, step: "implement", state: "running", findings: {}, newComments: 1, cost: 0.42,
     agent: { kind: "claude", status: "running", ctxPct: 96, compactions: 0, subagents: [sub("general-purpose")], tools: ["Bash", "Edit", "Read"] },
   },
   {
-    active: true, step: 2, state: "running", findings: {}, newComments: 1, cost: 0.47,
+    active: true, step: "implement", state: "running", findings: {}, newComments: 1, cost: 0.47,
     agent: { kind: "claude", status: "running", ctxPct: 22, compactions: 1, subagents: [], tools: ["Read", "Edit"] },
   },
   // first /review-local, then Claude fixes what it found before Codex looks
   {
-    active: true, step: 3, state: "running", findings: {}, newComments: 0, cost: 0.53,
+    active: true, step: "reviewLocal", state: "running", findings: {}, newComments: 0, cost: 0.53,
     agent: { kind: "claude", status: "running", ctxPct: 24, compactions: 1, subagents: [], tools: ["Bash", "Read", "Grep"] },
   },
   {
-    active: true, step: 4, state: "running", fixRound: 1, findings: { f6: "fixing" }, newComments: 0, cost: 0.58,
+    active: true, step: "fix", state: "running", findings: { f6: "fixing" }, newComments: 0, cost: 0.58,
     agent: { kind: "claude", status: "running", ctxPct: 27, compactions: 1, subagents: [], tools: ["Edit", "Bash"] },
   },
   // Codex ⇄ Claude until Codex is clean
   {
-    active: true, step: 5, state: "running", round: 1, fixRound: 1, findings: { f6: "fixed" }, newComments: 0, cost: 0.62,
+    active: true, step: "crossReview", state: "running", round: 1, findings: { f6: "fixed" }, newComments: 0, cost: 0.62,
     agent: { kind: "claude", status: "idle", ctxPct: 27, compactions: 1, subagents: [], child: "running", tools: ["Bash"] },
   },
   {
-    active: true, step: 5, state: "running", round: 1, fixRound: 1, findings: { f6: "fixed", ...ALL_OPEN }, newComments: 0, cost: 0.67,
+    active: true, step: "crossReview", state: "running", round: 1, findings: { f6: "fixed", ...ALL_OPEN }, newComments: 0, cost: 0.67,
     agent: { kind: "claude", status: "idle", ctxPct: 27, compactions: 1, subagents: [], child: "running", tools: ["Bash"] },
   },
   {
-    active: true, step: 4, state: "running", round: 1, fixRound: 2, overrides: { crossReview: "done" },
+    active: true, step: "fixCross", state: "running", round: 1,
     findings: { f6: "fixed", ...ALL_OPEN, f1: "fixing", f2: "fixing" }, newComments: 0, cost: 0.74,
     agent: { kind: "claude", status: "running", ctxPct: 35, compactions: 1, subagents: [], tools: ["Edit", "Edit", "Bash"] },
   },
   {
-    active: true, step: 5, state: "running", round: 2, fixRound: 2, findings: { f6: "fixed", ...AFTER_R2 }, newComments: 0, cost: 0.81,
+    active: true, step: "crossReview", state: "running", round: 2, findings: { f6: "fixed", ...AFTER_R2 }, newComments: 0, cost: 0.81,
     agent: { kind: "claude", status: "idle", ctxPct: 37, compactions: 1, subagents: [], child: "running", tools: ["Bash"] },
   },
   // final /review-local, gate G2 for the medium finding, then push-summary
   {
-    active: true, step: 6, state: "running", round: 2, fixRound: 2, findings: { f6: "fixed", ...AFTER_R2, f5: "open" }, newComments: 0, cost: 0.88,
+    active: true, step: "finalReview", state: "running", round: 2, findings: { f6: "fixed", ...AFTER_R2, f5: "open" }, newComments: 0, cost: 0.88,
     agent: { kind: "claude", status: "running", ctxPct: 41, compactions: 1, subagents: [], tools: ["Bash", "Read"] },
   },
   {
-    active: true, step: 6, state: "waitingUser", round: 2, fixRound: 2, findings: { f6: "fixed", ...AFTER_R2, f5: "open", f7: "open" }, newComments: 0, cost: 0.92,
+    active: true, step: "finalReview", state: "waitingUser", round: 2, findings: { f6: "fixed", ...AFTER_R2, f5: "open", f7: "open" }, newComments: 0, cost: 0.92,
     gate: { kind: "mediumTriage", message: "/review-local chốt báo 1 finding medium: sửa, chấp nhận hay để sau?" },
     agent: { kind: "claude", status: "waiting", ctxPct: 43, compactions: 1, subagents: [], tools: ["Bash"] },
   },
   {
-    active: true, step: 7, state: "running", round: 2, fixRound: 2, findings: { f6: "fixed", ...AFTER_R2, f5: "deferred", f7: "accepted" }, newComments: 0, cost: 0.98,
+    active: true, step: "pushSummary", state: "running", round: 2, findings: { f6: "fixed", ...AFTER_R2, f5: "deferred", f7: "accepted" }, newComments: 0, cost: 0.98,
     agent: { kind: "claude", status: "running", ctxPct: 45, compactions: 1, subagents: [], tools: ["Bash", "Bash"] },
   },
-  { active: false, step: 7, state: "done", findings: {}, newComments: 0, cost: 1.04 },
-  { active: false, step: 7, state: "done", findings: {}, newComments: 0, cost: 1.04 },
+  { active: false, step: "pushSummary", state: "done", findings: {}, newComments: 0, cost: 1.04 },
+  { active: false, step: "pushSummary", state: "done", findings: {}, newComments: 0, cost: 1.04 },
 ];
 
 /** `?frame=N` in the browser URL pins the demo to one frame (for reviews and screenshots). */
@@ -359,20 +362,22 @@ export function mockQuota(frameIndex: number, now: number): QuotaSnapshot[] {
 
 function buildSteps(f: Frame, frameIndex: number, now: number): StepView[] {
   const taskStart = now - frameIndex * FRAME_TIME_MS;
+  const at = STEP_ORDER.indexOf(f.step);
   return STEP_ORDER.map((kind, i) => {
-    let state: StepState = i < f.step ? "done" : i === f.step ? f.state : "pending";
+    // Kiểm tra, Harness and Test trình duyệt are not turned on yet: the flow passes them
+    const passed = OPTIONAL_STEPS.includes(kind) ? "skipped" : "done";
+    let state: StepState = i < at ? passed : i === at ? f.state : "pending";
     const override = f.overrides?.[kind];
     if (override) state = override;
     const view: StepView = { kind, index: i + 1, state };
-    if (state !== "pending") {
+    if (state !== "pending" && state !== "skipped") {
       const started = taskStart + FIRST_FRAME[kind] * FRAME_TIME_MS;
       view.startedAt = iso(started);
       if (state === "done") view.endedAt = iso(started + FRAME_TIME_MS * 0.9);
       view.costUsd = Math.round((0.04 + i * 0.03) * 100) / 100;
     }
-    // Fix runs after the first review-local and after Codex round 1; Codex runs two rounds.
+    // Codex runs two rounds; the second Sửa lỗi fixes what round 1 found
     if (kind === "crossReview" && state !== "pending") view.round = f.round ?? 1;
-    if (kind === "fix" && state !== "pending") view.round = f.fixRound ?? 1;
     return view;
   });
 }
@@ -380,7 +385,7 @@ function buildSteps(f: Frame, frameIndex: number, now: number): StepView[] {
 function buildAgents(f: Frame, now: number): AgentView[] {
   const spec = f.agent;
   if (!spec) return [];
-  const step = STEP_ORDER[f.step] ?? "intake";
+  const step = f.step;
   const handoffAt = 500_000;
   const tools = spec.tools.map((name, i) => ({ at: iso(now - (i * 37 + 6) * 1000), name }));
   const children: AgentView[] = spec.child
@@ -493,8 +498,8 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
     nxStatusColor: "#cc5de8",
     column: f.active ? "active" : "awaitingPush",
     step: {
-      kind: STEP_ORDER[f.step] ?? "intake",
-      index: f.step + 1,
+      kind: f.step,
+      index: stepIndex(f.step),
       state: f.state,
       since: iso(now - 60_000),
     },
@@ -674,7 +679,7 @@ const MOCK_STEP_HISTORY: Partial<Record<StepKind, [number, number | undefined, n
 const mockPicks: Partial<Record<StepKind, Omit<StepChoiceRequest, "step">>> = {};
 
 function mockStepSettings(): StepSetting[] {
-  return STEP_ORDER.filter((s) => s !== "intake").map((step) => {
+  return AI_STEPS.map((step) => {
     const pick = mockPicks[step] ?? {};
     const agent: AgentKind = step === "crossReview" ? (pick.agent ?? "codex") : "claude";
     const [runs, avgCostUsd, avgSeconds] = MOCK_STEP_HISTORY[step] ?? [0, undefined, 0];

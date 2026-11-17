@@ -1,5 +1,6 @@
 // Settings pages and the search index over their rows (pure, easy to test).
 import { stepLabel, vi } from "../../i18n/vi";
+import { AI_STEPS } from "../../shared/steps";
 
 export const PAGES = ["connection", "repos", "steps", "quota", "notify", "appearance", "about"] as const;
 export type PageKey = (typeof PAGES)[number];
@@ -23,7 +24,7 @@ export const ENTRIES: SettingEntry[] = [
   { page: "connection", id: "github", label: t.githubSection, keywords: "github issue chrome đọc remote debugging allow trình duyệt browser" },
   { page: "repos", id: "workspaces", label: t.workspaces, keywords: "workspace thư mục folder desktop quét scan" },
   { page: "repos", id: "config", label: t.editConfig, keywords: "config json cấu hình repo branch mẫu template" },
-  ...(["analyze", "implement", "reviewLocal", "fix", "crossReview", "finalReview", "pushSummary"] as const).map(
+  ...AI_STEPS.map(
     (step): SettingEntry => ({
       page: "steps",
       id: `step:${step}`,

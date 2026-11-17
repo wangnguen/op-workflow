@@ -20,12 +20,13 @@ interface Props {
 
 /** Orbit rings, the flight trail, the review⇄fix shuttle lane and compaction marks. */
 export function Orbits({ steps, current, markers, rot = 0 }: Props) {
+  // the review ⇄ fix loop: Review chéo (8) and the Sửa lỗi that fixes what it found (9)
   const review = steps.find((s) => s.kind === "crossReview");
-  const fix = steps.find((s) => s.kind === "fix");
+  const fix = steps.find((s) => s.kind === "fixCross");
   const round = review?.round ?? 0;
-  const inLoop = current === stepIndex("crossReview") || current === stepIndex("fix");
+  const inLoop = current === stepIndex("crossReview") || current === stepIndex("fixCross");
   const loopActive = review !== undefined && fix !== undefined && round > 0 && (inLoop || round > 1);
-  const lane = shuttlePath(stepIndex("crossReview"), stepIndex("fix"), rot);
+  const lane = shuttlePath(stepIndex("crossReview"), stepIndex("fixCross"), rot);
   const reached = Math.max(1, current);
 
   return (

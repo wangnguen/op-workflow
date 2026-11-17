@@ -3,6 +3,7 @@ import { agentLabel, stepHint, stepLabel, vi } from "../../i18n/vi";
 import { errorMessage, setStepChoice } from "../../ipc/client";
 import type { AgentCatalog, AgentKind, SettingsView, StepChoiceRequest, StepModels, StepSetting } from "../../ipc/types";
 import { formatDateTime, formatDuration, formatHourMinute, formatUsd } from "../../shared/format";
+import { stepNumber } from "../../shared/steps";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
 import { effortForModel, effortOptions, modelEntry, modelOptions } from "./stepChoice";
 
@@ -50,10 +51,10 @@ export function StepsPage({ view, onSaved, models, modelsBusy, onReadModels }: P
       {/* in a section like the other pages, so the note below sits under the box, not on its border */}
       <section className="set-section">
         <div className="set-group">
-          {rows.map((row, i) => (
+          {rows.map((row) => (
             <StepRow
               key={row.step}
-              index={i + 2}
+              number={stepNumber(row.step)}
               row={row}
               catalog={models ? (row.agent === "codex" ? models.codex : models.claude) : undefined}
               saved={savedStep === row.step}
@@ -81,8 +82,9 @@ function SourceLine({ name, catalog }: { name: string; catalog: AgentCatalog | u
   return <span className="set-source-line">{t.source(name, catalog.cliVersion, catalog.models.length, time)}</span>;
 }
 
-function StepRow({ index, row, catalog, saved, onSave }: {
-  index: number;
+function StepRow({ number, row, catalog, saved, onSave }: {
+  /** the step's real place in the flow: "8", or "7 · 9" for both Sửa lỗi */
+  number: string;
   row: StepSetting;
   catalog: AgentCatalog | undefined;
   saved: boolean;
@@ -120,7 +122,7 @@ function StepRow({ index, row, catalog, saved, onSave }: {
     <div className="set-row set-row--stacked set-step" data-setting-row={`step:${row.step}`}>
       <div className="set-row-text">
         <span className="set-row-label" title={stepHint[row.step]}>
-          {index}. {stepLabel[row.step]}
+          {number}. {stepLabel[row.step]}
         </span>
         <span className="set-row-hint">
           {history}

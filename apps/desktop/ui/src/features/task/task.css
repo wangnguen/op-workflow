@@ -12,10 +12,12 @@
 
 /* ---------- 8 steps ---------- */
 
+/* 12 steps in two rows of six (1–6: Nhận task … Tự review, 7–12: Sửa lỗi … Push summary), so
+   each keeps the room it had in one row of eight and the bar's height never changes */
 .task-steps {
   display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 4px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 2px 4px;
   margin: 0;
   padding: 10px 16px;
   border-bottom: 1px solid var(--line);
@@ -45,6 +47,10 @@
 }
 .task-step--done {
   color: var(--text-dim);
+}
+/* passed without running: faint and slanted, unlike "chưa tới" */
+.task-step--skipped > span {
+  font-style: italic;
 }
 .task-step.is-current {
   background: var(--fill);

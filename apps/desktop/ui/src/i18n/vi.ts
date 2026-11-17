@@ -705,8 +705,8 @@ export const vi = {
     },
     legendItems: [
       ["star", "Ngôi sao", "task đang làm"],
-      ["orbit", "Quỹ đạo 1–7", "bảy bước, Nhận task trong cùng, Push summary ngoài cùng"],
-      ["planet", "Hành tinh", "sáng: xong · đập nhịp: đang chạy · mờ: chưa tới"],
+      ["orbit", "Quỹ đạo 1–12", "mười hai bước, Nhận task trong cùng, Push summary ngoài cùng"],
+      ["planet", "Hành tinh", "sáng: xong · đập nhịp: đang chạy · mờ: chưa tới · vòng rỗng nét đứt: bỏ qua"],
       ["ship", "Con tàu", "agent đang làm (cam: Claude, tím: Codex)"],
       ["atmosphere", "Khí quyển", "context; vạch đứt là ngưỡng handoff"],
       ["satellite", "Vệ tinh", "subagent; vệ tinh tím là Codex do Claude gọi"],
@@ -736,10 +736,14 @@ export const stepLabel: Record<StepKind, string> = {
   intake: "Nhận task",
   analyze: "Phân tích",
   implement: "Viết code",
+  checks: "Kiểm tra",
+  harness: "Harness",
   reviewLocal: "Tự review",
   fix: "Sửa lỗi",
   crossReview: "Review chéo",
+  fixCross: "Sửa lỗi",
   finalReview: "Review chốt",
+  browserTest: "Test trình duyệt",
   pushSummary: "Push summary",
 };
 
@@ -748,10 +752,14 @@ export const stepHint: Record<StepKind, string> = {
   intake: "App lấy task và comment từ OpenProject, tạo nhánh ở máy và ghi brief.md",
   analyze: "AI đọc brief và code, viết plan; bạn duyệt plan trước khi code",
   implement: "AI code theo plan đã duyệt",
+  checks: "App tự chạy tsc, lint, prettier trên file đã đổi, không tốn token. Chưa bật: sẽ có ở phần sau, giờ luồng bỏ qua bước này",
+  harness: "Không bắt buộc: AI đề xuất ở Phân tích có nên dựng harness không, bạn bật/tắt ở cổng Duyệt plan. Chưa bật: giờ luồng bỏ qua",
   reviewLocal: "/review-local lần đầu, ngay sau khi code",
-  fix: "AI sửa các lỗi review từ medium trở lên, và lỗi bạn bấm Sửa",
+  fix: "AI sửa các lỗi của Tự review",
   crossReview: "AI còn lại (Codex) review chéo phần đã sửa, chỉ đọc",
+  fixCross: "AI sửa các lỗi của Review chéo / Review chốt",
   finalReview: "/review-local lần chốt; finding medium chờ bạn quyết",
+  browserTest: "Test trên trình duyệt bằng Chrome DevTools MCP; bật/tắt ở cổng Duyệt plan. Chưa bật: giờ luồng bỏ qua",
   pushSummary: "Soạn commit message và mô tả PR. App không push: bạn tự commit và push",
 };
 

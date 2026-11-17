@@ -12,7 +12,8 @@ interface Props {
   rot?: Spin;
 }
 
-/** One planet per workflow step: lit when done, pulsing when live, dim when pending. */
+/** One planet per workflow step: lit when done, pulsing when live, dim when pending, a hollow
+ *  dashed ring when the flow passed it ("bỏ qua"). */
 export function Planets({ steps, selectedStep, onSelect, rot = 0 }: Props) {
   return (
     <g className="planets">
@@ -21,7 +22,7 @@ export function Planets({ steps, selectedStep, onSelect, rot = 0 }: Props) {
         const live = s.state === "running" || s.state === "waitingUser";
         const selected = selectedStep === s.kind;
         const sub =
-          s.round && s.round > 1 && (s.kind === "crossReview" || s.kind === "fix")
+          s.round && s.round > 1 && (s.kind === "crossReview" || s.kind === "fixCross")
             ? `${stepStateLabel[s.state]} · ${vi.orbit.round(s.round)}`
             : stepStateLabel[s.state];
         const main = `${s.index}. ${stepLabel[s.kind]}`;

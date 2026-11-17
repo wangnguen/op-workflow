@@ -6,7 +6,18 @@
 export type AgentKind = "claude" | "codex" | "shell";
 
 export type StepKind =
-  "intake" | "analyze" | "implement" | "reviewLocal" | "fix" | "crossReview" | "finalReview" | "pushSummary";
+  | "intake"
+  | "analyze"
+  | "implement"
+  | "checks"
+  | "harness"
+  | "reviewLocal"
+  | "fix"
+  | "crossReview"
+  | "fixCross"
+  | "finalReview"
+  | "browserTest"
+  | "pushSummary";
 
 export type StepState = "pending" | "running" | "waitingUser" | "done" | "failed" | "skipped";
 

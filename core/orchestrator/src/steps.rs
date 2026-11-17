@@ -12,9 +12,15 @@ use opw_storage::StepRunRow;
 use crate::flow::{agent_for, default_effort, step_config, step_key};
 use crate::models::check_effort;
 
-/// The AI steps, in workflow order (intake runs no AI).
+/// The AI steps with a setting of their own, in workflow order. Nhận task and Kiểm tra run no
+/// AI; the second Sửa lỗi shares the first one's setting; Harness and Test trình duyệt get
+/// theirs when they can run.
 pub fn ai_steps() -> impl Iterator<Item = StepKind> {
-    StepKind::ALL.into_iter().filter(|s| *s != StepKind::Intake)
+    StepKind::ALL.into_iter().filter(|s| has_setting(*s))
+}
+
+fn has_setting(step: StepKind) -> bool {
+    step != StepKind::FixCross && step_config(step, &opw_config::StepsConfig::default()).is_some()
 }
 
 /// One row per AI step: what is picked, and the cost and time of its finished runs.
@@ -90,8 +96,8 @@ pub fn validate(
     config: &Config,
     models: Option<&StepModels>,
 ) -> Result<AgentKind, ApiError> {
-    if req.step == StepKind::Intake {
-        return Err(invalid("Bước Nhận task không chạy AI"));
+    if !has_setting(req.step) {
+        return Err(invalid("Bước này không có model / effort riêng để chọn"));
     }
     let agent = match req.agent {
         Some(a) if req.step != StepKind::CrossReview && a != agent_for(req.step, config) => {

@@ -10,16 +10,21 @@ export interface Point {
   y: number;
 }
 
-export const VIEW = { x: -480, y: -400, w: 960, h: 800 } as const;
+export const VIEW = { x: -560, y: -460, w: 1120, h: 920 } as const;
 export const STAR_R = 24;
-export const ORBIT_BASE = 82;
-// 8 orbits: the outermost (82 + 7 * 35 = 327) stays inside the fuel ring.
-export const ORBIT_GAP = 35;
-export const FUEL_R = 362;
+export const ORBIT_BASE = 78;
+// 12 orbits: the outermost (78 + 11 * 29 = 397) stays inside the fuel ring.
+export const ORBIT_GAP = 29;
+export const FUEL_R = 428;
 export const PLANET_R = 8;
-const JOURNEY_START_DEG = -122;
-const JOURNEY_STEP_DEG = 42;
-const FUEL_SPAN_DEG = 34;
+const JOURNEY_START_DEG = -170;
+/** Planets sit about this far apart along the spiral (map units), so outer orbits, which are
+ *  longer, take smaller angle steps (between the min and max below). The journey starts on the
+ *  left, inner planets pass under the fuel gauge, outer ones stay in the lower half, clear of it. */
+const JOURNEY_ARC = 100;
+const JOURNEY_MAX_STEP_DEG = 40;
+const JOURNEY_MIN_STEP_DEG = 25;
+const FUEL_SPAN_DEG = 30;
 export const ZOOM_MIN = 0.5;
 export const ZOOM_MAX = 2.6;
 
@@ -32,7 +37,7 @@ export function polar(r: number, deg: number): Point {
   return { x: round2(r * Math.cos(a)), y: round2(r * Math.sin(a)) };
 }
 
-/** 1-based step index (1 = Intake … 8 = Push summary). */
+/** 1-based step index (1 = Intake … 12 = Push summary). */
 export function stepIndex(kind: StepKind): number {
   return STEPS.indexOf(kind) + 1;
 }
@@ -76,9 +81,29 @@ export function planetDrift(t: number): (index: number) => number {
     WOBBLE_DEG * Math.sin((2 * Math.PI * t) / (WOBBLE_PERIOD_S + index * WOBBLE_PERIOD_STEP_S) + index * 1.7);
 }
 
+/** Resting angle of each planet (index 1..STEP_COUNT): an even arc length apart. */
+const PLANET_DEG: readonly number[] = (() => {
+  const out = [JOURNEY_START_DEG];
+  for (let i = 1; i < STEPS.length; i++) {
+    const mid = (orbitRadius(i) + orbitRadius(i + 1)) / 2;
+    const step = Math.max(JOURNEY_MIN_STEP_DEG, Math.min(JOURNEY_MAX_STEP_DEG, ((JOURNEY_ARC / mid) * 180) / Math.PI));
+    out.push(round2((out[i - 1] as number) + step));
+  }
+  return out;
+})();
+
+/** Resting angle of `index` (fractional for a ship between two orbits). */
+function baseAngle(index: number): number {
+  const lo = Math.min(Math.max(Math.floor(index), 1), STEPS.length);
+  const hi = Math.min(Math.max(Math.ceil(index), 1), STEPS.length);
+  const a = PLANET_DEG[lo - 1] as number;
+  const b = PLANET_DEG[hi - 1] as number;
+  return lo === hi ? a : a + (b - a) * (index - lo);
+}
+
 /** Planets form an outward spiral: the journey reads clockwise from upper-left. */
 export function planetAngle(index: number, rot: Spin = 0): number {
-  return JOURNEY_START_DEG + (index - 1) * JOURNEY_STEP_DEG + offsetOf(rot, index);
+  return baseAngle(index) + offsetOf(rot, index);
 }
 
 export function planetPosition(index: number, rot: Spin = 0): Point {
@@ -127,9 +152,10 @@ export function planetLabelBox(index: number, rot: Spin = 0, width = PLANET_LABE
   return { l: c.x - width / 2, r: c.x + width / 2, t: c.y - 13, b: c.y + 15 };
 }
 
-/** Moments of the drift used to check that a label spot stays clear while planets move. */
+/** Moments of the drift (20 minutes, every 2.5 s) used to check that a label spot stays clear
+ *  while planets move. */
 let driftSamples: Spin[] | null = null;
-const samples = () => (driftSamples ??= Array.from({ length: 160 }, (_, k) => planetDrift(k * 2.5)));
+const samples = () => (driftSamples ??= Array.from({ length: 480 }, (_, k) => planetDrift(k * 2.5)));
 
 /** Extra room around a label being placed, so it stays clear between the sampled moments. */
 const CLEARANCE = 5;
@@ -169,7 +195,7 @@ export function shipLabelBox(at: Point, o: ShipLabel, width = SHIP_LABEL_W): Box
 /** Sides tried for the ship label, relative to the ship's angle: toward the star first, then away,
  * behind, ahead and the diagonals; a little farther out when nothing close is free. */
 const SHIP_LABEL_TURNS = [180, 0, -90, 90, 135, -135, 45, -45];
-const SHIP_LABEL_GAPS = [12, 26];
+const SHIP_LABEL_GAPS = [12, 26, 40, 54];
 const shipTurnCache = new Map<string, { turn: number; gap: number }>();
 
 /**
@@ -349,9 +375,9 @@ export function shuttlePath(a: number, b: number, rot: Spin = 0): { d: string; m
 
 // ---------- asteroid belt (findings) ----------
 
-/** Findings orbit between the fix and cross-review planets, where they are worked on. */
+/** Findings orbit between Review chéo and the Sửa lỗi after it, where they are worked on. */
 export function beltRadius(): number {
-  return (orbitRadius(stepIndex("fix")) + orbitRadius(stepIndex("crossReview"))) / 2;
+  return (orbitRadius(stepIndex("crossReview")) + orbitRadius(stepIndex("fixCross"))) / 2;
 }
 
 /** FNV-1a 32-bit hash, stable across runs. */
@@ -386,7 +412,7 @@ export const BELT_START_DEG = 104;
 export const BELT_END_DEG = 204;
 
 /** The belt lies between the review and fix orbits and drifts with them. */
-const beltOffset = (rot: Spin) => offsetOf(rot, (stepIndex("crossReview") + stepIndex("fix")) / 2);
+const beltOffset = (rot: Spin) => offsetOf(rot, (stepIndex("crossReview") + stepIndex("fixCross")) / 2);
 
 export function beltArcPath(rot: Spin = 0): string {
   const o = beltOffset(rot);
@@ -535,18 +561,18 @@ export function nebulaLayout(n: number): Placement[] {
 // The top corners sit a little lower than the very edge: the status chip (left) and the legend
 // button (right) float over the top band of the map.
 const DISTANT_SLOTS: Point[] = [
-  { x: -418, y: -262 },
-  { x: 414, y: -266 },
-  { x: 416, y: 326 },
-  { x: -412, y: 330 },
-  { x: 440, y: 40 },
-  { x: 0, y: 384 },
+  { x: -498, y: -318 },
+  { x: 494, y: -322 },
+  { x: 496, y: 390 },
+  { x: -492, y: 394 },
+  { x: 520, y: 40 },
+  { x: 0, y: 438 },
 ];
 // More sessions go on a U along the sides and bottom; the top half belongs to the fuel gauge
 // and its labels, so only its two far corners are used.
-const DISTANT_SIDE_X = 440;
-const DISTANT_SIDE_TOP_Y = -120;
-const DISTANT_BOTTOM_Y = 348;
+const DISTANT_SIDE_X = 520;
+const DISTANT_SIDE_TOP_Y = -140;
+const DISTANT_BOTTOM_Y = 428;
 
 function alongU(d: number): Point {
   const side = DISTANT_BOTTOM_Y - DISTANT_SIDE_TOP_Y;

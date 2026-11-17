@@ -95,6 +95,15 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE step_run ADD COLUMN note TEXT;
      ALTER TABLE step_run ADD COLUMN log_file TEXT;
      ALTER TABLE step_run ADD COLUMN denials TEXT;",
+    // 6: the 12-step flow. One "fix" step used to answer every review; a fix that came after a
+    // cross review of the same task is step 9 now (`fixCross`). The workflow JSON in `flow` is
+    // upgraded from 8 to 12 steps when it is read (opw_domain::workflow).
+    "UPDATE step_run SET step = 'fixCross'
+      WHERE step = 'fix'
+        AND EXISTS (SELECT 1 FROM step_run c
+                     WHERE c.wp_id = step_run.wp_id
+                       AND c.step = 'crossReview'
+                       AND c.started_at < step_run.started_at);",
 ];
 
 /// Schema version this build understands.
@@ -890,6 +899,32 @@ mod tests {
             again.task(187716).unwrap().unwrap().branch.as_deref(),
             Some("feature/187716")
         );
+    }
+
+    #[test]
+    fn migration_6_moves_fixes_after_a_cross_review_to_step_9() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v5.db");
+        let conn = Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..5] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 5).unwrap();
+        conn.execute_batch(
+            "INSERT INTO task (wp_id, display_id, title, project, column_name, created_at, updated_at)
+               VALUES (1, 'WP-1', 'T', 'P', 'active', '2026-11-14T00:00:00Z', '2026-11-14T00:00:00Z');
+             INSERT INTO step_run (wp_id, step, state, started_at) VALUES
+               (1, 'reviewLocal', 'done', '2026-11-14T01:00:00Z'),
+               (1, 'fix', 'done', '2026-11-14T02:00:00Z'),
+               (1, 'crossReview', 'done', '2026-11-14T03:00:00Z'),
+               (1, 'fix', 'done', '2026-11-14T04:00:00Z');",
+        )
+        .unwrap();
+        drop(conn);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.version().unwrap(), schema_version());
+        let steps: Vec<String> = store.step_runs(1).unwrap().into_iter().map(|r| r.step).collect();
+        assert_eq!(steps, ["reviewLocal", "fix", "crossReview", "fixCross"]);
     }
 
     #[test]

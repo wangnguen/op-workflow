@@ -362,7 +362,7 @@ body.is-card-dragging * {
   flex-shrink: 0;
 }
 .card-steps i {
-  width: 8px;
+  width: 6px;
   height: 4px;
   border-radius: 2px;
   background: var(--fill-strong);

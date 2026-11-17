@@ -30,7 +30,7 @@ fn script() -> Vec<E> {
         E::ReviewLocalFinished { blocking: 1 },
         E::StepSucceeded(StepKind::Fix),
         E::CrossReviewFinished { blocking: 2 },
-        E::StepSucceeded(StepKind::Fix),
+        E::StepSucceeded(StepKind::FixCross),
         E::CrossReviewFinished { blocking: 0 },
         E::FinalReviewFinished {
             critical_or_high: 0,

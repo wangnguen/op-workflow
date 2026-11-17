@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { FlowStatus, StepKind, StepState, StepView } from "../../ipc/types";
-import { STEP_ORDER } from "../../shared/steps";
+import { OPTIONAL_STEPS, STEP_ORDER } from "../../shared/steps";
 import { carryOnColumn, carryOnOptions } from "./carryOn";
 
-/** Steps up to `upTo` done, the rest pending (`stateAt` overrides one). */
+/** Steps up to `upTo` done (the optional ones passed as "bỏ qua"), the rest pending
+ *  (`stateAt` overrides one). */
 function detail(status: FlowStatus, upTo: StepKind, current: StepKind, stateAt?: [StepKind, StepState]) {
   const last = STEP_ORDER.indexOf(upTo);
   const steps: StepView[] = STEP_ORDER.map((kind, i) => ({
     kind,
     index: i + 1,
-    state: stateAt?.[0] === kind ? stateAt[1] : i <= last ? "done" : "pending",
+    state: stateAt?.[0] === kind ? stateAt[1] : i <= last ? (OPTIONAL_STEPS.includes(kind) ? "skipped" : "done") : "pending",
   }));
-  // a clean first review never needed Sửa lỗi
-  const fix = steps.find((s) => s.kind === "fix");
-  if (fix && !stateAt) fix.state = "pending";
+  // clean reviews never needed either Sửa lỗi: the flow passed them
+  for (const s of steps) if (!stateAt && (s.kind === "fix" || s.kind === "fixCross") && s.state === "done") s.state = "skipped";
   return { status, steps, current };
 }
 
@@ -41,6 +41,14 @@ describe("Làm tiếp", () => {
     // ready at Viết code: shown as pending, but the task stands on it
     const ready = carryOnOptions(detail("done", "analyze", "implement"), "active");
     expect(ready.steps).toEqual(["analyze", "implement"]);
+  });
+
+  it("never offers a step the flow passed without running", () => {
+    const o = carryOnOptions(detail("done", "pushSummary", "pushSummary"), "active");
+    for (const s of ["checks", "harness", "fix", "fixCross", "browserTest"] as const) expect(o.steps).not.toContain(s);
+    // a Sửa lỗi that did run can be run again
+    const fixed = detail("done", "pushSummary", "pushSummary", ["fixCross", "done"]);
+    expect(carryOnOptions(fixed, "active").steps).toContain("fixCross");
   });
 
   it("has no 'keep' for a task that is not done", () => {

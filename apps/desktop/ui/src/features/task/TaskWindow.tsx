@@ -321,8 +321,10 @@ function StepBar({ detail: d }: { detail: TaskDetail }) {
           <StatusIcon state={s.state} />
           <span>
             {s.index}. {stepLabel[s.kind]}
-            {s.round ? <span className="faint"> · {vi.orbit.round(s.round)}</span> : null}
-            <small className="task-step-model">{modelText(s.model, s.effort) || "\u00a0"}</small>
+            {/* the round sits on the second line, so a new round never makes the name wrap */}
+            <small className="task-step-model">
+              {[s.round ? vi.orbit.round(s.round) : "", modelText(s.model, s.effort)].filter(Boolean).join(" · ") || "\u00a0"}
+            </small>
           </span>
         </li>
       ))}

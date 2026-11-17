@@ -1,5 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  MOCK_STEP_MS,
+  mockDecideFinding,
   mockDoneCards,
   mockFlowAction,
   mockPauseTask,
@@ -9,11 +11,76 @@ import {
   mockTaskDetail,
   resetMockFlows,
 } from "./mockFlow";
-import type { TaskCard } from "./types";
+import type { StepKind, StepState, TaskCard, TaskDetail } from "./types";
 
 const inbox: TaskCard = { id: "WP-9", wpId: 9, title: "t", project: "p", nxStatus: "Open", column: "inbox", newComments: 0 };
 
-afterEach(resetMockFlows);
+afterEach(() => {
+  resetMockFlows();
+  vi.useRealTimers();
+});
+
+/** Let the running mock step finish, then read the task. */
+function finishStep(wpId: number): TaskDetail {
+  vi.setSystemTime(Date.now() + MOCK_STEP_MS + 10);
+  return mockTaskDetail(wpId);
+}
+
+const stateOf = (d: TaskDetail, kind: StepKind): StepState | undefined => d.steps.find((s) => s.kind === kind)?.state;
+
+describe("12-step flow in the preview", () => {
+  it("passes the steps not turned on and sends Review chốt's fixes back to Review chốt", () => {
+    vi.useFakeTimers();
+    mockStarted(9, "t");
+    mockFlowAction(9, { type: "run" });
+    expect(finishStep(9).gate?.kind).toBe("planReview");
+    mockFlowAction(9, { type: "approvePlan" });
+
+    // Viết code → Kiểm tra and Harness are passed ("bỏ qua") → Tự review
+    let d = finishStep(9);
+    expect([d.status, d.current]).toEqual(["ready", "reviewLocal"]);
+    expect([stateOf(d, "checks"), stateOf(d, "harness")]).toEqual(["skipped", "skipped"]);
+    expect(stateOf(d, "browserTest")).toBe("pending");
+
+    // Tự review finds a high → the first Sửa lỗi (7) → Review chéo round 1
+    mockFlowAction(9, { type: "run" });
+    expect(finishStep(9).current).toBe("fix");
+    mockFlowAction(9, { type: "run" });
+    d = finishStep(9);
+    expect([d.current, d.steps.find((s) => s.kind === "crossReview")?.round]).toEqual(["crossReview", 1]);
+
+    // Review chéo clean → Review chốt finds a medium → the gate
+    mockFlowAction(9, { type: "run" });
+    expect(finishStep(9).current).toBe("finalReview");
+    mockFlowAction(9, { type: "run" });
+    d = finishStep(9);
+    expect(d.gate?.kind).toBe("mediumTriage");
+
+    // fixing it runs the second Sửa lỗi (9), which goes back to Review chốt, not Review chéo
+    mockDecideFinding({ wpId: 9, fingerprint: "m-med", decision: "fix" });
+    d = mockFlowAction(9, { type: "finishTriage" });
+    expect([d.status, d.current]).toEqual(["running", "fixCross"]);
+    d = finishStep(9);
+    expect([d.status, d.current]).toEqual(["ready", "finalReview"]);
+    expect(stateOf(d, "fixCross")).toBe("done");
+
+    // clean Review chốt → Test trình duyệt passed → Push summary
+    mockFlowAction(9, { type: "run" });
+    d = finishStep(9);
+    expect([d.status, d.current]).toEqual(["ready", "pushSummary"]);
+    expect(stateOf(d, "browserTest")).toBe("skipped");
+    expect(d.steps.map((s) => s.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+
+  it("passes a Sửa lỗi that was not needed instead of leaving it 'chưa tới'", () => {
+    vi.useFakeTimers();
+    const [card] = mockDoneCards();
+    const d = mockTaskDetail(card!.wpId);
+    expect(stateOf(d, "fix")).toBe("skipped");
+    expect(stateOf(d, "fixCross")).toBe("skipped");
+    expect(stateOf(d, "pushSummary")).toBe("done");
+  });
+});
 
 describe("preview board moves", () => {
   it("starts, pauses, finishes early and carries on like the core", () => {

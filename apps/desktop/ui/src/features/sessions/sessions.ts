@@ -42,7 +42,7 @@ function taskInfo(a: TaskSystem) {
   };
 }
 
-/** "3/8 Viết code" */
+/** "3/12 Viết code" */
 function stepText(a: TaskSystem, kind: StepKind): string {
   const s = a.steps.find((x) => x.kind === kind);
   return s ? `${s.index}/${STEP_COUNT} ${stepLabel[kind]}` : stepLabel[kind];
