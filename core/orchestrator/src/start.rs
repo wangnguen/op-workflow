@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use opw_config::{Config, StartMemory, contract_home, expand_home, same_path};
-use opw_context::{BriefComment, BriefInput, render_brief};
+use opw_context::{BriefComment, BriefInput, render_brief, render_comment_section, replace_comment_section};
 use opw_domain::task::{
     DEFAULT_BRANCH_TEMPLATE, display_id, infer_branch_template, render_branch_name, template_from_branch,
     validate_branch_name,
@@ -131,6 +131,22 @@ pub fn options(config: &Config, wp: &WorkPackage, saved: Option<&TaskRow>) -> St
 
 fn default_branch(wp_id: u64) -> String {
     DEFAULT_BRANCH_TEMPLATE.replace("{taskId}", &wp_id.to_string())
+}
+
+/// The brief's "Branch: … (base: …)" line with the branch the task starts on now.
+fn with_branch_line(brief: &str, branch: &str, base: &str) -> String {
+    let mut done = false;
+    let mut out = String::with_capacity(brief.len());
+    for line in brief.split_inclusive('\n') {
+        if !done && line.starts_with("Branch: ") {
+            done = true;
+            out.push_str(&format!("Branch: {branch} (base: {base})"));
+            out.push_str(if line.ends_with('\n') { "\n" } else { "" });
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 fn git_error(e: VcsError) -> ApiError {
@@ -315,6 +331,7 @@ pub fn start(input: StartInput<'_>, req: &StartRequest) -> Result<(StartResult, 
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| repo_key.clone());
+    let comments_read = details.is_ok();
     let (fresh, comments) = match details {
         Ok((fresh, comments)) => (fresh, comments),
         Err(e) => {
@@ -364,10 +381,23 @@ pub fn start(input: StartInput<'_>, req: &StartRequest) -> Result<(StartResult, 
     let brief_file = tasks_dir.map(|d| brief_path(d, &task_id));
     let brief_path = match &brief_file {
         Some(file) => {
+            // A task started before keeps its brief (your edits, issues read with "Lấy issue");
+            // only the branch line and, when OpenProject answered, the comments are refreshed.
+            let text = match std::fs::read_to_string(file) {
+                Ok(old) => {
+                    let kept = with_branch_line(&old, branch, base);
+                    if comments_read {
+                        replace_comment_section(&kept, &render_comment_section(&brief_comments, &[]))
+                    } else {
+                        kept
+                    }
+                }
+                Err(_) => brief,
+            };
             let written = file
                 .parent()
                 .map_or(Ok(()), std::fs::create_dir_all)
-                .and_then(|()| std::fs::write(file, &brief));
+                .and_then(|()| std::fs::write(file, &text));
             match written {
                 Ok(()) => Some(file.to_string_lossy().into_owned()),
                 Err(e) => {
@@ -581,6 +611,7 @@ mod tests {
             repo: web.to_string_lossy().into_owned(),
             base: "development".into(),
             branch: "f/WP-188001".into(),
+            carry_on: None,
         };
         let input = || StartInput {
             config: &cfg,
@@ -630,10 +661,16 @@ mod tests {
         assert_eq!(o.branch, "f/WP-188002");
         assert_eq!(o.branch_source, BRANCH_PROJECT);
 
-        // starting again only switches
+        // starting again only switches, and keeps what the user added to the brief
+        let brief_file = data.path().join("WP-188001").join("brief.md");
+        let edited = std::fs::read_to_string(&brief_file).unwrap() + "\n## Ghi chú của tôi\nđừng đổi API\n";
+        std::fs::write(&brief_file, edited).unwrap();
         git_ok(&web, &["switch", "development"]);
         let (res, _) = start(input(), &req).unwrap();
         assert!(!res.created);
+        let again = std::fs::read_to_string(&brief_file).unwrap();
+        assert!(again.contains("đừng đổi API"), "{again}");
+        assert_eq!(again.matches("Vẫn lỗi").count(), 1, "{again}");
 
         // dirty tree and bad names are refused before touching git
         std::fs::write(web.join("b.txt"), "x").unwrap();
@@ -647,6 +684,17 @@ mod tests {
             ..req
         };
         assert_eq!(start(input(), &bad).unwrap_err().code, "branch.invalid");
+    }
+
+    #[test]
+    fn starting_again_keeps_the_brief_and_refreshes_comments_and_branch() {
+        let brief = "# [WP-1] T\nTask: u · Issue: — · Repo: web\nBranch: f/old (base: main)\n\n## Yêu cầu\nsửa tay\n\n";
+        let kept = with_branch_line(brief, "f/new", "development");
+        assert!(kept.contains("Branch: f/new (base: development)\n"));
+        assert!(!kept.contains("f/old"));
+        assert!(kept.contains("sửa tay"));
+        // no branch line: left as it is
+        assert_eq!(with_branch_line("# x\n", "b", "m"), "# x\n");
     }
 
     fn saved_with_workspace(saved: &Config, root: &Path) -> Config {
@@ -666,6 +714,7 @@ mod tests {
             repo: root.path().join("api").to_string_lossy().into_owned(),
             base: "development".into(),
             branch: "feature/188004".into(),
+            carry_on: None,
         };
         let (res, _) = start(
             StartInput {

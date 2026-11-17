@@ -379,6 +379,14 @@ export interface StartRequest {
   repo: string;
   base: string;
   branch: string;
+  /** starting again a task that finished a round: where to carry on (none = where it stopped) */
+  carryOn?: CarryOn;
+}
+
+/** "Làm tiếp": run again from a step the task reached (a note goes to Viết code). */
+export interface CarryOn {
+  step?: StepKind;
+  note?: string;
 }
 
 export interface StartResult {
@@ -769,6 +777,8 @@ export interface TaskDetail {
   taskId: string;
   title: string;
   project: string;
+  /** back in the Inbox: the history can be read, steps wait for "Bắt đầu làm việc" */
+  parked?: boolean;
   repo?: string;
   branch?: string;
   base?: string;

@@ -305,7 +305,7 @@ impl AppService {
                 }
             }
         }
-        let parked = self.parked_cards(&tasks);
+        let parked = self.parked_cards(&mut tasks, &config);
         tasks.extend(parked);
         tasks.extend(self.done_cards(&state, &config));
         self.fill_new_comments(&mut tasks, &state);
@@ -331,7 +331,8 @@ impl AppService {
     /// Tasks the user moved back to Inbox (paused, or dragged out of "Đã xong") that OpenProject
     /// no longer lists as open and assigned: they stay on the board instead of vanishing, and
     /// "Bắt đầu" works from the saved task.
-    fn parked_cards(&self, shown: &[TaskCard]) -> Vec<TaskCard> {
+    /// Their Inbox cards (and those of tasks OpenProject still lists) show where they stopped.
+    fn parked_cards(&self, shown: &mut [TaskCard], config: &Config) -> Vec<TaskCard> {
         let Some(store) = &self.store else {
             return Vec::new();
         };
@@ -340,33 +341,59 @@ impl AppService {
             .ok()
             .and_then(|s| s.tasks_in(COLUMN_INBOX, DONE_SHOWN).ok())
             .unwrap_or_default();
+        for card in shown.iter_mut().filter(|c| c.column == TaskColumn::Inbox) {
+            if let Some(row) = rows.iter().find(|r| r.wp_id == card.wp_id) {
+                self.fill_history(card, row, config);
+            }
+        }
         rows.into_iter()
             .filter(|row| !shown.iter().any(|c| c.wp_id == row.wp_id))
-            .map(|row| TaskCard {
-                id: row.display_id.clone(),
-                wp_id: row.wp_id,
-                title: row.title.clone(),
-                project: row.project.clone(),
-                repo: row.repo.as_deref().map(repo_name),
-                branch: row.branch.clone(),
-                nx_status: "—".into(),
-                nx_status_color: None,
-                column: TaskColumn::Inbox,
-                step: None,
-                agent: None,
-                cost_usd: None,
-                context_pct: None,
-                new_comments: 0,
-                gate: None,
-                flow_note: None,
-                login: None,
-                issues: None,
-                finished_at: None,
-                push_check: None,
-                nx_open: false,
-                priority: None,
+            .map(|row| {
+                let mut card = Self::parked_card(&row);
+                self.fill_history(&mut card, &row, config);
+                card
             })
             .collect()
+    }
+
+    /// A task back in the Inbox keeps its history: branch, where it stopped, what it cost.
+    fn fill_history(&self, card: &mut TaskCard, row: &TaskRow, config: &Config) {
+        card.repo = row.repo.as_deref().map(repo_name);
+        card.branch = row.branch.clone();
+        if let (Some(flow), Some(ctx)) = (&self.flow, self.ctx_for(row, config)) {
+            if let Some(f) = flow.card(&ctx) {
+                card.step = Some(f.step);
+                card.cost_usd = f.cost_usd;
+                card.finished_at = f.finished_at;
+            }
+        }
+    }
+
+    fn parked_card(row: &TaskRow) -> TaskCard {
+        TaskCard {
+            id: row.display_id.clone(),
+            wp_id: row.wp_id,
+            title: row.title.clone(),
+            project: row.project.clone(),
+            repo: row.repo.as_deref().map(repo_name),
+            branch: row.branch.clone(),
+            nx_status: "—".into(),
+            nx_status_color: None,
+            column: TaskColumn::Inbox,
+            step: None,
+            agent: None,
+            cost_usd: None,
+            context_pct: None,
+            new_comments: 0,
+            gate: None,
+            flow_note: None,
+            login: None,
+            issues: None,
+            finished_at: None,
+            push_check: None,
+            nx_open: false,
+            priority: None,
+        }
     }
 
     /// The "Đã xong" column: tasks the user marked done, with the push check made then, and a
@@ -690,7 +717,9 @@ impl AppService {
         }
         self.reload_config();
         if let (Some(flow), Some(ctx)) = (&self.flow, self.ctx_for(&row, &self.config())) {
-            flow.started(&ctx);
+            if let Err(e) = flow.started(&ctx, req.carry_on.as_ref()) {
+                result.warnings.push(format!("Chưa làm tiếp được: {}", e.message));
+            }
         }
         Ok(result)
     }
@@ -782,6 +811,12 @@ impl AppService {
     /// A workflow button: run, stop, retry, approve the plan, …
     pub fn flow_action(&self, wp_id: u64, action: FlowAction) -> Result<TaskDetail, ApiError> {
         let (ctx, flow) = self.task_ctx(wp_id)?;
+        if ctx.row.column == COLUMN_INBOX && !matches!(action, FlowAction::Stop) {
+            return Err(ApiError::new(
+                "task.parked",
+                "Task đang ở Inbox: bấm Bắt đầu làm việc trên thẻ để làm tiếp",
+            ));
+        }
         let forced = match action {
             FlowAction::Finish { forced } => Some(forced),
             _ => None,

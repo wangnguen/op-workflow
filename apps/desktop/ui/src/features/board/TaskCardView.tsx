@@ -70,10 +70,18 @@ function primaryAction(props: TaskCardProps) {
   const { card, onStart, onPause, onBrief, onIssues, readingIssues, onOpen, onFlow, onLogin, onError, onFinish, onContinue } = props;
   if (card.column === "inbox") {
     return (
-      <button className="btn btn--primary btn--sm" onClick={() => onStart(card)}>
-        <Icon name="play" size={12} />
-        {b.start}
-      </button>
+      <>
+        {card.step && (
+          // back in the Inbox after work: its brief, plan, findings and history can be read
+          <button className="btn btn--ghost btn--sm" title={vi.carryOn.parkedHint} onClick={() => onOpen(card, "progress")}>
+            {f.open}
+          </button>
+        )}
+        <button className="btn btn--primary btn--sm" onClick={() => onStart(card)}>
+          <Icon name="play" size={12} />
+          {b.start}
+        </button>
+      </>
     );
   }
   const open = (tab?: TaskTab) => (
@@ -337,7 +345,11 @@ export function TaskCardView(props: TaskCardProps) {
         </div>
       )}
 
-      {card.flowNote ? (
+      {card.column === "inbox" && card.step ? (
+        <p className="card-note" title={vi.carryOn.parkedHint}>
+          {vi.carryOn.parkedLine(!!card.finishedAt)}
+        </p>
+      ) : card.flowNote ? (
         <p className={`card-note${step?.state === "failed" ? " card-note--error" : ""}`} title={card.flowNote}>
           {card.flowNote}
         </p>

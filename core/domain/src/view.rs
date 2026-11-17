@@ -600,6 +600,21 @@ pub struct StartRequest {
     pub repo: String,
     pub base: String,
     pub branch: String,
+    /// Starting again a task that finished a round: where to carry on (as "Làm tiếp"). `None`
+    /// = stay where it stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry_on: Option<CarryOn>,
+}
+
+/// "Làm tiếp" from the start dialog: run again from `step` (one the task reached), with a
+/// note for Viết code; no step = carry on where the task stopped.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarryOn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<StepKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1160,6 +1175,9 @@ pub struct TaskDetail {
     pub task_id: String,
     pub title: String,
     pub project: String,
+    /// The task is back in the Inbox: its history can be read, steps wait for "Bắt đầu".
+    #[serde(default)]
+    pub parked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

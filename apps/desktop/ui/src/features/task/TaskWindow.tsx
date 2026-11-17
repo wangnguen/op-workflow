@@ -353,7 +353,16 @@ function StatusStrip({ detail: d, busy, onError, onAction, onLogin, onShow, onFe
   let actions: ReactNode = null;
   let tone = d.status as string;
 
-  if (d.status === "ready" && d.current) {
+  if (d.parked) {
+    // back in the Inbox: the history can be read; steps wait for "Bắt đầu làm việc"
+    tone = "parked";
+    text = (
+      <>
+        <strong>{vi.carryOn.parkedStrip}</strong>
+        <span className="faint">{vi.carryOn.parkedStripNote}</span>
+      </>
+    );
+  } else if (d.status === "ready" && d.current) {
     const last = lastEnded(d.runs);
     const said =
       last?.note &&

@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mockDoneCards, mockFlowAction, mockPauseTask, mockPlaceCard, mockPushCheck, mockStarted, resetMockFlows } from "./mockFlow";
+import {
+  mockDoneCards,
+  mockFlowAction,
+  mockPauseTask,
+  mockPlaceCard,
+  mockPushCheck,
+  mockStarted,
+  mockTaskDetail,
+  resetMockFlows,
+} from "./mockFlow";
 import type { TaskCard } from "./types";
 
 const inbox: TaskCard = { id: "WP-9", wpId: 9, title: "t", project: "p", nxStatus: "Open", column: "inbox", newComments: 0 };
@@ -47,14 +56,32 @@ describe("preview board moves", () => {
     expect(mockPushCheck(9).pushed).toBe(true);
   });
 
-  it("sends a finished task back to Inbox, and starting it again runs a new round", () => {
+  it("keeps a finished task's history in the Inbox and carries on from the step picked at start", () => {
     const [card] = mockDoneCards();
     mockPauseTask(card!.wpId);
-    expect(mockPlaceCard(card!).column).toBe("inbox");
-    mockStarted(card!.wpId, card!.title);
+    const parked = mockPlaceCard(card!);
+    expect(parked.column).toBe("inbox");
+    // where it stopped and its branch stay on the Inbox card
+    expect(parked.step?.kind).toBe("pushSummary");
+    expect(parked.finishedAt).toBeDefined();
+    expect(parked.branch).toBeDefined();
+    // the task window reads the history but runs nothing while parked
+    expect(mockTaskDetail(card!.wpId).parked).toBe(true);
+    expect(() => mockFlowAction(card!.wpId, { type: "run" })).toThrow();
+    mockStarted(card!.wpId, card!.title, { step: "implement", note: "khách mở lại" });
     const again = mockPlaceCard(card!);
     expect(again.column).toBe("active");
-    expect(again.step?.kind).toBe("analyze");
+    expect(again.step?.kind).toBe("implement");
+    const d = mockTaskDetail(card!.wpId);
+    expect(d.parked).toBe(false);
+    expect(d.steps.find((s) => s.kind === "analyze")?.state).toBe("done");
+  });
+
+  it("starting a finished task again with no choice keeps it at the push summary", () => {
+    const [, card] = mockDoneCards();
+    mockPauseTask(card!.wpId);
+    mockStarted(card!.wpId, card!.title);
+    expect(mockPlaceCard(card!).column).toBe("awaitingPush");
   });
 
   it("sends a finished task back to Viết code with a note", () => {

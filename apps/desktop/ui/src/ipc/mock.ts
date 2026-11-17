@@ -879,7 +879,7 @@ export function mockStartTask(req: StartRequest): StartResult {
   if (repo && repo.dirty.length > 0) {
     throw { code: "repo.dirty", message: `Working tree có ${repo.dirty.length} file chưa commit.` };
   }
-  mockStarted(req.wpId, INBOX.find((i) => i.taskId === `WP-${req.wpId}`)?.title ?? `WP-${req.wpId}`);
+  mockStarted(req.wpId, INBOX.find((i) => i.taskId === `WP-${req.wpId}`)?.title ?? `WP-${req.wpId}`, req.carryOn);
   return {
     taskId: `WP-${req.wpId}`,
     branch: req.branch,

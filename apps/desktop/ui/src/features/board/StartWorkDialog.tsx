@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { vi } from "../../i18n/vi";
+import { stepLabel, vi } from "../../i18n/vi";
 import {
   deleteBranch,
   errorCode,
@@ -7,9 +7,12 @@ import {
   fetchRepo,
   getRepoState,
   getStartOptions,
+  getTaskDetail,
   startTask,
 } from "../../ipc/client";
-import type { BranchOption, RepoOption, RepoState, StartOptions, StartResult, TaskCard } from "../../ipc/types";
+import type { BranchOption, RepoOption, RepoState, StartOptions, StartResult, TaskCard, TaskDetail } from "../../ipc/types";
+import { carryOnOptions } from "../task/carryOn";
+import { CarryOnFields, useCarryOn } from "../task/CarryOnFields";
 import { formatRelative } from "../../shared/format";
 import { Icon } from "../../shared/ui/Icon";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
@@ -99,6 +102,21 @@ function BranchRow({ b, picked, current, lastBase, onPick, onDelete, confirm }: 
 
 /** Pick repo, base branch and branch name, then create the branch locally (never pushed). */
 export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props) {
+  // a task that finished a round and came back to the Inbox: ask where to carry on
+  const finished = task.column === "inbox" && !!task.step && !!task.finishedAt;
+  const [history, setHistory] = useState<TaskDetail>();
+  useEffect(() => {
+    if (!finished) return;
+    let live = true;
+    getTaskDetail(task.wpId)
+      .then((d) => live && setHistory(d))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [finished, task.wpId]);
+  const carryOptions = history ? carryOnOptions({ ...history, status: "done" }) : undefined;
+  const carry = useCarryOn(carryOptions);
   const [opts, setOpts] = useState<StartOptions | null>(null);
   const [optsError, setOptsError] = useState<string | null>(null);
   const [extraRepos, setExtraRepos] = useState<RepoOption[]>([]);
@@ -314,7 +332,8 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
     if (!repo || !canStart) return;
     setStarting(true);
     setStartError(null);
-    startTask({ wpId: task.wpId, repo: repo.path, base, branch: name })
+    const carryOn = finished ? carry.pick()?.carryOn : undefined;
+    startTask({ wpId: task.wpId, repo: repo.path, base, branch: name, carryOn })
       .then(onStarted)
       .catch((e: unknown) => {
         setStartError(errorMessage(e));
@@ -566,6 +585,23 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
                 </div>
               )}
             </>
+          )}
+
+          {task.step && !finished && (
+            <p className="note start-history">{vi.carryOn.startPaused(stepLabel[task.step.kind])}</p>
+          )}
+          {finished && (
+            <section className="field start-history">
+              <span className="label" id="start-carry">
+                {vi.carryOn.startTitle}
+              </span>
+              {carryOptions ? (
+                <CarryOnFields options={carryOptions} state={carry} labelledBy="start-carry" />
+              ) : (
+                <small className="dim">{vi.carryOn.loading}</small>
+              )}
+              <small className="faint">{vi.carryOn.startKeeps}</small>
+            </section>
           )}
 
           {startError && <p className="dialog-error">{startError}</p>}

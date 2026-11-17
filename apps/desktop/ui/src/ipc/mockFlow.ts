@@ -4,6 +4,7 @@
 import type {
   AgentKind,
   AgentView,
+  CarryOn,
   ChatItem,
   ChatView,
   FindingDecision,
@@ -671,6 +672,7 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     repo: "~/Desktop/acme-api",
     branch: branchOf(f),
     base: "origin/development",
+    parked: paused.has(wpId),
     status: status(f),
     current: f.current,
     steps: steps(f),
@@ -712,6 +714,9 @@ function pushView(): PushView {
 }
 
 export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
+  if (paused.has(wpId) && action.type !== "stop") {
+    throw fail("task.parked", "Task đang ở Inbox: bấm Bắt đầu làm việc trên thẻ để làm tiếp");
+  }
   const f = flowOf(wpId);
   tick(f);
   const running = f.phase === "running";
@@ -1029,12 +1034,16 @@ export function mockPauseTask(wpId: number): null {
 
 /** A task started from Inbox in the preview: it gets (or keeps) its flow and leaves Inbox. A
  *  finished one (dragged back out of Đã xong) starts a new round, like the app. */
-export function mockStarted(wpId: number, title: string): void {
-  const again = flows.get(wpId)?.phase === "done";
-  if (again) flows.delete(wpId);
-  const f = flowOf(wpId, `WP-${wpId}`, title, !again);
-  f.moved = true;
+/** Started from the Inbox: a new flow, a paused one where it stopped, a finished one carried on
+ *  like "Làm tiếp" (nothing is wiped). */
+export function mockStarted(wpId: number, title: string, carryOn?: CarryOn): void {
   paused.delete(wpId);
+  if (flows.get(wpId)?.phase === "done") {
+    mockFlowAction(wpId, { type: "reopen", ...carryOn });
+    return;
+  }
+  const f = flowOf(wpId, `WP-${wpId}`, title, true);
+  f.moved = true;
 }
 
 /** The board card as the preview's moves left it: paused ones back in Inbox, started, finished
@@ -1042,7 +1051,26 @@ export function mockStarted(wpId: number, title: string): void {
 export function mockPlaceCard(card: TaskCard): TaskCard {
   if (paused.has(card.wpId)) {
     const { id, wpId, title, project, nxStatus, nxStatusColor, newComments, issues, priority } = card;
-    return { id, wpId, title, project, nxStatus, nxStatusColor, newComments, issues, priority, column: "inbox" };
+    // back in the Inbox, it keeps its history: where it stopped, branch, cost
+    const f = flows.get(wpId);
+    const h = f ? mockFlowCard(wpId) : undefined;
+    return {
+      id,
+      wpId,
+      title,
+      project,
+      nxStatus,
+      nxStatusColor,
+      newComments,
+      issues,
+      priority,
+      column: "inbox",
+      step: h?.step,
+      finishedAt: f?.finishedAt,
+      costUsd: h?.costUsd,
+      branch: f ? branchOf(f) : undefined,
+      repo: f ? "acme-api" : undefined,
+    };
   }
   const f = flows.get(card.wpId);
   if (!f?.moved) return card;

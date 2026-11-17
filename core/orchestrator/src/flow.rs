@@ -27,10 +27,10 @@ use opw_config::{Config, RepoConfig, StepConfig, StepsConfig};
 use opw_context::prompts::{self, FixItem};
 use opw_domain::finding::{GateAction, GatePolicy, Severity, fingerprint};
 use opw_domain::view::{
-    AgentKind, AgentView, AlertKind, ApiError, ChatItem, ChatKind, ChatView, Decision, FindingDecision,
-    FindingView, FlowAction, FlowError, FlowStatus, GateKind, GateView, LogLine, Provider, PushBlock,
-    PushView, QuotaSnapshot, ReviewNote, RunState, RunSummary, RunView, SessionStatus, StepRef, StepView,
-    TaskColumn, TaskDetail, ToolEvent,
+    AgentKind, AgentView, AlertKind, ApiError, CarryOn, ChatItem, ChatKind, ChatView, Decision,
+    FindingDecision, FindingView, FlowAction, FlowError, FlowStatus, GateKind, GateView, LogLine, Provider,
+    PushBlock, PushView, QuotaSnapshot, ReviewNote, RunState, RunSummary, RunView, SessionStatus, StepRef,
+    StepView, TaskColumn, TaskDetail, ToolEvent,
 };
 use opw_domain::workflow::{Phase, StepKind, StepState, Workflow, WorkflowEvent};
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
@@ -737,14 +737,39 @@ impl Flow {
 
     /// The task was just started (or started again): intake is done, analyze is next. A task
     /// that was finished before starts over; one in progress keeps its state.
-    pub fn started(&self, ctx: &TaskCtx) {
-        let mut tasks = self.inner.lock_tasks();
-        let entry = tasks.entry(ctx.row.wp_id).or_default();
-        if entry.saved.finished || entry.saved.workflow.phase() == Phase::NotStarted {
-            entry.saved = new_saved(ctx);
-            push_log(entry, None, "info", "Đã nhận task: tạo nhánh và brief xong");
-            self.inner.persist(ctx.row.wp_id, entry);
+    /// The task was started (again) from the Inbox. A new task gets its workflow; one paused
+    /// mid-way keeps its place; one that finished a round carries on like "Làm tiếp" (`carry_on`;
+    /// `None` = where it stopped). Nothing is wiped: steps, plan, findings and history stay.
+    pub fn started(&self, ctx: &TaskCtx, carry_on: Option<&CarryOn>) -> Result<(), ApiError> {
+        let finished = {
+            let mut tasks = self.inner.lock_tasks();
+            let entry = tasks.entry(ctx.row.wp_id).or_default();
+            if entry.saved.workflow.phase() == Phase::NotStarted {
+                entry.saved = new_saved(ctx);
+                push_log(entry, None, "info", "Đã nhận task: tạo nhánh và brief xong");
+                self.inner.persist(ctx.row.wp_id, entry);
+                return Ok(());
+            }
+            entry.saved.finished
+        };
+        if !finished {
+            self.inner.log(
+                ctx.row.wp_id,
+                None,
+                "info",
+                "Bắt đầu lại từ Inbox: giữ nguyên chỗ đang làm",
+                true,
+            );
+            return Ok(());
         }
+        let carry_on = carry_on.cloned().unwrap_or_default();
+        self.act(
+            ctx.clone(),
+            FlowAction::Reopen {
+                step: carry_on.step,
+                note: carry_on.note,
+            },
+        )
     }
 
     /// Make sure a task in progress has a workflow (tasks started before steps 2-8 existed).
@@ -972,6 +997,7 @@ impl Flow {
             task_id: ctx.row.display_id.clone(),
             title: ctx.row.title.clone(),
             project: ctx.row.project.clone(),
+            parked: ctx.row.column == "inbox",
             repo: ctx.row.repo.clone(),
             branch: ctx.row.branch.clone(),
             base: ctx.row.base.clone(),
@@ -3057,7 +3083,7 @@ mod tests {
         let Some(s) = setup() else { return };
         let (flow, fake) = flow_with(&s, false, happy(CLEAN));
         let ctx = s.ctx(1, &Config::default());
-        flow.started(&ctx);
+        flow.started(&ctx, None).unwrap();
         let d = flow.detail(&ctx);
         assert_eq!(
             (d.status, d.current),
@@ -3157,7 +3183,7 @@ mod tests {
         let Some(s) = setup() else { return };
         let (flow, fake) = flow_with(&s, false, happy(CLEAN));
         let ctx = s.ctx(1, &Config::default());
-        flow.started(&ctx);
+        flow.started(&ctx, None).unwrap();
 
         // done at the plan gate: the steps left are skipped; "Làm tiếp" comes back to the gate
         let d = run(&flow, &ctx, FlowAction::Run);
@@ -3258,13 +3284,61 @@ mod tests {
     }
 
     #[test]
+    fn starting_a_finished_task_again_keeps_its_history() {
+        let Some(s) = setup() else { return };
+        let (flow, _) = flow_with(&s, false, happy(CLEAN));
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        let mut d = run(&flow, &ctx, FlowAction::Run);
+        d = if d.status == FlowStatus::Gate {
+            run(&flow, &ctx, FlowAction::ApprovePlan)
+        } else {
+            d
+        };
+        for _ in 0..8 {
+            if d.status == FlowStatus::AwaitingPush {
+                break;
+            }
+            d = run(&flow, &ctx, FlowAction::Run);
+        }
+        assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
+        run(&flow, &ctx, FlowAction::Finish { forced: false });
+        let runs_before = flow.detail(&ctx).runs.len();
+        assert!(runs_before >= 4);
+
+        // dragged to the Inbox and started again, back to Viết code with a note
+        flow.started(
+            &ctx,
+            Some(&CarryOn {
+                step: Some(StepKind::Implement),
+                note: Some("khách mở lại".into()),
+            }),
+        )
+        .unwrap();
+        let d = flow.detail(&ctx);
+        assert_eq!(
+            (d.status, d.current),
+            (FlowStatus::Ready, Some(StepKind::Implement))
+        );
+        let state = |k: StepKind| d.steps.iter().find(|s| s.kind == k).unwrap().state;
+        assert_eq!(state(StepKind::Analyze), StepState::Done);
+        assert_eq!(d.runs.len(), runs_before);
+        assert!(d.plan.is_some());
+        assert!(!flow.is_finished(1));
+
+        // a paused task started again keeps its place too
+        flow.started(&ctx, None).unwrap();
+        assert_eq!(flow.detail(&ctx).current, Some(StepKind::Implement));
+    }
+
+    #[test]
     fn auto_advance_runs_until_the_next_gate_and_mediums_wait_for_the_user() {
         let Some(s) = setup() else { return };
         let (flow, _) = flow_with(&s, false, happy(MEDIUM));
         let mut config = Config::default();
         config.steps.auto_advance = true;
         let ctx = s.ctx(1, &config);
-        flow.started(&ctx);
+        flow.started(&ctx, None).unwrap();
         let d = run(&flow, &ctx, FlowAction::Run);
         assert_eq!(d.gate.map(|g| g.kind), Some(GateKind::PlanReview));
         let d = run(&flow, &ctx, FlowAction::ApprovePlan);
@@ -3314,7 +3388,7 @@ mod tests {
             ok()
         });
         let ctx = s.ctx(1, &Config::default());
-        flow.started(&ctx);
+        flow.started(&ctx, None).unwrap();
         let d = run(&flow, &ctx, FlowAction::Run);
         assert_eq!(d.error.as_ref().map(|e| e.code.as_str()), Some("git.unexpected"));
         assert_eq!(d.gate.map(|g| g.kind), Some(GateKind::Error));
@@ -3345,7 +3419,7 @@ mod tests {
             }
         });
         let ctx = s.ctx(1, &Config::default());
-        flow.started(&ctx);
+        flow.started(&ctx, None).unwrap();
         let err = run(&flow, &ctx, FlowAction::Run).error.unwrap();
         assert_eq!(
             (err.code.as_str(), err.provider),
@@ -3372,8 +3446,8 @@ mod tests {
         });
         let one = s.ctx(1, &Config::default());
         let two = s.ctx(2, &Config::default());
-        flow.started(&one);
-        flow.started(&two);
+        flow.started(&one, None).unwrap();
+        flow.started(&two, None).unwrap();
         flow.act(one.clone(), FlowAction::Run).unwrap();
         assert_eq!(flow.detail(&one).status, FlowStatus::Running);
         assert_eq!(
@@ -3425,7 +3499,7 @@ mod tests {
         let Some(s) = setup() else { return };
         let (flow, fake) = flow_with(&s, false, happy(CLEAN));
         let ctx = s.ctx(1, &Config::default());
-        flow.started(&ctx);
+        flow.started(&ctx, None).unwrap();
         run(&flow, &ctx, FlowAction::Run);
         assert_eq!(
             flow.act(ctx.clone(), FlowAction::RejectPlan { feedback: " ".into() })
@@ -3469,7 +3543,7 @@ mod tests {
         config.steps.implement.effort = Some("high".into());
         config.steps.cross_review.model = Some("gpt-x".into());
         let ctx = s.ctx(1, &config);
-        flow.started(&ctx);
+        flow.started(&ctx, None).unwrap();
         let d = run(&flow, &ctx, FlowAction::Run);
         // nothing picked for analyze: no flag, and the model Claude reported is shown
         assert_eq!(d.steps[1].model.as_deref(), Some("m"));
@@ -3567,7 +3641,7 @@ mod tests {
             },
         );
         let ctx = s.ctx(1, &config);
-        flow.started(&ctx);
+        flow.started(&ctx, None).unwrap();
         assert!(flow.detail(&ctx).runs.is_empty());
         assert_eq!(flow.chat(&ctx, None).unwrap_err().code, "run.missing");
 

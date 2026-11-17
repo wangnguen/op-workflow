@@ -1,12 +1,13 @@
 // "Làm tiếp" (button, or a finished card dropped on Đang làm / Chờ push): carry on where the task
 // stopped, go back to Viết code with a note, or run again from a step it already reached. The
 // branch, brief, plan, findings and history stay; the task comes back ready, nothing runs yet.
-import { useEffect, useState, type ReactNode } from "react";
-import { stepLabel, vi } from "../../i18n/vi";
+import { useEffect, useState } from "react";
+import { vi } from "../../i18n/vi";
 import { errorMessage, flowAction, getTaskDetail } from "../../ipc/client";
-import type { FlowAction, StepKind, TaskColumn, TaskDetail } from "../../ipc/types";
+import type { StepKind, TaskColumn, TaskDetail } from "../../ipc/types";
 import { Icon } from "../../shared/ui/Icon";
-import { carryOnColumn, carryOnOptions, type CarryOnChoice } from "./carryOn";
+import { carryOnOptions } from "./carryOn";
+import { CarryOnFields, useCarryOn } from "./CarryOnFields";
 import "./flowDialogs.css";
 
 const c = vi.carryOn;
@@ -27,9 +28,6 @@ export function ContinueDialog({ wpId, taskId, detail, to, onClose, onDone }: Pr
   const [loaded, setLoaded] = useState<TaskDetail | undefined>(detail);
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
-  const [choice, setChoice] = useState<CarryOnChoice>();
-  const [from, setFrom] = useState<StepKind>();
-  const [note, setNote] = useState("");
 
   useEffect(() => {
     if (detail) return;
@@ -53,38 +51,18 @@ export function ContinueDialog({ wpId, taskId, detail, to, onClose, onDone }: Pr
   }, [busy, onClose]);
 
   const options = loaded ? carryOnOptions(loaded, to) : undefined;
-  const picked = choice ?? options?.preferred;
-  const fromStep = from ?? options?.from;
+  const carry = useCarryOn(options);
 
   const go = () => {
-    if (!options || !picked) return;
-    let action: FlowAction = { type: "reopen" };
-    let step: StepKind | undefined = options.keep;
-    if (picked === "implement") {
-      action = { type: "reopen", step: "implement", note: note.trim() || undefined };
-      step = "implement";
-    } else if (picked === "from" && fromStep) {
-      action = { type: "reopen", step: fromStep };
-      step = fromStep;
-    }
+    const p = carry.pick();
+    if (!p) return;
     setBusy(true);
     setError(undefined);
-    flowAction(wpId, action)
-      .then((d) => onDone(d, step, carryOnColumn(picked, options.keep)))
+    flowAction(wpId, { type: "reopen", ...p.carryOn })
+      .then((d) => onDone(d, p.step, p.column))
       .catch((e: unknown) => setError(errorMessage(e)))
       .finally(() => setBusy(false));
   };
-
-  const radio = (value: CarryOnChoice, title: string, hint: string, extra?: ReactNode) => (
-    <label className={`flow-choice${picked === value ? " is-picked" : ""}`}>
-      <input type="radio" name="carry-on" checked={picked === value} onChange={() => setChoice(value)} />
-      <span className="flow-choice-text">
-        <strong>{title}</strong>
-        <small className="faint">{hint}</small>
-        {extra}
-      </span>
-    </label>
-  );
 
   return (
     <div className="scrim flow-scrim" onPointerDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
@@ -109,47 +87,7 @@ export function ContinueDialog({ wpId, taskId, detail, to, onClose, onDone }: Pr
               {c.loading}
             </p>
           )}
-          {options && (
-            <div className="flow-choices" role="radiogroup" aria-labelledby="carry-title">
-              {options.keep &&
-                radio("keep", c.keep(stepLabel[options.keep]), options.keep === "pushSummary" ? c.keepPush : c.keepHere)}
-              {options.implement &&
-                radio(
-                  "implement",
-                  c.implement,
-                  c.implementHint,
-                  <textarea
-                    className="input flow-note"
-                    rows={3}
-                    value={note}
-                    placeholder={c.notePlaceholder}
-                    onFocus={() => setChoice("implement")}
-                    onChange={(e) => setNote(e.target.value)}
-                  />,
-                )}
-              {options.steps.length > 0 &&
-                radio(
-                  "from",
-                  c.from,
-                  c.fromHint,
-                  <select
-                    className="input flow-select"
-                    value={fromStep}
-                    onFocus={() => setChoice("from")}
-                    onChange={(e) => {
-                      setChoice("from");
-                      setFrom(e.target.value as StepKind);
-                    }}
-                  >
-                    {options.steps.map((s) => (
-                      <option key={s} value={s}>
-                        {stepLabel[s]}
-                      </option>
-                    ))}
-                  </select>,
-                )}
-            </div>
-          )}
+          {options && <CarryOnFields options={options} state={carry} labelledBy="carry-title" />}
           {error && <p className="note note--error">{error}</p>}
           {options && <small className="faint flow-fine">{c.keeps}</small>}
         </div>

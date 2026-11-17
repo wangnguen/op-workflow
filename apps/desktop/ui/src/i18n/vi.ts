@@ -312,6 +312,16 @@ export const vi = {
     loading: "Đang đọc tiến trình của task…",
     confirm: "Làm tiếp",
     cancel: "Huỷ",
+    /** in "Bắt đầu làm việc" for a task that finished a round */
+    startTitle: "Task này đã xong một vòng: làm tiếp từ đâu?",
+    startPaused: (step: string) =>
+      `Task này đang dở ở ${step}: bắt đầu lại sẽ làm tiếp đúng chỗ đó. Brief (kể cả phần bạn sửa và issue đã lấy), plan, lỗi review và lịch sử giữ nguyên; chỉ comment trong brief được cập nhật.`,
+    startKeeps:
+      "Brief (kể cả phần bạn sửa và issue đã lấy), plan, lỗi review và lịch sử giữ nguyên; chỉ comment trong brief được cập nhật.",
+    parkedLine: (finished: boolean) => (finished ? "Đã xong một vòng · dữ liệu cũ vẫn giữ" : "Đang dở · dữ liệu cũ vẫn giữ"),
+    parkedHint: "Bấm Mở task để xem brief, plan, lỗi review, Tiến trình và Chat của lần làm trước",
+    parkedStrip: "Task đang ở Inbox",
+    parkedStripNote: "Đây là dữ liệu của lần làm trước. Bấm Bắt đầu làm việc trên thẻ để làm tiếp.",
   },
   start: {
     deleteLocalHint: "Xoá nhánh này ở máy",
