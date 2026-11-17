@@ -6,6 +6,9 @@
 //! - Codex: a short-lived `codex app-server` answers `model/list` (models with their
 //!   `supportedReasoningEfforts`) and `config/read` (the configured model and effort).
 //!
+//! Permission modes come from `claude --help` (`--permission-mode` choices) and `codex exec
+//! --help` (`--sandbox` values and the approval flags).
+//!
 //! What "Theo máy" turns out to be comes from Claude's `settings.json` (`model`, `effortLevel`,
 //! or `ANTHROPIC_MODEL`) and Codex's config. Lists are cached for [`TTL`]. Each list a CLI gives
 //! is also saved in the probe folder; when a CLI is missing or does not answer, the last saved
@@ -19,7 +22,7 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use opw_agents::{claude, cli};
+use opw_agents::{claude, cli, codex};
 use opw_domain::view::{AgentCatalog, AgentKind, AgentModel, StepModels};
 use serde_json::{Value, json};
 
@@ -164,6 +167,7 @@ fn claude_defaults(
         error: None,
         read_at: None,
         models,
+        modes: Vec::new(),
     }
 }
 
@@ -279,6 +283,7 @@ pub fn codex_catalog(
         error: None,
         read_at: Some(read_at.to_owned()),
         models,
+        modes: Vec::new(),
     }
 }
 
@@ -312,6 +317,7 @@ pub fn codex_unread(error: String, toml: Option<&str>) -> AgentCatalog {
         cli_version: None,
         error: Some(error),
         read_at: None,
+        modes: Vec::new(),
     }
 }
 
@@ -408,6 +414,21 @@ fn read_codex(exe: &Path) -> Result<(Vec<Value>, Value, Option<String>), String>
 
 // ---------- shared ----------
 
+/// The permission modes a CLI's `--help` lists (`claude --help`, `codex exec --help`); empty when
+/// the help cannot be read. Costs no tokens.
+fn read_modes(exe: &Path, args: &[&str], parse: fn(&str) -> Vec<String>) -> Vec<String> {
+    hidden(
+        Command::new(exe)
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .output()
+    .ok()
+    .map(|o| parse(&String::from_utf8_lossy(&o.stdout)))
+    .unwrap_or_default()
+}
+
 fn send_line(stdin: &mut ChildStdin, line: &str) -> Result<(), String> {
     writeln!(stdin, "{line}")
         .and_then(|()| stdin.flush())
@@ -447,7 +468,9 @@ fn read_all(probe_dir: &Path) -> StepModels {
                         .and_then(Value::as_array)
                         .is_some_and(|m| !m.is_empty()) =>
                 {
-                    claude_catalog(&init, &settings, env_model.as_deref(), &now)
+                    let mut c = claude_catalog(&init, &settings, env_model.as_deref(), &now);
+                    c.modes = read_modes(&exe, &["--help"], claude::permission_modes);
+                    c
                 }
                 Ok(_) => claude_unread(
                     "Claude CLI không trả danh sách model".to_owned(),
@@ -465,7 +488,11 @@ fn read_all(probe_dir: &Path) -> StepModels {
                 );
             };
             match read_codex(&exe) {
-                Ok((list, config, ua)) => codex_catalog(&list, &config, ua.as_deref(), &now),
+                Ok((list, config, ua)) => {
+                    let mut c = codex_catalog(&list, &config, ua.as_deref(), &now);
+                    c.modes = read_modes(&exe, &["exec", "--help"], codex::permission_modes);
+                    c
+                }
                 Err(e) => codex_unread(e, codex_config_toml().as_deref()),
             }
         });
@@ -743,6 +770,7 @@ mod tests {
                 c.default_label,
                 c.default_effort
             );
+            println!("  modes: {:?}", c.modes);
             for x in &c.models {
                 println!(
                     "  {} | {} | {:?}{}",

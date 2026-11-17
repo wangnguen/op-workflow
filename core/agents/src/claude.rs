@@ -324,6 +324,51 @@ pub fn with_model(mut args: Vec<String>, choice: &ModelChoice) -> Vec<String> {
     args
 }
 
+/// `--permission-mode` choices as `claude --help` lists them (`(choices: "acceptEdits", …)`,
+/// possibly over several lines). Empty when the help has no such flag.
+pub fn permission_modes(help: &str) -> Vec<String> {
+    let Some(at) = help.find("--permission-mode") else {
+        return Vec::new();
+    };
+    // the flag's own text ends where the next flag starts
+    let rest = &help[at + "--permission-mode".len()..];
+    let end = rest.find("\n  -").unwrap_or(rest.len());
+    let text = &rest[..end];
+    let Some(open) = text.find("choices:") else {
+        return Vec::new();
+    };
+    let list = &text[open..text[open..].find(')').map_or(text.len(), |c| open + c)];
+    list.split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::trim)
+        .filter(|m| !m.is_empty() && m.chars().all(|c| c.is_ascii_alphanumeric()))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Modes in which Bash is not limited to the allow list (the prompt says so).
+pub fn mode_opens_shell(mode: Option<&str>) -> bool {
+    matches!(mode, Some("bypassPermissions" | "auto"))
+}
+
+/// Use the permission mode the user picked for the step instead of the app's (`None` keeps the
+/// args as they are).
+pub fn with_mode(mut args: Vec<String>, mode: Option<&str>) -> Vec<String> {
+    let Some(mode) = mode.map(str::trim).filter(|m| !m.is_empty()) else {
+        return args;
+    };
+    if let Some(i) = args.iter().position(|a| a == "--permission-mode") {
+        args.drain(i..(i + 2).min(args.len()));
+    }
+    let at = args
+        .iter()
+        .position(|a| a == "--output-format")
+        .unwrap_or(args.len());
+    args.splice(at..at, ["--permission-mode".to_owned(), mode.to_owned()]);
+    args
+}
+
 /// [2] Analyze: read only. `--restricted` also drops Bash/WebFetch and the user's settings
 /// files; the prompt (brief + plan template) comes on stdin.
 pub fn analyze_args(budget_usd: f64) -> Vec<String> {
@@ -575,6 +620,49 @@ pub fn push_summary_default_args(budget_usd: f64) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_modes_come_from_the_help_text() {
+        let help = concat!(
+            "  --permission-mode <mode>              Permission mode to use for the session\n",
+            "                                        (choices: \"acceptEdits\", \"auto\",\n",
+            "                                        \"bypassPermissions\", \"manual\",\n",
+            "                                        \"dontAsk\", \"plan\")\n",
+            "  --permission-prompts <target>         Who answers (\"host\" or \"none\")\n",
+        );
+        assert_eq!(
+            permission_modes(help),
+            [
+                "acceptEdits",
+                "auto",
+                "bypassPermissions",
+                "manual",
+                "dontAsk",
+                "plan"
+            ]
+        );
+        assert!(permission_modes("  --model <m>  Model\n").is_empty());
+    }
+
+    #[test]
+    fn the_picked_mode_replaces_the_apps() {
+        let code = code_args(None, 1.0, &[]);
+        let picked = with_mode(code.clone(), Some("bypassPermissions"));
+        let modes: Vec<&String> = picked
+            .windows(2)
+            .filter(|w| w[0] == "--permission-mode")
+            .map(|w| &w[1])
+            .collect();
+        assert_eq!(modes, ["bypassPermissions"]);
+        assert_eq!(picked.len(), code.len());
+        assert_eq!(with_mode(code.clone(), None), code);
+        // a step without a mode gets one before the output flags
+        let review = with_mode(review_args(1.0), Some("plan"));
+        let at = review.iter().position(|a| a == "--permission-mode").unwrap();
+        assert_eq!(review[at + 1], "plan");
+        assert_eq!(review[at + 2], "--output-format");
+        assert!(mode_opens_shell(Some("auto")) && !mode_opens_shell(Some("dontAsk")));
+    }
 
     #[test]
     fn failed_results_keep_errors_when_there_is_no_result_text() {

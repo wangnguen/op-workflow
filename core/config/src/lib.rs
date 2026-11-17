@@ -143,13 +143,18 @@ pub struct RepoConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StepConfig {
-    /// `claude` or `codex` (cross-review only for now).
+    /// `claude` or `codex`; `None` = the app's default for the step (Claude, and for Review chéo
+    /// the other AI than Viết code's).
     pub agent: Option<String>,
     /// Model the user picked in Settings (`claude-sonnet-5-5`, a Codex model). `None` = whatever
     /// the CLI on this machine uses; the app never picks one by itself.
     pub model: Option<String>,
     /// `low` … `max` (Claude `--effort`) or Codex `model_reasoning_effort`. `None` = the machine's.
     pub effort: Option<String>,
+    /// Permission mode the user picked: a Claude `--permission-mode` value or a Codex sandbox
+    /// (`read-only`, `workspace-write`, …), as the CLI lists them. `None` = what the app always
+    /// passed for the step.
+    pub permission_mode: Option<String>,
     pub max_budget_usd: Option<f64>,
     pub timeout_min: Option<u32>,
 }
@@ -184,14 +189,20 @@ pub struct StepChoice<'a> {
     pub agent: Option<&'a str>,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    pub permission_mode: Option<&'a str>,
 }
 
-/// Write `steps.<step>.agent/model/effort`; `None` removes the key (back to the machine's
+/// Write `steps.<step>.agent/model/effort/permissionMode`; `None` removes the key (back to the
 /// default). Budget, timeout and other keys stay.
 pub fn save_step_choice(path: &Path, c: &StepChoice<'_>) -> ConfigResult<()> {
     edit_file(path, |root| {
         let step = object_at(object_at(root, "steps"), c.step);
-        for (key, value) in [("agent", c.agent), ("model", c.model), ("effort", c.effort)] {
+        for (key, value) in [
+            ("agent", c.agent),
+            ("model", c.model),
+            ("effort", c.effort),
+            ("permissionMode", c.permission_mode),
+        ] {
             match value.map(str::trim).filter(|v| !v.is_empty()) {
                 Some(v) => {
                     step.insert(key.into(), Value::String(v.to_owned()));
@@ -633,9 +644,10 @@ mod tests {
             &path,
             &StepChoice {
                 step: "fix",
-                agent: None,
+                agent: Some("codex"),
                 model: Some("claude-sonnet-5-5"),
                 effort: Some("high"),
+                permission_mode: Some("workspace-write"),
             },
         )
         .unwrap();
@@ -646,6 +658,7 @@ mod tests {
                 agent: None,
                 model: Some(" "),
                 effort: Some("low"),
+                permission_mode: None,
             },
         )
         .unwrap();
@@ -653,6 +666,8 @@ mod tests {
         assert!(cfg.steps.auto_advance);
         assert_eq!(cfg.steps.fix.model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(cfg.steps.fix.effort.as_deref(), Some("high"));
+        assert_eq!(cfg.steps.fix.agent.as_deref(), Some("codex"));
+        assert_eq!(cfg.steps.fix.permission_mode.as_deref(), Some("workspace-write"));
         assert_eq!(cfg.steps.fix.max_budget_usd, Some(3.0));
         assert_eq!(cfg.steps.final_review.model, None);
         assert_eq!(cfg.steps.final_review.effort.as_deref(), Some("low"));
@@ -667,6 +682,7 @@ mod tests {
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!((cfg.steps.fix.model, cfg.steps.fix.effort), (None, None));
+        assert_eq!((cfg.steps.fix.agent, cfg.steps.fix.permission_mode), (None, None));
         assert_eq!(cfg.steps.fix.max_budget_usd, Some(3.0));
     }
 

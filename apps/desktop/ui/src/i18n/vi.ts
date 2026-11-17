@@ -149,10 +149,35 @@ export const vi = {
     activeProbeDefault: " (mặc định)",
     steps: {
       intro:
-        "Mỗi bước chọn model và effort riêng, trong danh sách app hỏi thẳng Claude Code và Codex trên máy bạn (có model mới thì bấm Đọc lại). \"Theo máy\" = không truyền cờ, CLI dùng mặc định của máy (như chạy tay). App không tự chọn thay bạn.",
+        "Mỗi bước chọn AI (Claude hoặc Codex), model, effort và chế độ quyền riêng, trong danh sách app hỏi thẳng Claude Code và Codex trên máy bạn (có model mới thì bấm Đọc lại). \"Theo máy\" = không truyền cờ, CLI dùng mặc định của máy (như chạy tay). App không tự chọn thay bạn.",
       agent: "Agent",
       model: "Model",
       effort: "Effort",
+      permission: "Quyền",
+      appMode: (mode: string | undefined) => (mode ? `Theo app (${mode})` : "Theo app (allowlist)"),
+      modeNotListed: (mode: string) => `${mode} (CLI không còn chế độ này)`,
+      /** what each permission mode does when the app runs the step in the background */
+      modeHint: {
+        acceptEdits: "acceptEdits: sửa file không hỏi; Bash chỉ chạy lệnh trong allowlist, lệnh khác bị từ chối.",
+        auto: "auto: Claude tự duyệt lệnh nó cho là an toàn, lệnh rủi ro bị từ chối.",
+        bypassPermissions: "bypassPermissions: bỏ mọi kiểm tra quyền, lệnh nào cũng chạy; chỉ còn hook của app chặn commit / push.",
+        manual: "manual: chỉ chạy thứ đã cho phép sẵn, còn lại cần hỏi nên chạy nền bị chặn gần hết, kể cả sửa file.",
+        dontAsk: "dontAsk: không hỏi; thứ chưa cho phép sẵn bị từ chối ngay, kể cả sửa file.",
+        plan: "plan: chỉ đọc và lập kế hoạch, không sửa file; bước viết code sẽ không ra code.",
+        "read-only": "read-only: Codex chỉ đọc, lệnh không ghi được file nào.",
+        "workspace-write": "workspace-write: Codex ghi trong repo (và thư mục bước cho thêm); ngoài đó và mạng bị chặn.",
+        "danger-full-access": "danger-full-access: không sandbox, ghi mọi nơi, có mạng; hook git của app vẫn chặn commit / push.",
+        "approve-for-me": "approve-for-me: như workspace-write, lệnh cần thêm quyền thì bộ duyệt tự động của Codex quyết.",
+        "dangerously-bypass-approvals-and-sandbox":
+          "dangerously-bypass-approvals-and-sandbox: bỏ cả sandbox lẫn duyệt, lệnh nào cũng chạy.",
+      } as Record<string, string>,
+      modeUnknown: (mode: string) => `${mode}: chế độ của CLI, app chưa có ghi chú cho chế độ này.`,
+      appModeHint: "Theo app: không truyền chế độ; Claude chạy với danh sách công cụ và allowlist app đặt cho bước này.",
+      codexNoAllow: "Codex không có allowlist (không có nút Cho phép lệnh này): sandbox quyết lệnh nào chạy.",
+      codexReview: "Codex dùng prompt review của app (không chạy /review-local của repo, không có ghi chú docs / test).",
+      codexPush: "Codex dùng prompt push summary của app (không chạy /push-summary của repo).",
+      crossDefault: (agent: string) => `Chưa chọn thì Review chéo dùng AI khác với Viết code (giờ là ${agent}).`,
+      browserLocked: "Test trình duyệt chạy Claude cho tới khi Codex qua một lần chạy thử thật với Chrome DevTools MCP.",
       machine: "Theo máy",
       machineIs: (what: string) => `Theo máy (${what})`,
       machineWas: (model: string) => `Theo máy (lần trước: ${model})`,
@@ -175,9 +200,10 @@ export const vi = {
         runs === 0
           ? "Chưa chạy lần nào"
           : [`${runs} lần chạy`, cost && `TB ${cost}`, time && `TB ${time}`].filter(Boolean).join(" · "),
-      agentNote: "Đổi agent thì model và effort về \"Theo máy\".",
+      agentNote: "Đổi agent thì model, effort và quyền về mặc định.",
       saved: "Đã lưu vào config.json",
-      flags: "Cờ: Claude --model / --effort, Codex -m / -c model_reasoning_effort",
+      flags:
+        "Cờ: Claude --model / --effort / --permission-mode, Codex -m / -c model_reasoning_effort / --sandbox. Đổi agent thì model, effort và quyền về mặc định.",
     },
   },
   quota: {
@@ -429,7 +455,7 @@ export const vi = {
     pickSevere: (n: number) => `Chọn ${n} lỗi critical / high`,
     pickSevereHint: "Bấm Sửa cho mọi lỗi critical và high đang mở (bỏ chọn được từng lỗi)",
     crossAgain: (round: number) => (round === 0 ? "Review chéo (vòng 1)" : `Review chéo lại (vòng ${round + 1})`),
-    crossAgainHint: "AI còn lại (mặc định Codex) review toàn bộ thay đổi thêm một vòng; lỗi mới lại chờ bạn chọn",
+    crossAgainHint: "AI của Review chéo (mặc định AI khác với Viết code) review toàn bộ thay đổi thêm một vòng; lỗi mới lại chờ bạn chọn",
     noCross: (step: string, again: boolean) => (again ? `Không, chạy lại ${step}` : `Không, sang ${step}`),
     quota: {
       note: (who: string, window: string, used: number) => `${who} ${window} đã dùng ${Math.round(used)}%`,
@@ -868,9 +894,9 @@ export const stepHint: Record<StepKind, string> = {
     "App tự chạy tsc, eslint, prettier trên file đã đổi ngay sau Viết code và sau mỗi lần Sửa lỗi (không tốn token). Lỗi ở file đã đổi thì AI sửa, tối đa 2 lần; lỗi cũ ở file khác bỏ qua. Lệnh riêng của repo: `repos.<repo>.checks` trong config.json",
   harness:
     "Không bắt buộc (bật/tắt ở cổng Duyệt plan): AI dựng harness ngoài repo trong thư mục scratch của task, dùng lại thư viện harness của chính repo, kèm negative control. App chạy harness, lỗi FAIL vào cổng chọn lỗi; sau mỗi lần Sửa lỗi app tự chạy lại (không tốn token). Harness dùng lại được thì lưu vào thư viện.",
-  reviewLocal: "/review-local lần đầu, ngay sau khi code",
+  reviewLocal: "/review-local (hoặc prompt review của app) lần đầu, ngay sau khi code",
   fix: "AI sửa các lỗi của Tự review",
-  crossReview: "AI còn lại (Codex) review chéo phần đã sửa, chỉ đọc",
+  crossReview: "AI khác với AI viết code (mặc định Codex) review chéo phần đã sửa, chỉ đọc",
   fixCross: "AI sửa các lỗi của Review chéo / Test trình duyệt / Review chốt",
   finalReview: "/review-local lần chốt, sau Test trình duyệt nên xem cả phần sửa sau test; lỗi nào cũng chờ bạn chọn có cho AI sửa không",
   browserTest:

@@ -5,7 +5,7 @@ import type { AgentCatalog, AgentKind, SettingsView, StepChoiceRequest, StepMode
 import { formatDateTime, formatDuration, formatHourMinute, formatUsd } from "../../shared/format";
 import { stepNumber } from "../../shared/steps";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
-import { effortForModel, effortOptions, modelEntry, modelOptions } from "./stepChoice";
+import { agentNotes, effortForModel, effortOptions, modeHint, modelEntry, modelOptions, modeOptions } from "./stepChoice";
 
 const t = vi.settings.steps;
 
@@ -18,8 +18,8 @@ interface Props {
   onReadModels: () => void;
 }
 
-/** Settings → Các bước AI: model and effort per step, picked from what the CLIs on the machine
- *  list, with past runs for reference. */
+/** Settings → Các bước AI: agent, model, effort and permission mode per step, picked from what
+ *  the CLIs on the machine list, with past runs for reference. */
 export function StepsPage({ view, onSaved, models, modelsBusy, onReadModels }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [savedStep, setSavedStep] = useState<string | null>(null);
@@ -98,6 +98,7 @@ function StepRow({ number, row, catalog, saved, onSave }: {
       agent: row.agentChoice ? agent : undefined,
       model: row.model,
       effort: row.effort,
+      permissionMode: row.permissionMode,
       ...patch,
     });
   /** A new model keeps the effort only if that model takes it. */
@@ -109,6 +110,7 @@ function StepRow({ number, row, catalog, saved, onSave }: {
   };
   const models = modelOptions(row, catalog);
   const efforts = effortOptions(row, catalog);
+  const modes = modeOptions(row, catalog);
   const entry = modelEntry(catalog, row.model);
   const loading = catalog === undefined;
   const about = entry?.description ? `${entry.label}: ${entry.description}.` : undefined;
@@ -134,7 +136,7 @@ function StepRow({ number, row, catalog, saved, onSave }: {
           <span className="faint">{t.agent}</span>
           {row.agentChoice ? (
             <SegmentedControl
-              options={(["codex", "claude"] as const).map((a) => ({ value: a, label: agentLabel[a] }))}
+              options={(["claude", "codex"] as const).map((a) => ({ value: a, label: agentLabel[a] }))}
               value={agent === "codex" ? "codex" : "claude"}
               onChange={(a) => {
                 setResetNote(null);
@@ -182,8 +184,31 @@ function StepRow({ number, row, catalog, saved, onSave }: {
           </select>
         </label>
       </div>
+      {/* its own row in every step, so all rows look alike whatever the mode's name */}
+      <div className="set-step-controls set-step-mode">
+        <label className="set-step-field set-step-field--mode">
+          <span className="faint">{t.permission}</span>
+          <select
+            className="input"
+            disabled={loading}
+            title={loading ? t.waitList : undefined}
+            value={row.permissionMode ?? ""}
+            onChange={(e) => {
+              setResetNote(null);
+              send({ permissionMode: e.target.value || undefined });
+            }}
+          >
+            {modes.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="set-row-hint set-step-mode-hint">{modeHint(row)}</span>
+      </div>
       {resetNote && <span className="set-row-hint set-warn">{resetNote}</span>}
-      <span className="set-row-hint">{[about, row.agentChoice ? t.agentNote : undefined].filter(Boolean).join(" ")}</span>
+      <span className="set-row-hint set-step-about">{[about, ...agentNotes(row)].filter(Boolean).join(" ")}</span>
     </div>
   );
 }

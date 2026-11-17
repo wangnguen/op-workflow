@@ -588,6 +588,28 @@
   align-self: flex-start;
   margin: 7px 0;
 }
+/* the model's line and the agent's notes: two lines kept, so switching Claude ↔ Codex (which
+   adds or drops a note) moves nothing below */
+.set-step-about {
+  min-height: 35px;
+}
+/* Quyền: a fixed width in every step, what the mode does beside it */
+.set-step-mode {
+  flex-wrap: nowrap;
+}
+.set-step-field--mode select {
+  width: 240px;
+  min-width: 240px;
+  text-overflow: ellipsis;
+}
+.set-step-mode-hint {
+  flex: 1;
+  min-width: 0;
+  /* two lines: every mode's note fits, so picking another one moves nothing below */
+  min-height: 35px;
+  display: flex;
+  align-items: center;
+}
 
 /* Repo & nhánh → Thư viện harness: the folder, changed in place */
 .set-harness {

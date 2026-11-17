@@ -3,12 +3,13 @@ import { visibleAlerts } from "../../app/alerts";
 import { mockSetStepChoice, mockSettings, mockStepModels } from "../../ipc/mock";
 import type { AlertView, StepSetting } from "../../ipc/types";
 import { modelName, modelText } from "../../shared/models";
-import { effortForModel, effortOptions, modelOptions } from "./stepChoice";
+import { agentNotes, effortForModel, effortOptions, modeHint, modelOptions, modeOptions } from "./stepChoice";
 
 const row = (over: Partial<StepSetting>): StepSetting => ({
   step: "fix",
   agent: "claude",
   agentChoice: false,
+  agentDefault: "claude",
   runs: 0,
   ...over,
 });
@@ -67,6 +68,34 @@ describe("model and effort options", () => {
     expect(effortForModel(undefined, "xhigh", "claude-opus-4-6")).toBe("xhigh");
   });
 
+  it("permission modes come from the CLI, after what the app passes", () => {
+    const fix = modeOptions(row({ permissionDefault: "acceptEdits" }), claude);
+    expect(fix[0]).toEqual({ value: "", label: "Theo app (acceptEdits)" });
+    expect(values(fix)).toEqual(["", ...claude.modes]);
+    expect(modeOptions(row({ step: "reviewLocal" }), claude)[0]?.label).toBe("Theo app (allowlist)");
+    expect(values(modeOptions(row({ agent: "codex", permissionDefault: "read-only" }), codex))).toEqual(["", ...codex.modes]);
+    // a saved mode the CLI no longer lists, and the current pick while the list loads
+    const old = modeOptions(row({ permissionMode: "yolo" }), claude);
+    expect(old[old.length - 1]).toEqual({ value: "yolo", label: "yolo (CLI không còn chế độ này)" });
+    expect(modeOptions(row({ permissionMode: "plan" }), undefined)).toEqual([
+      { value: "", label: "Theo app (allowlist)" },
+      { value: "plan", label: "plan" },
+    ]);
+  });
+
+  it("says what the mode and the agent mean for the step", () => {
+    expect(modeHint(row({ permissionDefault: "acceptEdits" }))).toMatch(/^acceptEdits: sửa file không hỏi/);
+    expect(modeHint(row({ permissionDefault: "acceptEdits", permissionMode: "plan" }))).toMatch(/^plan:/);
+    expect(modeHint(row({ step: "reviewLocal" }))).toMatch(/^Theo app:/);
+    expect(modeHint(row({ permissionMode: "newMode" }))).toMatch(/chưa có ghi chú/);
+    expect(agentNotes(row({ step: "reviewLocal", agent: "codex" })).join(" ")).toMatch(/không chạy \/review-local/);
+    expect(agentNotes(row({ step: "pushSummary", agent: "codex" })).join(" ")).toMatch(/không chạy \/push-summary/);
+    expect(agentNotes(row({ step: "implement", agent: "codex" })).join(" ")).toMatch(/không có allowlist/);
+    expect(agentNotes(row({ step: "implement" }))).toEqual([]);
+    expect(agentNotes(row({ step: "crossReview", agentDefault: "codex" })).join(" ")).toMatch(/giờ là Codex/);
+    expect(agentNotes(row({ step: "browserTest" })).join(" ")).toMatch(/chạy thử thật/);
+  });
+
   it("names models the short way", () => {
     expect(modelName("claude-sonnet-5-5")).toBe("Sonnet 5.5");
     expect(modelName("claude-opus-5-5-20261101")).toBe("Opus 5.5");
@@ -94,6 +123,25 @@ describe("model and effort options", () => {
     mockSetStepChoice({ step: "crossReview" });
     mockSetStepChoice({ step: "fix" });
     expect(fix()?.model).toBeUndefined();
+  });
+
+  it("the preview switches agents and modes like the core", () => {
+    const step = (s: string) => mockSettings().steps?.find((x) => x.step === s);
+    expect(step("implement")).toMatchObject({ agent: "claude", agentChoice: true, permissionDefault: "acceptEdits" });
+    expect(step("browserTest")?.agentChoice).toBe(false);
+    expect(step("crossReview")?.agent).toBe("codex");
+    // Viết code on Codex: Review chéo nobody picked follows to Claude
+    mockSetStepChoice({ step: "implement", agent: "codex" });
+    expect(step("implement")).toMatchObject({ agent: "codex", permissionDefault: "workspace-write" });
+    expect(step("crossReview")).toMatchObject({ agent: "claude", agentDefault: "claude" });
+    expect(() => mockSetStepChoice({ step: "implement", agent: "codex", permissionMode: "acceptEdits" })).toThrow();
+    mockSetStepChoice({ step: "implement", agent: "codex", permissionMode: "danger-full-access" });
+    expect(step("implement")?.permissionMode).toBe("danger-full-access");
+    expect(() => mockSetStepChoice({ step: "analyze", permissionMode: "bypassPermissions" })).toThrow();
+    expect(() => mockSetStepChoice({ step: "browserTest", agent: "codex" })).toThrow();
+    mockSetStepChoice({ step: "implement", agent: "claude" });
+    expect(step("implement")).toMatchObject({ agent: "claude", permissionMode: undefined });
+    expect(step("crossReview")?.agent).toBe("codex");
   });
 });
 

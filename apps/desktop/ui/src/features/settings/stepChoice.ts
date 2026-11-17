@@ -68,6 +68,39 @@ export function effortOptions(row: StepSetting, catalog: AgentCatalog | undefine
   return out;
 }
 
+/** Permission modes: "Theo app" (with what the app passes) first, then what the CLI lists, and
+ *  the saved pick if the CLI no longer lists it. Without a catalog: the current pick only. */
+export function modeOptions(row: StepSetting, catalog: AgentCatalog | undefined): Option[] {
+  const out: Option[] = [{ value: "", label: t.appMode(row.permissionDefault) }];
+  const listed = (catalog?.modes ?? []).map((m) => ({ value: m, label: m }));
+  out.push(...listed);
+  if (row.permissionMode && !listed.some((o) => o.value === row.permissionMode)) {
+    const known = catalog !== undefined && catalog.modes.length > 0;
+    out.push({ value: row.permissionMode, label: known ? t.modeNotListed(row.permissionMode) : row.permissionMode });
+  }
+  return out;
+}
+
+/** One line on what the step's mode does in a background run. */
+export function modeHint(row: StepSetting): string {
+  const mode = row.permissionMode ?? row.permissionDefault;
+  if (!mode) return t.appModeHint;
+  return t.modeHint[mode] ?? t.modeUnknown(mode);
+}
+
+/** Notes on the step's agent: what Codex cannot do there, how Review chéo picks one. */
+export function agentNotes(row: StepSetting): string[] {
+  const out: string[] = [];
+  if (row.step === "browserTest") out.push(t.browserLocked);
+  if (row.step === "crossReview") out.push(t.crossDefault(row.agentDefault === "codex" ? "Codex" : "Claude"));
+  if (row.agent === "codex") {
+    if (row.step === "reviewLocal" || row.step === "finalReview") out.push(t.codexReview);
+    else if (row.step === "pushSummary") out.push(t.codexPush);
+    else if (row.step === "implement" || row.step === "fix" || row.step === "harness") out.push(t.codexNoAllow);
+  }
+  return out;
+}
+
 /** The effort to keep when the model changes: dropped when the new model does not take it. */
 export function effortForModel(catalog: AgentCatalog | undefined, effort: string | undefined, model: string | undefined): string | undefined {
   if (!effort || !catalog) return effort;

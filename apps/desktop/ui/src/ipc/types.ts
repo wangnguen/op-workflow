@@ -258,6 +258,8 @@ export interface AgentCatalog {
   error?: string;
   /** RFC 3339 */
   readAt?: string;
+  /** permission modes the CLI's --help lists (Claude --permission-mode, Codex --sandbox + flags) */
+  modes: string[];
 }
 
 export interface AgentModel {
@@ -275,8 +277,14 @@ export interface AgentModel {
 export interface StepSetting {
   step: StepKind;
   agent: AgentKind;
-  /** the agent of this step can be switched (cross-review only for now) */
+  /** the agent of this step can be switched (every AI step but Test trình duyệt) */
   agentChoice: boolean;
+  /** the agent used when none is picked (Review chéo: the other AI than Viết code's) */
+  agentDefault: AgentKind;
+  /** permission mode picked; absent = `permissionDefault` */
+  permissionMode?: string;
+  /** what the app passes when none is picked ("acceptEdits", "read-only"); absent = no flag */
+  permissionDefault?: string;
   model?: string;
   effort?: string;
   /** effort the app passes when none is picked (push summary: "low") */
@@ -295,6 +303,7 @@ export interface StepChoiceRequest {
   agent?: AgentKind;
   model?: string;
   effort?: string;
+  permissionMode?: string;
 }
 
 /** Windows notifications by kind; the bell lists every alert either way. */

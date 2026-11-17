@@ -1777,10 +1777,13 @@ impl AppService {
             .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
         let config = self.config();
         let agent = steps::validate(req, &config, self.models.cached().as_ref())?;
-        let agent_key = (req.step == StepKind::CrossReview).then_some(match agent {
-            opw_domain::view::AgentKind::Codex => "codex",
-            _ => "claude",
-        });
+        // only an agent other than the step's default is written, so Review chéo keeps taking
+        // the other AI than Viết code's until the user picks one that differs
+        let agent_key =
+            (req.agent.is_some() && agent != flow::agent_default(req.step, &config)).then_some(match agent {
+                opw_domain::view::AgentKind::Codex => "codex",
+                _ => "claude",
+            });
         opw_config::save_step_choice(
             path,
             &opw_config::StepChoice {
@@ -1788,6 +1791,7 @@ impl AppService {
                 agent: agent_key,
                 model: req.model.as_deref(),
                 effort: req.effort.as_deref(),
+                permission_mode: req.permission_mode.as_deref(),
             },
         )
         .map_err(|e| ApiError::new("config.write", e.to_string()))?;

@@ -663,11 +663,16 @@ export function mockStepModels(): StepModels {
         defaultEffort: "xhigh",
         fromCli: false,
         error: "Chưa cài Codex CLI (không thấy codex trên PATH)",
+        modes: [],
       },
     };
   }
   return ok;
 }
+
+/** Permission modes as the CLIs' --help list them (Claude Code 2.1.326, Codex 0.169.0). */
+const CLAUDE_MODES = ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"];
+const CODEX_MODES = ["read-only", "workspace-write", "danger-full-access", "approve-for-me", "dangerously-bypass-approvals-and-sandbox"];
 
 function mockGoodModels(readAt: string): StepModels {
   return {
@@ -688,6 +693,7 @@ function mockGoodModels(readAt: string): StepModels {
       fromCli: true,
       cliVersion: "2.1.325",
       readAt,
+      modes: CLAUDE_MODES,
     },
     codex: {
       agent: "codex",
@@ -702,6 +708,7 @@ function mockGoodModels(readAt: string): StepModels {
       fromCli: true,
       cliVersion: "0.169.0",
       readAt,
+      modes: CODEX_MODES,
     },
   };
 }
@@ -718,15 +725,34 @@ const MOCK_STEP_HISTORY: Partial<Record<StepKind, [number, number | undefined, n
 };
 const mockPicks: Partial<Record<StepKind, Omit<StepChoiceRequest, "step">>> = {};
 
+/** Same rules as the core (`flow::agent_for`): the pick, else Claude; Review chéo takes the other
+ *  AI than Viết code's; Test trình duyệt stays on Claude. */
+function mockAgentDefault(step: StepKind): AgentKind {
+  if (step !== "crossReview") return "claude";
+  return mockAgentFor("implement") === "codex" ? "claude" : "codex";
+}
+function mockAgentFor(step: StepKind): AgentKind {
+  if (step === "browserTest") return "claude";
+  return mockPicks[step]?.agent ?? mockAgentDefault(step);
+}
+function mockPermissionDefault(step: StepKind, agent: AgentKind): string | undefined {
+  const writes = step === "implement" || step === "fix" || step === "harness";
+  if (agent === "codex") return writes ? "workspace-write" : "read-only";
+  return writes ? "acceptEdits" : undefined;
+}
+
 function mockStepSettings(): StepSetting[] {
   return AI_STEPS.map((step) => {
     const pick = mockPicks[step] ?? {};
-    const agent: AgentKind = step === "crossReview" ? (pick.agent ?? "codex") : "claude";
+    const agent = mockAgentFor(step);
     const [runs, avgCostUsd, avgSeconds] = MOCK_STEP_HISTORY[step] ?? [0, undefined, 0];
     return {
       step,
       agent,
-      agentChoice: step === "crossReview",
+      agentChoice: step !== "browserTest",
+      agentDefault: mockAgentDefault(step),
+      permissionMode: pick.permissionMode,
+      permissionDefault: mockPermissionDefault(step, agent),
       model: pick.model,
       effort: pick.effort,
       effortDefault: step === "pushSummary" && agent === "claude" ? "low" : undefined,
@@ -743,7 +769,10 @@ export function mockSetStepChoice(choice: StepChoiceRequest): SettingsView {
   if (choice.model && !/^[A-Za-z0-9._:/[\]-]+$/.test(choice.model)) {
     throw { code: "step.choice", message: `Tên model không hợp lệ: ${choice.model}` };
   }
-  const agent = choice.step === "crossReview" ? (choice.agent ?? mockPicks.crossReview?.agent ?? "codex") : "claude";
+  if (choice.step === "browserTest" && choice.agent === "codex") {
+    throw { code: "step.choice", message: "Test trình duyệt chạy bằng Claude cho tới khi Codex qua một lần chạy thử thật" };
+  }
+  const agent = choice.agent ?? mockAgentFor(choice.step);
   const catalog = mockStepModels()[agent === "codex" ? "codex" : "claude"];
   // only listed models; a saved one the list no longer has may stay (same rule as the core)
   if (choice.model && catalog.fromCli && choice.model !== mockPicks[choice.step]?.model && !catalog.models.some((m) => m.id === choice.model)) {
@@ -753,7 +782,16 @@ export function mockSetStepChoice(choice: StepChoiceRequest): SettingsView {
     const problem = mockEffortProblem(catalog, choice.model, choice.effort);
     if (problem) throw { code: "step.choice", message: problem };
   }
-  mockPicks[choice.step] = { agent: choice.agent, model: choice.model, effort: choice.effort };
+  const mode = choice.permissionMode;
+  if (mode && mode !== mockPicks[choice.step]?.permissionMode && catalog.modes.length > 0 && !catalog.modes.includes(mode)) {
+    throw { code: "step.choice", message: `${agent === "codex" ? "Codex" : "Claude Code"} trên máy không có chế độ ${mode}` };
+  }
+  if (mode === "bypassPermissions" && choice.step === "analyze") {
+    throw { code: "step.choice", message: "Phân tích chạy Claude ở chế độ chỉ đọc (--restricted), không nhận bypassPermissions" };
+  }
+  // only an agent other than the default is kept, so Review chéo goes on following Viết code
+  const keep = choice.agent && choice.agent !== mockAgentDefault(choice.step) ? choice.agent : undefined;
+  mockPicks[choice.step] = { agent: keep, model: choice.model, effort: choice.effort, permissionMode: mode };
   return mockSettings();
 }
 

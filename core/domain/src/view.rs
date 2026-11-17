@@ -404,6 +404,10 @@ pub struct AgentCatalog {
     /// When the list was read (RFC 3339).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_at: Option<String>,
+    /// Permission modes the CLI offers, as its `--help` lists them: Claude's `--permission-mode`
+    /// choices, Codex's `--sandbox` values plus its approval flags. Empty when not read.
+    #[serde(default)]
+    pub modes: Vec<String>,
 }
 
 /// One model in an agent's list.
@@ -433,8 +437,17 @@ pub struct AgentModel {
 pub struct StepSetting {
     pub step: StepKind,
     pub agent: AgentKind,
-    /// The agent of this step can be switched (only cross-review for now).
+    /// The agent of this step can be switched (every AI step but Test trình duyệt for now).
     pub agent_choice: bool,
+    /// The agent the step uses when none is picked (Review chéo: the other AI than Viết code's).
+    pub agent_default: AgentKind,
+    /// Permission mode picked for this step; `None` = `permission_default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// What the app passes when none is picked (`acceptEdits`, `read-only`, …); `None` = no flag,
+    /// the CLI's own default with the app's allow list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_default: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -464,6 +477,8 @@ pub struct StepChoiceRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 /// Windows notifications by kind; the bell lists every alert either way.

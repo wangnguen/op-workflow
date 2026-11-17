@@ -146,8 +146,11 @@ impl Launcher for CliLauncher {
 #[serde(rename_all = "camelCase", default)]
 struct Saved {
     workflow: Workflow,
-    /// Claude session S1: analyze, then implement and fix resume it.
+    /// Code session: the analysis's, then Viết code / Sửa lỗi go on in it when the same AI
+    /// runs them (`session_agent`; `None` = Claude, as every save before 6b).
     session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_agent: Option<AgentKind>,
     /// Issue number for the push summary.
     issue: Option<u64>,
     error: Option<FlowError>,
@@ -179,6 +182,22 @@ struct Saved {
     browser: Option<BrowserState>,
     /// The usage limit ended a run in the middle: which, and when it can go on.
     cut: Option<CutRun>,
+}
+
+impl Saved {
+    /// The code session when `agent` wrote it: another AI cannot go on in it.
+    fn session_of(&self, agent: AgentKind) -> Option<String> {
+        self.session
+            .clone()
+            .filter(|_| self.session_agent.unwrap_or(AgentKind::Claude) == agent)
+    }
+
+    fn set_session(&mut self, id: &str, agent: AgentKind) {
+        if !id.is_empty() {
+            self.session = Some(id.to_owned());
+            self.session_agent = Some(agent);
+        }
+    }
 }
 
 /// A run the usage limit ended in the middle.
@@ -374,15 +393,69 @@ impl TaskCtx {
     }
 }
 
+/// The AI a step runs with: what the user picked in Settings (`steps.<step>.agent`), else
+/// [`agent_default`].
 pub fn agent_for(step: StepKind, config: &Config) -> AgentKind {
     match step {
-        StepKind::CrossReview if config.steps.cross_review.agent.as_deref() == Some("claude") => {
-            AgentKind::Claude
-        }
-        StepKind::CrossReview => AgentKind::Codex,
-        // the app runs the commands; Claude only steps in to fix what they report
+        // the app runs the commands; the AI of Sửa lỗi only steps in to fix what they report
+        StepKind::Checks => AgentKind::Shell,
+        StepKind::Intake => AgentKind::Claude,
+        // Codex only after a real run shows Chrome DevTools MCP works in `codex exec` (6d)
+        StepKind::BrowserTest => AgentKind::Claude,
+        _ => picked_agent(step, config).unwrap_or_else(|| agent_default(step, config)),
+    }
+}
+
+/// The agent written in `steps.<step>.agent`, if it names one.
+fn picked_agent(step: StepKind, config: &Config) -> Option<AgentKind> {
+    match step_config(step, &config.steps)?.agent.as_deref().map(str::trim) {
+        Some("claude") => Some(AgentKind::Claude),
+        Some("codex") => Some(AgentKind::Codex),
+        _ => None,
+    }
+}
+
+/// The AI of a step nobody picked one for: Claude, except Review chéo, which takes the other AI
+/// than Viết code's so the change gets a second pair of eyes.
+pub fn agent_default(step: StepKind, config: &Config) -> AgentKind {
+    match step {
+        StepKind::CrossReview => match agent_for(StepKind::Implement, config) {
+            AgentKind::Codex => AgentKind::Claude,
+            _ => AgentKind::Codex,
+        },
         StepKind::Checks => AgentKind::Shell,
         _ => AgentKind::Claude,
+    }
+}
+
+/// Steps whose agent can be switched in Settings.
+pub fn agent_switchable(step: StepKind) -> bool {
+    !matches!(step, StepKind::Intake | StepKind::Checks | StepKind::BrowserTest)
+}
+
+/// The permission mode picked for a step (`steps.<step>.permissionMode`).
+pub fn permission_mode(step: StepKind, config: &Config) -> Option<String> {
+    step_config(step, &config.steps)?
+        .permission_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_owned)
+}
+
+/// What the app passes when no mode is picked: Claude edits without asking in the steps that
+/// write (Bash still only from the allow list); Codex writes in its workspace there and reads
+/// only elsewhere. `None` = no flag (Claude's own default, with the app's tool and allow lists).
+pub fn permission_default(step: StepKind, agent: AgentKind) -> Option<&'static str> {
+    let writes = matches!(
+        step,
+        StepKind::Implement | StepKind::Fix | StepKind::FixCross | StepKind::Harness
+    );
+    match agent {
+        AgentKind::Claude if writes => Some("acceptEdits"),
+        AgentKind::Codex if writes => Some("workspace-write"),
+        AgentKind::Codex => Some("read-only"),
+        _ => None,
     }
 }
 
@@ -465,12 +538,16 @@ pub fn default_effort(step: StepKind, config: &Config) -> Option<&'static str> {
 fn command_label(step: StepKind, agent: AgentKind, repo: Option<&Path>) -> Option<String> {
     let has = |name: &str| repo.is_some_and(|r| r.join(".claude").join("commands").join(name).is_file());
     Some(match step {
+        StepKind::ReviewLocal | StepKind::FinalReview if agent == AgentKind::Codex => {
+            "prompt review của app, codex exec chỉ đọc".into()
+        }
         StepKind::ReviewLocal | StepKind::FinalReview if has("review-local.md") => {
             "/review-local của repo".into()
         }
         StepKind::ReviewLocal | StepKind::FinalReview => "prompt review của app".into(),
         StepKind::CrossReview if agent == AgentKind::Codex => "codex exec, chỉ đọc".into(),
         StepKind::CrossReview => "prompt review của app".into(),
+        StepKind::PushSummary if agent == AgentKind::Codex => "prompt push summary của app (Codex)".into(),
         StepKind::PushSummary if has("push-summary.md") => "/push-summary của repo".into(),
         StepKind::PushSummary => "prompt push summary của app".into(),
         _ => return None,
@@ -839,6 +916,19 @@ struct Claim {
     agent: AgentKind,
     stop: Arc<AtomicBool>,
     choice: ModelChoice,
+    /// Permission mode picked in Settings; `None` = the app's own flags for the step.
+    mode: Option<String>,
+}
+
+/// What an AI run gave back, whichever CLI ran it.
+struct AiRun {
+    text: String,
+    /// Claude session / Codex thread (empty when the CLI kept none).
+    session: String,
+    /// USD; Codex reports none.
+    cost: Option<f64>,
+    /// Calls refused by the allow list (Claude only).
+    denials: usize,
 }
 
 /// What a step produced: the event for the state machine, one line about the result (the
@@ -1505,8 +1595,8 @@ fn resume_command(step: StepKind, agent: AgentKind, session: Option<&str>) -> Op
         !s.is_empty() && s.len() <= 80 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
     })?;
     match agent {
-        AgentKind::Codex => Some(format!("codex resume {id}")),
         _ if step == StepKind::PushSummary => None,
+        AgentKind::Codex => Some(format!("codex resume {id}")),
         _ => Some(format!("claude --resume {id}")),
     }
 }
@@ -2564,6 +2654,7 @@ impl Inner {
         }
         let agent = ctx.agent_for(step);
         let choice = model_choice(step, &ctx.config);
+        let mode = permission_mode(step, &ctx.config).filter(|_| agent != AgentKind::Shell);
         let command = command_label(step, agent, ctx.repo().as_deref());
         let stop = Arc::new(AtomicBool::new(false));
         entry.run = Some(Running {
@@ -2586,6 +2677,7 @@ impl Inner {
         let how = [
             Some(agent_name(agent).to_owned()),
             Some(model_text(choice.model.as_deref(), choice.effort.as_deref())).filter(|m| !m.is_empty()),
+            mode.clone().map(|m| format!("quyền {m}")),
             command,
         ];
         let how: Vec<String> = how.into_iter().flatten().collect();
@@ -2598,6 +2690,7 @@ impl Inner {
                 agent,
                 stop,
                 choice,
+                mode,
             },
             text,
         ))
@@ -3162,14 +3255,14 @@ impl Inner {
         }
     }
 
-    /// Run Codex for one step; its last message comes back.
+    /// Run Codex for one step; its last message and its thread id come back.
     fn run_codex(
         &self,
         ctx: &TaskCtx,
         step: StepKind,
         job: &Job,
         claim: &Claim,
-    ) -> Result<String, FlowError> {
+    ) -> Result<(String, String), FlowError> {
         let stop: &AtomicBool = &claim.stop;
         use std::io::Write;
         let wp_id = ctx.row.wp_id;
@@ -3254,7 +3347,27 @@ impl Inner {
                 format!("Codex dừng lỗi: {}", exit_why(&outcome)),
             ));
         }
-        Ok(last)
+        Ok((last, thread))
+    }
+
+    /// Run the step's AI on `job` (built for that AI); text, session and cost come back alike.
+    fn run_ai(&self, ctx: &TaskCtx, step: StepKind, job: &Job, claim: &Claim) -> Result<AiRun, FlowError> {
+        if claim.agent == AgentKind::Codex {
+            let (text, thread) = self.run_codex(ctx, step, job, claim)?;
+            return Ok(AiRun {
+                text,
+                session: thread,
+                cost: None,
+                denials: 0,
+            });
+        }
+        let r = self.run_claude(ctx, step, job, claim)?;
+        Ok(AiRun {
+            text: r.text,
+            session: r.session_id,
+            cost: Some(r.cost_usd),
+            denials: r.denials.len(),
+        })
     }
 
     fn round_of(&self, wp_id: u64) -> u8 {
@@ -3575,27 +3688,83 @@ fn run_checks(
             };
             return Err(flow_error("checks.failed", message));
         }
-        // Claude fixes them in the code session
-        let allowed = config.allow_bash.clone();
-        let session = inner.with_saved(wp_id, |s| s.session.clone()).flatten();
-        let args = claude::with_model(
-            claude::code_args(session.as_deref(), budget, &allowed),
-            &model_choice(StepKind::Fix, &ctx.config),
-        );
-        let job = Job {
-            agent: Provider::Claude,
-            args,
-            cwd: repo.to_path_buf(),
-            stdin: Some(prompts::fix_checks(&checks::report(&results), &allowed)),
-            timeout,
+        // the AI of Sửa lỗi fixes them, in its code session when it has one
+        let fixer = Claim {
+            step,
+            agent: agent_for(StepKind::Fix, &ctx.config),
+            stop: claim.stop.clone(),
+            choice: model_choice(StepKind::Fix, &ctx.config),
+            mode: permission_mode(StepKind::Fix, &ctx.config),
         };
-        let r = inner.run_claude(ctx, step, &job, claim)?;
-        if !r.session_id.is_empty() {
-            inner.with_saved(wp_id, |s| s.session = Some(r.session_id.clone()));
-        }
-        cost += r.cost_usd;
+        let allowed = config.allow_bash.clone();
+        let session = inner.with_saved(wp_id, |s| s.session_of(fixer.agent)).flatten();
+        let prompt = prompts::fix_checks(&checks::report(&results), shell_of(&fixer, &allowed));
+        let job = code_job(
+            &fixer,
+            session.as_deref(),
+            &[],
+            budget,
+            &allowed,
+            repo,
+            timeout,
+            prompt,
+        );
+        let r = inner.run_ai(ctx, step, &job, &fixer)?;
+        inner.with_saved(wp_id, |s| s.set_session(&r.session, fixer.agent));
+        cost += r.cost.unwrap_or_default();
         fixed += 1;
         round += 1;
+    }
+}
+
+/// What the prompt of a code step says about the shell: Claude's allow list, unless the picked
+/// mode lets commands through; Codex has none (its sandbox decides).
+fn shell_of<'a>(claim: &Claim, allowed: &'a [String]) -> prompts::Shell<'a> {
+    match claim.agent {
+        AgentKind::Codex => prompts::Shell::Open,
+        _ if claude::mode_opens_shell(claim.mode.as_deref()) => prompts::Shell::Open,
+        _ => prompts::Shell::Allowed(allowed),
+    }
+}
+
+/// A run of a step that writes code (Viết code, Sửa lỗi, fixing Kiểm tra, the harness) by the
+/// claim's AI, with its model, effort and permission mode. `resume` = a session of that AI;
+/// `dirs` = folders outside the repo it may write to; `allowed` = Claude's Bash allow list.
+#[allow(clippy::too_many_arguments)]
+fn code_job(
+    claim: &Claim,
+    resume: Option<&str>,
+    dirs: &[String],
+    budget: f64,
+    allowed: &[String],
+    repo: &Path,
+    timeout: Duration,
+    prompt: String,
+) -> Job {
+    let mode = claim.mode.as_deref();
+    let (agent, args) = if claim.agent == AgentKind::Codex {
+        let args = codex::code_args(resume, dirs);
+        (
+            Provider::Codex,
+            codex::with_mode(codex::with_model(args, &claim.choice), mode),
+        )
+    } else {
+        let args = if claim.step == StepKind::Harness {
+            claude::harness_args(budget, allowed, dirs)
+        } else {
+            claude::code_args(resume, budget, allowed)
+        };
+        (
+            Provider::Claude,
+            claude::with_mode(claude::with_model(args, &claim.choice), mode),
+        )
+    };
+    Job {
+        agent,
+        args,
+        cwd: repo.to_path_buf(),
+        stdin: Some(prompt),
+        timeout,
     }
 }
 
@@ -3804,19 +3973,24 @@ fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Resu
     let mut allowed: Vec<String> = claude::HARNESS_BASH.iter().map(|s| (*s).to_owned()).collect();
     allowed.extend(repo_config.allow_bash.iter().cloned());
     let plan = ctx.read(PLAN_FILE).unwrap_or_default();
-    let prompt = prompts::harness(&plan, &checks, &path(&scratch), &path(&library), &allowed);
-    let args = claude::with_model(
-        claude::harness_args(budget, &repo_config.allow_bash, &[path(&scratch), path(&library)]),
-        &claim.choice,
+    let prompt = prompts::harness(
+        &plan,
+        &checks,
+        &path(&scratch),
+        &path(&library),
+        shell_of(claim, &allowed),
     );
-    let job = Job {
-        agent: Provider::Claude,
-        args,
-        cwd: repo.to_path_buf(),
-        stdin: Some(prompt),
+    let job = code_job(
+        claim,
+        None,
+        &[path(&scratch), path(&library)],
+        budget,
+        &repo_config.allow_bash,
+        repo,
         timeout,
-    };
-    let r = inner.run_claude(ctx, StepKind::Harness, &job, claim)?;
+        prompt,
+    );
+    let r = inner.run_ai(ctx, StepKind::Harness, &job, claim)?;
     let answer = harness::answer(&r.text).ok_or_else(|| {
         flow_error(
             "harness.parse",
@@ -3837,7 +4011,7 @@ fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Resu
     };
     // the app runs it itself: its result counts, and the command is known to work for later
     let ran = harness_command(inner, ctx, claim, repo, &state)?;
-    Ok(finish(state, ran, Some(r.cost_usd), String::new()))
+    Ok(finish(state, ran, r.cost, String::new()))
 }
 
 /// Step 11. Claude tries the change in Chrome through the Chrome DevTools MCP server only,
@@ -3879,9 +4053,12 @@ fn run_browser_test(
     allowed.extend(repo_config.allow_bash.iter().cloned());
     let plan = ctx.read(PLAN_FILE).unwrap_or_default();
     let prompt = prompts::browser_test(&plan, brief, &scenario, &path(&shots), &allowed);
-    let args = claude::with_model(
-        claude::browser_test_args(budget, &repo_config.allow_bash, &path(&mcp)),
-        &claim.choice,
+    let args = claude::with_mode(
+        claude::with_model(
+            claude::browser_test_args(budget, &repo_config.allow_bash, &path(&mcp)),
+            &claim.choice,
+        ),
+        claim.mode.as_deref(),
     );
     let job = Job {
         agent: Provider::Claude,
@@ -3948,10 +4125,11 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         stdin,
         timeout,
     };
+    // the code session, when this step's AI wrote it (another AI cannot go on in it)
     let (session, feedback, fixes, issue, note) = inner
         .with_saved(wp_id, |s| {
             (
-                s.session.clone(),
+                s.session_of(claim.agent),
                 s.feedback.clone(),
                 s.fixes,
                 s.issue,
@@ -3960,12 +4138,19 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         })
         .unwrap_or_default();
     let set_session = |id: &str| {
-        if !id.is_empty() {
-            inner.with_saved(wp_id, |s| s.session = Some(id.to_owned()));
-        }
+        inner.with_saved(wp_id, |s| s.set_session(id, claim.agent));
     };
-    // the user's model / effort for this step (nothing when they left it to the machine)
-    let cl = |args: Vec<String>| claude::with_model(args, &claim.choice);
+    let codex = claim.agent == AgentKind::Codex;
+    // the user's model / effort / permission mode for this step (nothing when left to the app)
+    let cl =
+        |args: Vec<String>| claude::with_mode(claude::with_model(args, &claim.choice), claim.mode.as_deref());
+    let cx =
+        |args: Vec<String>| codex::with_mode(codex::with_model(args, &claim.choice), claim.mode.as_deref());
+    // a run the usage limit cut goes on in its session
+    let codex_cut = |args: Vec<String>| match inner.cut_session(wp_id, step, Provider::Codex) {
+        Some(id) => codex::with_resume(args, &id),
+        None => args,
+    };
     match step {
         StepKind::Intake => Ok(Done {
             event: E::StepSucceeded(StepKind::Intake),
@@ -3993,21 +4178,28 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .collect();
             let answers: Vec<(&str, &str)> = answers.iter().map(|(q, a)| (q.as_str(), a.as_str())).collect();
             let prompt = prompts::analyze(&brief, previous, &answers);
-            let r = inner.run_claude(
-                ctx,
-                step,
-                &job(Provider::Claude, cl(claude::analyze_args(budget)), Some(prompt)),
-                claim,
-            )?;
+            let analyze = if codex {
+                job(
+                    Provider::Codex,
+                    codex_cut(cx(codex::analyze_args())),
+                    Some(prompt),
+                )
+            } else {
+                job(Provider::Claude, cl(claude::analyze_args(budget)), Some(prompt))
+            };
+            let r = inner.run_ai(ctx, step, &analyze, claim)?;
             let answer = text::plan_answer(&r.text);
             if answer.plan.is_empty() {
                 return Err(flow_error(
                     "plan.empty",
-                    "Claude không trả về plan. Xem Log rồi bấm Thử lại.",
+                    format!(
+                        "{} không trả về plan. Xem Log rồi bấm Thử lại.",
+                        agent_name(claim.agent)
+                    ),
                 ));
             }
             write_task_file(ctx, PLAN_FILE, &answer.plan)?;
-            set_session(&r.session_id);
+            set_session(&r.session);
             let questions = new_questions(answer.questions, &before);
             let proposals: Vec<StepProposal> = answer
                 .proposals
@@ -4040,7 +4232,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Analyze),
                 note,
-                cost: Some(r.cost_usd),
+                cost: r.cost,
             })
         }
         StepKind::Implement => {
@@ -4048,34 +4240,50 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .read(PLAN_FILE)
                 .ok_or_else(|| flow_error("plan.missing", "Không đọc được plan.md"))?;
             let allowed = ctx.repo_config().allow_bash;
+            let shell = shell_of(claim, &allowed);
             // the usage limit cut the last run: go on in its session, from where the code is
-            let cut = inner.cut_session(wp_id, step, Provider::Claude);
+            let cut = inner.cut_session(wp_id, step, provider_of(claim.agent));
             let mut prompt = match &cut {
-                Some(_) => prompts::carry_on_cut(step_label(step), &allowed),
+                Some(_) => prompts::carry_on_cut(step_label(step), shell),
                 None => prompts::implement(
                     &plan,
                     session.is_none().then_some(brief.as_str()),
-                    &allowed,
+                    shell,
                     note.as_deref(),
                 ),
             };
             if cut.is_none() && inner.was_cut(wp_id, step) {
                 prompt.push_str(prompts::CUT_BEFORE);
             }
-            let args = cl(claude::code_args(
-                cut.as_deref().or(session.as_deref()),
-                budget,
-                &allowed,
-            ));
-            let r = inner.run_claude(ctx, step, &job(Provider::Claude, args, Some(prompt)), claim)?;
-            set_session(&r.session_id);
+            let resume = cut.as_deref().or(session.as_deref());
+            let code = code_job(claim, resume, &[], budget, &allowed, repo, timeout, prompt);
+            let r = inner.run_ai(ctx, step, &code, claim)?;
+            set_session(&r.session);
             if note.is_some() {
                 inner.with_saved(wp_id, |s| s.note = None);
             }
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Implement),
-                note: format!("{}{}", change_note(repo), denied_note(r.denials.len())),
-                cost: Some(r.cost_usd),
+                note: format!("{}{}", change_note(repo), denied_note(r.denials)),
+                cost: r.cost,
+            })
+        }
+        StepKind::ReviewLocal | StepKind::FinalReview if codex => {
+            // Codex cannot run the repo's /review-local: the app's review prompt, read only
+            let raw = codex_review(
+                inner,
+                ctx,
+                claim,
+                &format!("codex-{}", step_key(step)),
+                &base,
+                &brief,
+            )?;
+            let findings = inner.merge(ctx, step, 0, "codex", &raw)?;
+            let (event, note) = review_event(&findings, &raw);
+            Ok(Done {
+                event,
+                note,
+                cost: None,
             })
         }
         StepKind::ReviewLocal | StepKind::FinalReview => {
@@ -4134,21 +4342,22 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 })
                 .collect();
             let allowed = ctx.repo_config().allow_bash;
-            let cut = inner.cut_session(wp_id, step, Provider::Claude);
+            let shell = shell_of(claim, &allowed);
+            let cut = inner.cut_session(wp_id, step, provider_of(claim.agent));
+            // no session of this AI: it did not write the code, so it gets the plan and the brief
+            let plan = ctx.read(PLAN_FILE).unwrap_or_default();
+            let context = session.is_none().then_some((plan.as_str(), brief.as_str()));
             let mut prompt = match &cut {
-                Some(_) => prompts::carry_on_cut(step_label(step), &allowed),
-                None => prompts::fix(&list, &allowed),
+                Some(_) => prompts::carry_on_cut(step_label(step), shell),
+                None => prompts::fix(&list, shell, context),
             };
             if cut.is_none() && inner.was_cut(wp_id, step) {
                 prompt.push_str(prompts::CUT_BEFORE);
             }
-            let args = cl(claude::code_args(
-                cut.as_deref().or(session.as_deref()),
-                budget,
-                &allowed,
-            ));
-            let r = inner.run_claude(ctx, step, &job(Provider::Claude, args, Some(prompt)), claim)?;
-            set_session(&r.session_id);
+            let resume = cut.as_deref().or(session.as_deref());
+            let code = code_job(claim, resume, &[], budget, &allowed, repo, timeout, prompt);
+            let r = inner.run_ai(ctx, step, &code, claim)?;
+            set_session(&r.session);
             let fixes = inner
                 .with_saved(wp_id, |s| {
                     s.fixes += 1;
@@ -4171,15 +4380,19 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     again_note.push_str(&format!("; Harness lại: {h}"));
                 }
             }
+            let cost = match r.cost {
+                Some(c) => Some(c + again.cost),
+                None => (again.cost > 0.0).then_some(again.cost),
+            };
             Ok(Done {
                 event: E::StepSucceeded(step),
                 note: format!(
                     "lần sửa thứ {fixes}: xử lý {} lỗi; {}{}{again_note}",
                     list.len(),
                     change_note(repo),
-                    denied_note(r.denials.len())
+                    denied_note(r.denials)
                 ),
-                cost: Some(r.cost_usd + again.cost),
+                cost,
             })
         }
         StepKind::Checks => {
@@ -4201,36 +4414,8 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         StepKind::BrowserTest => run_browser_test(inner, ctx, claim, repo, &brief),
         StepKind::CrossReview => {
             let round = inner.round_of(wp_id);
-            let (raw, source, cost) = if claim.agent == AgentKind::Codex {
-                let dir = ctx.task_dir.join(REVIEW_DIR);
-                std::fs::create_dir_all(&dir).map_err(|e| flow_error("task.write", e.to_string()))?;
-                let schema = dir.join("findings.schema.json");
-                std::fs::write(&schema, codex::FINDINGS_SCHEMA)
-                    .map_err(|e| flow_error("task.write", e.to_string()))?;
-                let out = dir.join(format!("codex-r{round}.json"));
-                let _ = std::fs::remove_file(&out);
-                let mut args = codex::with_model(
-                    codex::cross_review_args(&schema.to_string_lossy(), &out.to_string_lossy()),
-                    &claim.choice,
-                );
-                if let Some(id) = inner.cut_session(wp_id, step, Provider::Codex) {
-                    // `exec` options (including read-only sandbox) stay on the parent command.
-                    args.pop(); // the stdin prompt marker
-                    args.extend(["resume".into(), id, "-".into()]);
-                }
-                let answer = inner.run_codex(
-                    ctx,
-                    step,
-                    &job(Provider::Codex, args, Some(prompts::cross_review(&base, &brief))),
-                    claim,
-                )?;
-                let text = std::fs::read_to_string(&out).unwrap_or(answer);
-                let raw = serde_json::from_str::<serde_json::Value>(text.trim())
-                    .ok()
-                    .and_then(|v| text::findings_from_json(&v))
-                    .or_else(|| text::findings_from_text(&text))
-                    .ok_or_else(unreadable_review)?;
-                save_review_notes(ctx, step, &text);
+            let (raw, source, cost) = if codex {
+                let raw = codex_review(inner, ctx, claim, &format!("codex-r{round}"), &base, &brief)?;
                 (raw, "codex", None)
             } else {
                 let stdin = Some(prompts::review(&base, &brief));
@@ -4264,29 +4449,93 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .join("commands")
                 .join("push-summary.md")
                 .is_file();
-            let (args, stdin) = if has_command {
-                (claude::push_summary_args(issue, budget), None)
+            let push = if codex {
+                // Codex cannot run the repo's /push-summary: the app's prompt
+                let stdin = Some(prompts::push_summary(&base, issue));
+                job(Provider::Codex, codex_cut(cx(codex::push_args())), stdin)
+            } else if has_command {
+                job(
+                    Provider::Claude,
+                    cl(claude::push_summary_args(issue, budget)),
+                    None,
+                )
             } else {
-                (
-                    claude::push_summary_default_args(budget),
-                    Some(prompts::push_summary(&base, issue)),
+                let stdin = Some(prompts::push_summary(&base, issue));
+                job(
+                    Provider::Claude,
+                    cl(claude::push_summary_default_args(budget)),
+                    stdin,
                 )
             };
-            let r = inner.run_claude(ctx, step, &job(Provider::Claude, cl(args), stdin), claim)?;
+            let r = inner.run_ai(ctx, step, &push, claim)?;
             if r.text.trim().is_empty() {
                 return Err(flow_error(
                     "push.empty",
-                    "Claude không trả về commit message. Xem Log rồi bấm Thử lại.",
+                    format!(
+                        "{} không trả về commit message. Xem Log rồi bấm Thử lại.",
+                        agent_name(claim.agent)
+                    ),
                 ));
             }
             write_task_file(ctx, PUSH_FILE, &r.text)?;
             Ok(Done {
                 event: E::StepSucceeded(StepKind::PushSummary),
                 note: "đã viết commit message + PR description".into(),
-                cost: Some(r.cost_usd),
+                cost: r.cost,
             })
         }
     }
+}
+
+/// A review by Codex (Review chéo, or Tự review / Review chốt when Settings picks Codex): the
+/// app's review prompt, read only, the answer forced into the findings schema and written to
+/// `<task>/review/<name>.json`. A run the usage limit cut goes on in its thread.
+fn codex_review(
+    inner: &Inner,
+    ctx: &TaskCtx,
+    claim: &Claim,
+    name: &str,
+    base: &str,
+    brief: &str,
+) -> Result<Vec<RawFinding>, FlowError> {
+    let step = claim.step;
+    let (_, timeout, _) = limits(step, &ctx.config);
+    let repo = ctx
+        .repo()
+        .ok_or_else(|| flow_error("repo.missing", "Không thấy thư mục repo của task"))?;
+    let dir = ctx.task_dir.join(REVIEW_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| flow_error("task.write", e.to_string()))?;
+    let schema = dir.join("findings.schema.json");
+    std::fs::write(&schema, codex::FINDINGS_SCHEMA).map_err(|e| flow_error("task.write", e.to_string()))?;
+    let out = dir.join(format!("{name}.json"));
+    let _ = std::fs::remove_file(&out);
+    let mut args = codex::with_mode(
+        codex::with_model(
+            codex::cross_review_args(&schema.to_string_lossy(), &out.to_string_lossy()),
+            &claim.choice,
+        ),
+        claim.mode.as_deref(),
+    );
+    if let Some(id) = inner.cut_session(ctx.row.wp_id, step, Provider::Codex) {
+        // `exec` options (including the read-only sandbox) stay on the parent command
+        args = codex::with_resume(args, &id);
+    }
+    let job = Job {
+        agent: Provider::Codex,
+        args,
+        cwd: repo,
+        stdin: Some(prompts::cross_review(base, brief)),
+        timeout,
+    };
+    let (answer, _) = inner.run_codex(ctx, step, &job, claim)?;
+    let text = std::fs::read_to_string(&out).unwrap_or(answer);
+    let raw = serde_json::from_str::<serde_json::Value>(text.trim())
+        .ok()
+        .and_then(|v| text::findings_from_json(&v))
+        .or_else(|| text::findings_from_text(&text))
+        .ok_or_else(unreadable_review)?;
+    save_review_notes(ctx, step, &text);
+    Ok(raw)
 }
 
 /// Runs the claimed step, then the next ones while auto-advance is on.
@@ -5369,6 +5618,218 @@ mod tests {
             d.log
         );
         assert_eq!(step_label(StepKind::PushSummary), "Push summary");
+    }
+
+    /// Like [`happy`], but Codex may write code too: a Codex job without `-o` edits a.ts and
+    /// answers on thread `t-<n>`.
+    fn codex_codes() -> impl ScriptFn {
+        let reviews = AtomicUsize::new(0);
+        let threads = AtomicUsize::new(0);
+        let claude = happy(CLEAN);
+        move |job, stop, out| {
+            if job.agent != Provider::Codex {
+                // the first Claude review finds one high, the rest are clean
+                if kind(job) == "review" {
+                    let n = reviews.fetch_add(1, Ordering::SeqCst);
+                    out(&result_line(if n == 0 { HIGH } else { CLEAN }));
+                    return ok();
+                }
+                return claude(job, stop, out);
+            }
+            if let Some(i) = job.args.iter().position(|a| a == "-o") {
+                std::fs::write(&job.args[i + 1], "{\"findings\":[]}").unwrap();
+                return ok();
+            }
+            let n = threads.fetch_add(1, Ordering::SeqCst);
+            out(&format!(r#"{{"type":"thread.started","thread_id":"t-{n}"}}"#));
+            let plan = !job
+                .args
+                .iter()
+                .any(|a| a == "workspace-write" || a == "danger-full-access");
+            let text = if job.args.iter().any(|a| a == "--ephemeral") {
+                PUSH.to_owned()
+            } else if plan {
+                "## Nguyên nhân\n`a.ts:1`\n## Đề xuất\nguard".to_owned()
+            } else {
+                let file = job.cwd.join("a.ts");
+                let old = std::fs::read_to_string(&file).unwrap();
+                std::fs::write(&file, format!("{old}// codex\n")).unwrap();
+                "đã sửa a.ts".to_owned()
+            };
+            out(&serde_json::json!({"type": "item.completed", "item": {"type": "agent_message", "text": text}}).to_string());
+            out(
+                r#"{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":50}}"#,
+            );
+            ok()
+        }
+    }
+
+    fn flag(job: &Job, name: &str) -> Option<String> {
+        job.args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone())
+    }
+
+    #[test]
+    fn codex_can_plan_and_write_the_code_and_claude_then_cross_reviews_it() {
+        let Some(s) = setup() else { return };
+        let (flow, fake) = flow_with(&s, false, codex_codes());
+        let config = Config::from_value(&serde_json::json!({
+            "steps": {
+                "autoAdvance": true,
+                "analyze": {"agent": "codex"},
+                "implement": {"agent": "codex", "model": "gpt-x"},
+                "fix": {"agent": "codex", "permissionMode": "danger-full-access"}
+            }
+        }));
+        let ctx = s.ctx(1, &config);
+        flow.started(&ctx, None).unwrap();
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::PlanReview),
+            "{:?}",
+            d.error
+        );
+        run(&flow, &ctx, FlowAction::ApprovePlan);
+        pick_all(&flow, &ctx);
+        run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::AfterFix {
+                choice: AfterFix::CrossReview,
+            },
+        );
+        assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
+
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let codex: Vec<&Job> = jobs.iter().filter(|j| j.agent == Provider::Codex).collect();
+        // Phân tích, Viết code, Sửa lỗi: nothing else ran on Codex
+        assert_eq!(codex.len(), 3, "{jobs:#?}");
+        let (analyze, implement, fix) = (codex[0], codex[1], codex[2]);
+        assert_eq!(flag(analyze, "--sandbox").as_deref(), Some("read-only"));
+        // Viết code goes on in the analysis's thread, so it needs no brief
+        assert_eq!(flag(implement, "--sandbox").as_deref(), Some("workspace-write"));
+        assert_eq!(flag(implement, "-m").as_deref(), Some("gpt-x"));
+        assert_eq!(
+            &implement.args[implement.args.len() - 3..],
+            ["resume", "t-0", "-"]
+        );
+        let prompt = implement.stdin.as_deref().unwrap();
+        assert!(
+            !prompt.contains("<brief>") && !prompt.contains("allow list"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("never run git commands that write"));
+        // Sửa lỗi: the picked permission mode, in the code thread
+        assert_eq!(flag(fix, "--sandbox").as_deref(), Some("danger-full-access"));
+        assert_eq!(&fix.args[fix.args.len() - 3..], ["resume", "t-1", "-"]);
+        // nobody picked the cross review's AI: Viết code was Codex, so Claude reviews it
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text.starts_with("Bắt đầu Review chéo (Claude")),
+            "{:?}",
+            d.log
+        );
+        assert!(
+            d.log.iter().any(|l| l
+                .text
+                .starts_with("Bắt đầu Sửa lỗi (Codex · quyền danger-full-access")),
+            "{:?}",
+            d.log
+        );
+        let implement_row = &d.steps[StepKind::Implement.index() as usize - 1];
+        assert_eq!(implement_row.cost_usd, None);
+    }
+
+    #[test]
+    fn codex_reviews_and_writes_the_push_summary_with_the_apps_prompts() {
+        let Some(s) = setup() else { return };
+        // the repo has both commands, which Codex cannot run
+        let commands = s.repo.join(".claude").join("commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(commands.join("review-local.md"), "review").unwrap();
+        std::fs::write(commands.join("push-summary.md"), "push").unwrap();
+        let (flow, fake) = flow_with(&s, false, codex_codes());
+        let config = Config::from_value(&serde_json::json!({
+            "steps": {
+                "autoAdvance": true,
+                "reviewLocal": {"agent": "codex"},
+                "crossReview": {"agent": "codex"},
+                "finalReview": {"agent": "codex", "permissionMode": "workspace-write"},
+                "pushSummary": {"agent": "codex"}
+            }
+        }));
+        let ctx = s.ctx(1, &config);
+        flow.started(&ctx, None).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
+        let push = std::fs::read_to_string(ctx.file(PUSH_FILE)).unwrap();
+        assert!(push.contains("fix: org (#279)"), "{push}");
+
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let codex: Vec<&Job> = jobs.iter().filter(|j| j.agent == Provider::Codex).collect();
+        // Tự review, Review chéo, Review chốt, Push summary
+        assert_eq!(codex.len(), 4, "{jobs:#?}");
+        for review in &codex[..3] {
+            assert!(review.args.iter().any(|a| a == "--output-schema"));
+            assert!(!review.args.iter().any(|a| a == "/review-local"));
+            assert!(review.stdin.as_deref().unwrap().contains("matching the schema"));
+        }
+        assert_eq!(flag(codex[0], "--sandbox").as_deref(), Some("read-only"));
+        assert_eq!(flag(codex[2], "--sandbox").as_deref(), Some("workspace-write"));
+        // each review keeps its own answer file
+        let out = |j: &Job| flag(j, "-o").unwrap();
+        assert!(out(codex[0]).ends_with("codex-reviewLocal.json"));
+        assert!(out(codex[1]).ends_with("codex-r1.json"));
+        assert!(out(codex[2]).ends_with("codex-finalReview.json"));
+        let push_job = codex[3];
+        assert!(push_job.args.iter().any(|a| a == "--ephemeral"));
+        assert!(push_job.stdin.as_deref().unwrap().contains("(#279)"));
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text == "Bắt đầu Tự review (Codex · prompt review của app, codex exec chỉ đọc)"),
+            "{:?}",
+            d.log
+        );
+        // nothing kept, so nothing to open in a terminal
+        assert_eq!(
+            resume_command(StepKind::PushSummary, AgentKind::Codex, Some("t-9")),
+            None
+        );
+        assert!(resume_command(StepKind::Fix, AgentKind::Codex, Some("t-9")).is_some());
+    }
+
+    #[test]
+    fn a_fix_by_another_ai_than_the_coder_starts_fresh_with_the_plan() {
+        let Some(s) = setup() else { return };
+        let (flow, fake) = flow_with(&s, false, codex_codes());
+        let config = Config::from_value(&serde_json::json!({
+            "steps": {"autoAdvance": true, "implement": {"agent": "codex"}}
+        }));
+        let ctx = s.ctx(1, &config);
+        flow.started(&ctx, None).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        run(&flow, &ctx, FlowAction::ApprovePlan);
+        pick_all(&flow, &ctx);
+        run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        let jobs = fake.jobs.lock().unwrap().clone();
+        // Claude's analysis, then Codex wrote the code without that session
+        let implement = jobs.iter().find(|j| j.agent == Provider::Codex).unwrap();
+        assert!(!implement.args.iter().any(|a| a == "resume"));
+        assert!(implement.stdin.as_deref().unwrap().contains("<brief>"));
+        // Claude fixes code it did not write: no --resume, the plan and the brief in the prompt
+        let fix = jobs.iter().rev().find(|j| kind(j) == "code").unwrap();
+        assert_eq!(fix.agent, Provider::Claude);
+        assert_eq!(flag(fix, "--resume"), None);
+        let prompt = fix.stdin.as_deref().unwrap();
+        assert!(
+            prompt.contains("written by another AI") && prompt.contains("<plan>"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Do not chain commands"));
     }
 
     /// Analyze writes a plan with two files and a question; the code step edits a.ts and has one
