@@ -191,10 +191,18 @@ struct CutRun {
     session: Option<String>,
     /// When the limit resets (`None` = unknown: the quota gauges decide).
     until: Option<String>,
+    /// When the run was cut (or Tự chạy stopped). With `until` unknown, only a gauge reading
+    /// taken after this, and at least [`UNKNOWN_RESET_WAIT_SECS`] later, ends the wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    at: Option<String>,
     /// The reset was announced (or the step started again).
     #[serde(default)]
     notified: bool,
 }
+
+/// The shortest wait when the reset time of a limit is unknown: a stale gauge that still shows
+/// room must not retry the step on every poll.
+const UNKNOWN_RESET_WAIT_SECS: f64 = 5.0 * 60.0;
 
 /// The task's harness: the command the app runs again after each fix, and its last result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -979,9 +987,25 @@ impl Flow {
                 .as_ref()
                 .and_then(quotagate::worst)
                 .map(|w| w.used_pct < stop_level);
-            let reset = cut.until.as_ref().map_or(room == Some(true), |until| {
-                opw_quota::seconds_between(until, now).is_some_and(|s| s >= 0.0) && room != Some(false)
-            });
+            let reset = match cut.until.as_deref() {
+                Some(until) => {
+                    opw_quota::seconds_between(until, now).is_some_and(|s| s >= 0.0) && room != Some(false)
+                }
+                // Unknown reset: a few minutes at least, then only a gauge read after the cut
+                // counts (a stale reading with room would retry on every poll).
+                None => {
+                    let since = |at: &str, to: &str| opw_quota::seconds_between(at, to);
+                    let waited = cut
+                        .at
+                        .as_deref()
+                        .is_none_or(|at| since(at, now).is_some_and(|s| s >= UNKNOWN_RESET_WAIT_SECS));
+                    let fresh = cut.at.as_deref().is_none_or(|at| {
+                        snap.as_ref()
+                            .is_some_and(|s| since(at, &s.observed_at).is_some_and(|d| d > 0.0))
+                    });
+                    waited && fresh && room == Some(true)
+                }
+            };
             if !reset {
                 continue;
             }
@@ -2718,6 +2742,7 @@ impl Inner {
                         .quota_of(provider)
                         .as_ref()
                         .and_then(|s| quotagate::stop_reset(s, stop)),
+                    at: Some(now()),
                     notified: false,
                 });
                 let line = format!(
@@ -2821,7 +2846,9 @@ impl Inner {
         text: &str,
     ) -> FlowError {
         let snap = self.quota_of(provider);
-        let until = quotagate::reset_time(text, snap.as_ref());
+        let (_, stop) = quotagate::levels(&ctx.config.quota.warn_at);
+        let at = now();
+        let until = quotagate::reset_time(text, snap.as_ref(), stop, &at);
         let auto = self
             .lock_tasks()
             .get(&ctx.row.wp_id)
@@ -2841,13 +2868,19 @@ impl Inner {
                 provider,
                 session,
                 until: until.clone(),
+                at: Some(at),
                 notified: false,
             });
         });
-        let then = if auto {
-            "Tới giờ reset app tự chạy tiếp (Tự chạy đang bật)."
-        } else {
-            "Tới giờ reset app báo chuông; bấm Thử lại để chạy tiếp."
+        let then = match (auto, until.is_some()) {
+            (true, true) => "Tới giờ reset app tự chạy tiếp (Tự chạy đang bật).",
+            (false, true) => "Tới giờ reset app báo chuông; bấm Thử lại để chạy tiếp.",
+            (true, false) => {
+                "Chưa biết giờ reset: app chờ ít nhất 5 phút và tới khi hạn mức đọc lại còn chỗ thì tự chạy tiếp; bấm Thử lại nếu muốn chạy ngay."
+            }
+            (false, false) => {
+                "Chưa biết giờ reset: app báo chuông khi hạn mức đọc lại còn chỗ (sớm nhất sau 5 phút); bấm Thử lại nếu muốn chạy ngay."
+            }
         };
         let carry = if step == StepKind::Implement || step.is_fix() {
             " AI sẽ tiếp tục trong phiên cũ, từ chỗ code đang dở."
@@ -2864,6 +2897,44 @@ impl Inner {
             provider: Some(provider),
             resets_at: until,
         }
+    }
+
+    /// The CLI could not open the cut session again (it was cut before it was saved, or the
+    /// CLI dropped it): forget it, so Thử lại runs the step from the start instead of failing
+    /// on the same session forever.
+    fn cut_session_lost(&self, wp_id: u64, step: StepKind, provider: Provider) -> FlowError {
+        self.with_saved(wp_id, |s| {
+            if let Some(cut) = s
+                .cut
+                .as_mut()
+                .filter(|c| c.step == step && c.provider == provider)
+            {
+                cut.session = None;
+            }
+        });
+        self.log(
+            wp_id,
+            Some(step),
+            "error",
+            "Không mở lại được phiên bị cắt vì hết hạn mức; app đã bỏ phiên đó",
+            true,
+        );
+        flow_error(
+            "session.lost",
+            format!(
+                "{} không mở lại được phiên bị cắt lúc hết hạn mức (phiên chưa kịp lưu). App đã bỏ phiên đó; bấm Thử lại để chạy lại bước {} từ đầu, phần code đã ghi vẫn còn trong repo.",
+                quotagate::provider_name(provider),
+                step_label(step)
+            ),
+        )
+    }
+
+    /// A usage limit cut a run of this step that has not finished since (its session may be gone).
+    fn was_cut(&self, wp_id: u64, step: StepKind) -> bool {
+        self.lock_tasks()
+            .get(&wp_id)
+            .and_then(|e| e.saved.cut.as_ref())
+            .is_some_and(|c| c.step == step)
     }
 
     /// Keep the cut session until the step succeeds, including after a failed launch/retry.
@@ -2954,6 +3025,10 @@ impl Inner {
                 job.args.extend(["--resume".into(), id]);
             }
         }
+        // the run goes on in the session a usage limit cut (added here or by the step)
+        let resumes_cut = self
+            .cut_session(ctx.row.wp_id, step, Provider::Claude)
+            .is_some_and(|id| job.args.windows(2).any(|w| w[0] == "--resume" && w[1] == id));
         let job = &job;
         let stop: &AtomicBool = &claim.stop;
         use std::io::Write;
@@ -3049,6 +3124,11 @@ impl Inner {
                 };
                 if looks_signed_out(&why) || looks_signed_out(&outcome.stderr_tail) {
                     Err(signed_out(AgentKind::Claude))
+                } else if resumes_cut
+                    && (quotagate::looks_session_lost(&why)
+                        || quotagate::looks_session_lost(&outcome.stderr_tail))
+                {
+                    Err(self.cut_session_lost(wp_id, step, Provider::Claude))
                 } else if quotagate::looks_quota_hit(&why) || quotagate::looks_quota_hit(&outcome.stderr_tail)
                 {
                     let sid = if r.session_id.is_empty() {
@@ -3066,6 +3146,9 @@ impl Inner {
             }
             Some(r) => Ok(r),
             None if looks_signed_out(&outcome.stderr_tail) => Err(signed_out(AgentKind::Claude)),
+            None if resumes_cut && quotagate::looks_session_lost(&outcome.stderr_tail) => {
+                Err(self.cut_session_lost(wp_id, step, Provider::Claude))
+            }
             None if quotagate::looks_quota_hit(&outcome.stderr_tail) => {
                 Err(quota_hit(&session, &outcome.stderr_tail))
             }
@@ -3141,6 +3224,15 @@ impl Inner {
             failed.as_deref().unwrap_or_default(),
             outcome.stderr_tail
         );
+        let resumes_cut = self
+            .cut_session(wp_id, step, Provider::Codex)
+            .is_some_and(|id| job.args.windows(2).any(|w| w[0] == "resume" && w[1] == id));
+        if (failed.is_some() || !outcome.success())
+            && resumes_cut
+            && quotagate::looks_session_lost(&quota_text)
+        {
+            return Err(self.cut_session_lost(wp_id, step, Provider::Codex));
+        }
         if (failed.is_some() || !outcome.success()) && quotagate::looks_quota_hit(&quota_text) {
             return Err(self.quota_hit(ctx, step, Provider::Codex, Some(&thread), &quota_text));
         }
@@ -3955,7 +4047,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             let allowed = ctx.repo_config().allow_bash;
             // the usage limit cut the last run: go on in its session, from where the code is
             let cut = inner.cut_session(wp_id, step, Provider::Claude);
-            let prompt = match &cut {
+            let mut prompt = match &cut {
                 Some(_) => prompts::carry_on_cut(step_label(step), &allowed),
                 None => prompts::implement(
                     &plan,
@@ -3964,6 +4056,9 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     note.as_deref(),
                 ),
             };
+            if cut.is_none() && inner.was_cut(wp_id, step) {
+                prompt.push_str(prompts::CUT_BEFORE);
+            }
             let args = cl(claude::code_args(
                 cut.as_deref().or(session.as_deref()),
                 budget,
@@ -4037,10 +4132,13 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .collect();
             let allowed = ctx.repo_config().allow_bash;
             let cut = inner.cut_session(wp_id, step, Provider::Claude);
-            let prompt = match &cut {
+            let mut prompt = match &cut {
                 Some(_) => prompts::carry_on_cut(step_label(step), &allowed),
                 None => prompts::fix(&list, &allowed),
             };
+            if cut.is_none() && inner.was_cut(wp_id, step) {
+                prompt.push_str(prompts::CUT_BEFORE);
+            }
             let args = cl(claude::code_args(
                 cut.as_deref().or(session.as_deref()),
                 budget,
@@ -5698,6 +5796,11 @@ mod tests {
     }
 
     fn quota_at(used: f64) -> QuotaSnapshot {
+        quota_seen(used, "2026-11-17T08:00:00Z")
+    }
+
+    /// A gauge reading taken at `observed_at`.
+    fn quota_seen(used: f64, observed_at: &str) -> QuotaSnapshot {
         QuotaSnapshot {
             provider: Provider::Claude,
             windows: vec![opw_domain::view::QuotaWindow {
@@ -5706,7 +5809,7 @@ mod tests {
                 resets_at: Some("2099-11-17T10:00:00Z".into()),
             }],
             source: "probe".into(),
-            observed_at: "2026-11-17T08:00:00Z".into(),
+            observed_at: observed_at.into(),
             plan: None,
         }
     }
@@ -5728,7 +5831,7 @@ mod tests {
                     r#"{"type":"system","subtype":"init","session_id":"s-cut","model":"m","tools":["Edit"]}"#,
                 );
                 out(
-                    r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude AI usage limit reached|1763380800","session_id":"s-cut","total_cost_usd":0.4}"#,
+                    r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude AI usage limit reached|4070908800","session_id":"s-cut","total_cost_usd":0.4}"#,
                 );
                 return RunOutcome {
                     code: Some(1),
@@ -5752,7 +5855,7 @@ mod tests {
         let err = d.error.clone().unwrap();
         assert_eq!(err.code, "quota.hit", "{}", err.message);
         assert_eq!(err.provider, Some(Provider::Claude));
-        assert_eq!(err.resets_at.as_deref(), Some("2025-11-17T12:00:00Z"));
+        assert_eq!(err.resets_at.as_deref(), Some("2099-01-01T00:00:00Z"));
         assert!(
             err.message.contains("Hết hạn mức Claude giữa bước Viết code"),
             "{}",
@@ -5762,16 +5865,16 @@ mod tests {
         assert_eq!(d.current, Some(StepKind::Implement));
 
         // the reset time passed: announced once, the task follows the default (no Tự chạy)
-        assert_eq!(flow.quota_waits_due("2025-11-17T11:00:00Z", 95.0), vec![]);
+        assert_eq!(flow.quota_waits_due("2098-12-31T23:00:00Z", 95.0), vec![]);
         assert_eq!(
-            flow.quota_waits_due("2026-11-17T12:00:00Z", 95.0),
+            flow.quota_waits_due("2099-01-01T00:00:00Z", 95.0),
             vec![QuotaWake {
                 wp_id: 1,
                 auto: None,
                 retry: true
             }]
         );
-        assert_eq!(flow.quota_waits_due("2026-11-17T12:00:05Z", 95.0), vec![]);
+        assert_eq!(flow.quota_waits_due("2099-01-01T00:00:05Z", 95.0), vec![]);
 
         // A restart and a retry failing before init must both keep the interrupted session.
         let flow = Flow::new(s.store.clone(), fake.clone(), None);
@@ -5876,6 +5979,60 @@ mod tests {
         assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
     }
 
+    /// The cut session cannot be opened again: the app drops it once, and Thử lại runs the step
+    /// without it, told that part of the change may already be in the tree.
+    #[test]
+    fn a_cut_session_the_cli_lost_is_dropped_instead_of_retried_forever() {
+        let Some(s) = setup() else { return };
+        let codes = AtomicUsize::new(0);
+        let (flow, fake) = flow_with(&s, false, move |job, stop, out| {
+            let attempt = if kind(job) == "code" {
+                codes.fetch_add(1, Ordering::SeqCst)
+            } else {
+                usize::MAX
+            };
+            if attempt == 0 {
+                out(
+                    r#"{"type":"system","subtype":"init","session_id":"s-gone","model":"m","tools":["Edit"]}"#,
+                );
+                out(
+                    r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude AI usage limit reached|4070908800","session_id":"s-gone"}"#,
+                );
+                return RunOutcome {
+                    code: Some(1),
+                    ..RunOutcome::default()
+                };
+            }
+            if attempt == 1 {
+                return RunOutcome {
+                    code: Some(1),
+                    stderr_tail: "No conversation found with session ID: s-gone".into(),
+                    ..RunOutcome::default()
+                };
+            }
+            (happy(CLEAN))(job, stop, out)
+        });
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(
+            run(&flow, &ctx, FlowAction::ApprovePlan).error.unwrap().code,
+            "quota.hit"
+        );
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        let err = d.error.unwrap();
+        assert_eq!(err.code, "session.lost", "{}", err.message);
+        assert_eq!(d.current, Some(StepKind::Implement));
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        assert!(d.error.is_none(), "{:?}", d.error);
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let codes: Vec<_> = jobs.iter().filter(|j| kind(j) == "code").collect();
+        assert!(codes[1].args.windows(2).any(|w| w == ["--resume", "s-gone"]));
+        let last = codes[2];
+        assert!(!last.args.iter().any(|a| a == "s-gone"), "{:?}", last.args);
+        assert!(last.stdin.as_deref().unwrap().contains("its session is gone"));
+    }
+
     #[test]
     fn codex_quota_failure_retries_the_same_step_and_thread() {
         let Some(s) = setup() else { return };
@@ -5902,7 +6059,18 @@ mod tests {
         assert_eq!(d.error.as_ref().unwrap().provider, Some(Provider::Codex));
         assert_eq!(flow.card(&ctx).unwrap().login, None);
         assert!(flow.quota_waits_due("2099-11-17T12:00:00Z", 95.0).is_empty());
+        // The CLI gave no reset time: a gauge read before the cut (stale, with room) must not
+        // start it again, nor a fresh one in the first minutes.
         flow.set_quota_source(|p| (p == Provider::Codex).then(|| quota_at(40.0)));
+        assert!(flow.quota_waits_due("2099-11-17T12:00:00Z", 95.0).is_empty());
+        let cut_at = now();
+        let soon = opw_quota::unix_to_rfc3339(
+            opw_quota::seconds_between("1970-01-01T00:00:00Z", &cut_at).unwrap() + 60.0,
+        )
+        .unwrap();
+        let fresh = soon.clone();
+        flow.set_quota_source(move |p| (p == Provider::Codex).then(|| quota_seen(40.0, &fresh)));
+        assert!(flow.quota_waits_due(&soon, 95.0).is_empty());
         assert_eq!(
             flow.quota_waits_due("2099-11-17T12:00:00Z", 95.0),
             vec![QuotaWake {
@@ -5928,7 +6096,7 @@ mod tests {
             let (flow, fake) = flow_with(&s, false, move |job, stop, out| {
                 if kind(job) == "code" && codes.fetch_add(1, Ordering::SeqCst) == 0 {
                     out(
-                        r#"{"type":"result","is_error":true,"result":"Claude AI usage limit reached|1763380800","session_id":"cut-session"}"#,
+                        r#"{"type":"result","is_error":true,"result":"Claude AI usage limit reached|4070908800","session_id":"cut-session"}"#,
                     );
                     return RunOutcome {
                         code: Some(1),
@@ -5947,7 +6115,7 @@ mod tests {
             assert_eq!(d.error.unwrap().code, "quota.hit");
             let svc =
                 crate::AppService::with_flow(s.store.clone(), flow.clone(), config.clone(), s.tasks.clone());
-            svc.wake_after_quota(&config, "2026-11-17T12:00:00Z");
+            svc.wake_after_quota(&config, "2099-01-01T00:00:00Z");
             let d = settle(&flow, &ctx);
             if auto {
                 assert_eq!(d.gate.unwrap().kind, GateKind::Findings);
@@ -5969,7 +6137,7 @@ mod tests {
             } else {
                 assert_eq!(d.error.unwrap().code, "quota.hit");
                 assert_eq!(svc.alerts().len(), 1);
-                svc.wake_after_quota(&config, "2026-11-17T12:00:05Z");
+                svc.wake_after_quota(&config, "2099-01-01T00:00:05Z");
                 assert_eq!(svc.alerts().len(), 1);
                 assert_eq!(
                     fake.jobs

@@ -168,6 +168,12 @@ pub fn implement(plan: &str, brief: Option<&str>, allowed: &[String], note: Opti
     p
 }
 
+/// Added to the Viết code / Sửa lỗi prompt when a run of the step was cut by the usage limit and
+/// its session could not be opened again: part of the change may already be in the tree.
+pub const CUT_BEFORE: &str = "\n\nNote: an earlier run of this step was cut off by the usage limit and its session is gone. \
+     The working tree may already hold part of this change: check `git status` and `git diff` first, \
+     keep what is right, and finish the rest.\n";
+
 /// Viết code / Sửa lỗi again after the usage limit cut its run: the session goes on.
 pub fn carry_on_cut(step: &str, allowed: &[String]) -> String {
     let mut p = format!(

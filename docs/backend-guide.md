@@ -24,6 +24,8 @@
 | Tab Diff | `core/vcs/src/diff.rs` (đọc `git diff`), `Git::task_diff`, `core/orchestrator/src/diffview.rs` | Chỉ đọc: `--no-optional-locks`, `diff.autoRefreshIndex=false`; dấu vân tay từng file (`diff.seen`) cho "đổi từ lần xem trước" |
 | Thông báo (chuông, toast Windows) | `core/orchestrator/src/alerts.rs`, `AppService::poll_alerts`, `Flow::set_alert_sink`, `apps/desktop/src-tauri/src/tray.rs` (`spawn_watcher`) | Core quyết báo gì; vỏ Tauri chỉ hiện toast (`tauri-plugin-notification`) theo config `notify` |
 | Icon khay hạn mức | `core/orchestrator/src/tray.rs` (vẽ RGBA + tooltip), `apps/desktop/src-tauri/src/tray.rs` | Vỏ chỉ đưa pixel cho Windows; tooltip dưới 128 ký tự |
+| Xoá / khôi phục thông báo, thùng rác 30 ngày / 500 mục | `core/orchestrator/src/alerts.rs`, `AppService::{delete_alerts, restore_alerts}`, `alerts_api.rs`, `ui/src/app/AlertBell.tsx` | `AlertView.deletedAt`; chỉ đếm chưa đọc ở danh sách hoạt động. Dọn theo thời gian xoá, lưu bộ đếm id qua restart; mock trong `ipc/mockTask.ts` |
+| Chống cảnh báo quota lặp khi đổi nguồn | `alerts::{quota_is_new, quota_mark, quota_crossings}`, `AppService::check_quota` | Giữ mức cao nhất tới hết reset; bỏ cửa sổ đã reset, gộp cùng provider. Marker SQLite cũ `level@reset` vẫn đọc được |
 | Comment OpenProject theo nhịp | `core/orchestrator/src/live.rs` (`fetch_changed_comments`) | Chỉ đọc lại task có `updatedAt` đổi |
 | Kiểm tra bản mới | `core/update/src/lib.rs`, `core/orchestrator/src/updater.rs`, config `update` | Chỉ GET GitHub Releases; không tự tải, không tự cài |
 | Field gửi qua IPC | `core/domain/src/view.rs` **và** `apps/desktop/ui/src/ipc/types.ts` | Sửa cả hai; test `view::tests` khoá JSON |

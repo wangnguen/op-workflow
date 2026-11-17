@@ -854,6 +854,9 @@ pub struct AlertView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab: Option<String>,
     pub read: bool,
+    /// Moved to Deleted at this time; permanently removed 30 days later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
 }
 
 // ---------- update check ----------

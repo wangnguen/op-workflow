@@ -267,12 +267,33 @@ let alerts: AlertView[] = [
   },
 ];
 
-export const mockAlerts = (): AlertView[] => alerts;
-export const mockUnreadAlerts = (): number => alerts.filter((a) => !a.read).length;
+const DELETED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function mockAlerts(): AlertView[] {
+  alerts = alerts.filter((a) => {
+    const age = a.deletedAt ? Date.now() - Date.parse(a.deletedAt) : NaN;
+    return !Number.isFinite(age) || age < DELETED_RETENTION_MS;
+  });
+  return alerts.map((a) => ({ ...a }));
+}
+export const mockUnreadAlerts = (): number => mockAlerts().filter((a) => !a.read && !a.deletedAt).length;
 
 export function mockMarkAlertsRead(ids: number[]): null {
-  alerts = alerts.map((a) => (ids.length === 0 || ids.includes(a.id) ? { ...a, read: true } : a));
+  alerts = alerts.map((a) => (!a.deletedAt && (ids.length === 0 || ids.includes(a.id)) ? { ...a, read: true } : a));
   return null;
+}
+
+export function mockDeleteAlerts(ids: number[]): AlertView[] {
+  const at = new Date().toISOString();
+  alerts = mockAlerts().map((a) => !a.deletedAt && (ids.length === 0 || ids.includes(a.id))
+    ? { ...a, deletedAt: at, read: true } : a);
+  return mockAlerts();
+}
+
+export function mockRestoreAlerts(ids: number[]): AlertView[] {
+  alerts = mockAlerts().map((a) => a.deletedAt && (ids.length === 0 || ids.includes(a.id))
+    ? { ...a, deletedAt: undefined, read: true } : a);
+  return mockAlerts();
 }
 
 // ---------- notification switches ----------

@@ -42,6 +42,8 @@ UI hỏi `board_snapshot` / `orbit_snapshot` và chi tiết task theo nhịp →
 
 `checks`, `harness`, `browsertest` trong orchestrator đọc kết quả lệnh/test thành ghi chú và finding. File task, scratch và thư viện harness ở ngoài repo. `agents::procs` theo dõi/dọn cây tiến trình AI để lại; vỏ Tauri thực hiện lựa chọn thu xuống khay/thoát sau khi hỏi người dùng.
 
+Chuông lưu thông báo, dấu đã đọc và `deletedAt` trong `alerts.json`; đọc được cả file mảng cũ và file mới có bộ đếm id để không dùng lại id sau khi dọn hết thùng rác. Xoá đánh dấu đã đọc và loại khỏi hàng đợi toast; khôi phục không phát lại toast. Thông báo đã xoá giữ riêng 30 ngày từ lúc xoá và tối đa 500 mục (quá thì bỏ lần xoá cũ nhất trước), dọn khi mở app và trong vòng poll; danh sách hoạt động giữ 100 mục, phần vượt giới hạn được chuyển vào Đã xoá để vẫn khôi phục được trong 30 ngày. Cảnh báo quota giữ mức cao nhất đã báo đến hết kỳ reset (không coi timestamp lệch giữa các nguồn là kỳ mới), gộp các cửa sổ cùng provider trong một lần poll.
+
 Gauge quota cập nhật từ các nguồn trong `live`; `quotagate` dùng cùng quy tắc reset như gauge để nhắc trước bước và dừng Tự chạy. `flow` lưu bước/phiên bị hết hạn mức hoặc bước chờ trước launch; `AppService::poll_alerts` xét reset mỗi lần shell hỏi (~3 giây), chạy tiếp hoặc báo chuông theo Tự chạy. DTO `QuotaNote` và `FlowError.resetsAt` mang thông tin sang UI, không thêm lần gọi AI để hiện cảnh báo.
 
 ## Gọi mạng

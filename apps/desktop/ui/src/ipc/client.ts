@@ -36,6 +36,8 @@ import {
 import {
   mockAlerts,
   mockMarkAlertsRead,
+  mockDeleteAlerts,
+  mockRestoreAlerts,
   mockRefreshBriefComments,
   mockSetNotify,
   mockTaskComments,
@@ -216,6 +218,12 @@ export const getAlerts = (): Promise<AlertView[]> => call("alerts", mockAlerts);
 /** Marks alerts read; no ids = all. */
 export const markAlertsRead = (ids: number[] = []): Promise<null> =>
   call("mark_alerts_read", () => mockMarkAlertsRead(ids), { ids });
+
+export const deleteAlerts = (ids: number[]): Promise<AlertView[]> =>
+  call("delete_alerts", () => mockDeleteAlerts(ids), { ids });
+
+export const restoreAlerts = (ids: number[]): Promise<AlertView[]> =>
+  call("restore_alerts", () => mockRestoreAlerts(ids), { ids });
 /** Turns one kind of Windows notification on or off. */
 export const setNotify = (kind: NotifyKind, on: boolean): Promise<SettingsView> =>
   call("set_notify", () => ({ ...mockSettings(), notify: mockSetNotify(kind, on) }), { kind, on });

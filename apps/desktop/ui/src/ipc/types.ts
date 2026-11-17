@@ -554,6 +554,8 @@ export interface AlertView {
   /** task window tab that shows it */
   tab?: string;
   read: boolean;
+  /** Moved to Deleted; removed permanently 30 days after this time. */
+  deletedAt?: string;
 }
 
 // ---------- update check ----------
@@ -1002,6 +1004,8 @@ export interface Commands {
   task_diff: DiffView;
   alerts: AlertView[];
   mark_alerts_read: null;
+  delete_alerts: AlertView[];
+  restore_alerts: AlertView[];
   set_notify: SettingsView;
   set_step_choice: SettingsView;
   set_quota_probe: SettingsView;
@@ -1040,6 +1044,8 @@ export interface CommandArgs {
   refresh_brief_comments: { wpId: number };
   task_diff: { wpId: number; markSeen: boolean };
   mark_alerts_read: { ids: number[] };
+  delete_alerts: { ids: number[] };
+  restore_alerts: { ids: number[] };
   set_notify: { kind: NotifyKind; on: boolean };
   set_step_choice: { choice: StepChoiceRequest };
   set_quota_probe: { activeSec: number; idleMin: number };

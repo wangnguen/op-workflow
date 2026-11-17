@@ -107,16 +107,30 @@ pub fn describe(p: Provider, w: &QuotaWindow) -> String {
     )
 }
 
-/// What a CLI says when the plan's usage limit ends a run ("Claude AI usage limit reached",
-/// "You've hit your limit · resets 3pm", Codex "You've hit your usage limit", HTTP 429).
+/// What a CLI says when the plan's usage limit (or an API rate limit) ends a run ("Claude AI
+/// usage limit reached", "You've hit your limit · resets 3pm", Codex "You've hit your usage
+/// limit", "API Error: 429 … rate_limit_error", "429 Too Many Requests"). A bare "429" is not
+/// enough: a line number or a file count in the error text would match it.
 static QUOTA_HIT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)usage[ _-]?limit|hit your (usage )?limit|rate[ _-]?limit|quota[ _ ]exceeded|insufficient_quota|too many requests|\b429\b")
-        .expect("valid regex")
+    Regex::new(
+        r"(?i)usage[ _-]?limit|hit your (usage )?limit|rate[ _-]?limit(ed|[ _-](error|exceeded|reached))|quota[ _-]exceeded|insufficient_quota|too many requests|\(429\)|(status|api error):? 429\b",
+    )
+    .expect("valid regex")
 });
 
 /// The failed run's text says the usage limit ended it.
 pub fn looks_quota_hit(text: &str) -> bool {
     QUOTA_HIT.is_match(text)
+}
+
+/// The CLI could not open the session it was told to resume (Claude "No conversation found with
+/// session ID", Codex "no rollout found" / "thread not found").
+pub fn looks_session_lost(text: &str) -> bool {
+    static LOST: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)no (conversation|saved session|session|rollout|thread) found|(thread|session|conversation) not found")
+            .expect("valid regex")
+    });
+    LOST.is_match(text)
 }
 
 /// Claude's "Claude AI usage limit reached|1763380800": the reset time it carries.
@@ -127,9 +141,15 @@ pub fn reset_in_text(text: &str) -> Option<String> {
     opw_quota::unix_to_rfc3339(secs)
 }
 
-/// When the run can go on: the reset time the CLI gave, else the reset of the fullest window.
-pub fn reset_time(text: &str, snap: Option<&QuotaSnapshot>) -> Option<String> {
-    reset_in_text(text).or_else(|| snap.and_then(worst).and_then(|w| w.resets_at.clone()))
+/// When the run can go on: the reset time the CLI gave, else the reset of the windows the gauge
+/// shows at or over `stop` (all of them must reset). A window far from full says nothing about
+/// this limit (a passing API 429), and a time already past tells nothing either. `None` =
+/// unknown: the flow then waits a few minutes and for a gauge reading taken after the cut.
+pub fn reset_time(text: &str, snap: Option<&QuotaSnapshot>, stop: f64, now: &str) -> Option<String> {
+    let ahead = |at: &String| opw_quota::seconds_between(now, at).is_some_and(|s| s > 0.0);
+    reset_in_text(text)
+        .filter(ahead)
+        .or_else(|| snap.and_then(|s| stop_reset(s, stop)).filter(ahead))
 }
 
 #[cfg(test)]
@@ -175,18 +195,43 @@ mod tests {
         ] {
             assert!(looks_quota_hit(hit), "{hit}");
         }
+        assert!(looks_quota_hit(
+            "API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}"
+        ));
+        assert!(looks_quota_hit("Request rejected (429)"));
         assert!(!looks_quota_hit("Claude báo lỗi: cannot find module"));
         assert!(!looks_quota_hit("max turns limit reached"));
         assert!(!looks_quota_hit("maximum budget limit reached"));
+        // a line number, a count, or a stream event name is not a limit
+        assert!(!looks_quota_hit("src/a.ts(429,5): error TS2322"));
+        assert!(!looks_quota_hit("checked 429 files"));
+        assert!(!looks_quota_hit(r#"{"type":"rate_limit_event"}"#));
+        assert!(looks_session_lost("No conversation found with session ID: 3f2a"));
+        assert!(!looks_session_lost("cannot find module"));
         assert_eq!(
             reset_in_text("Claude AI usage limit reached|1763380800").as_deref(),
             Some("2025-11-17T12:00:00Z")
         );
+        let now = "2026-11-17T08:00:00Z";
+        // the window at the stop level gives the time; a past time from the CLI says nothing
         assert_eq!(
-            reset_time("hit your limit", Some(&s)).as_deref(),
+            reset_time("hit your limit", Some(&s), 95.0, now).as_deref(),
             Some("2026-11-20T00:00:00Z")
         );
-        assert_eq!(reset_time("hit your limit", None), None);
+        assert_eq!(
+            reset_time("Claude AI usage limit reached|1763380800", Some(&s), 95.0, now).as_deref(),
+            Some("2026-11-20T00:00:00Z")
+        );
+        assert_eq!(
+            reset_time("Claude AI usage limit reached|4070908800", None, 95.0, now).as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+        assert_eq!(reset_time("hit your limit", None, 95.0, now), None);
+        // nothing near full (an API 429): no reset to wait for
+        assert_eq!(
+            reset_time("429 Too Many Requests", Some(&snap(40.0, 50.0)), 95.0, now),
+            None
+        );
     }
 
     #[test]

@@ -17,6 +17,16 @@ pub fn mark_alerts_read(ids: Vec<u64>, service: State<'_, AppService>) {
     service.mark_alerts_read(&ids);
 }
 
+#[tauri::command]
+pub fn delete_alerts(ids: Vec<u64>, service: State<'_, AppService>) -> Vec<AlertView> {
+    service.delete_alerts(&ids)
+}
+
+#[tauri::command]
+pub fn restore_alerts(ids: Vec<u64>, service: State<'_, AppService>) -> Vec<AlertView> {
+    service.restore_alerts(&ids)
+}
+
 /// Turn one kind of Windows notification on or off (`notify` in config.json).
 #[tauri::command]
 pub fn set_notify(

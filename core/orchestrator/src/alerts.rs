@@ -1,6 +1,6 @@
 //! The bell: alerts from the workflow (a step ended and waits), OpenProject (new comments, a task
 //! moved to Test failed / Reopened) and quota levels. The last [`KEEP`] are kept in
-//! `<data>/alerts.json` with their read marks, so a restart keeps the bell; the shell shows the
+//! `<data>/alerts.json` with their read/deleted marks, so a restart keeps the bell; the shell shows the
 //! new ones as Windows notifications when that kind is on (`notify` in config). Alerts read back
 //! from the file are never shown as notifications again.
 
@@ -9,11 +9,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use opw_domain::view::{AlertKind, AlertView, NotifySettings, Provider, QuotaSnapshot, QuotaWindowKind};
+use serde::{Deserialize, Serialize};
 
-/// Alerts kept for the bell.
+/// Active alerts kept for the bell (Deleted uses its separate 30-day retention).
 pub const KEEP: usize = 100;
 /// The bell's file in the data folder.
 pub const FILE: &str = "alerts.json";
+pub const DELETED_RETENTION_SECS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
+/// At most this many alerts in Deleted (overflow from the active list lands there too); the
+/// oldest deletions go first, before their 30 days.
+pub const DELETED_KEEP: usize = 500;
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedBell {
+    next_id: u64,
+    items: Vec<AlertView>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedFile {
+    Current(SavedBell),
+    Legacy(Vec<AlertView>),
+}
 
 /// An alert before it gets its id and time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,28 +64,36 @@ pub struct Alerts {
 impl Alerts {
     /// The bell saved in `file` (empty when the file is missing or unreadable).
     pub fn open(file: PathBuf) -> Self {
-        let mut items: Vec<AlertView> = std::fs::read_to_string(&file)
+        let saved: Option<SavedFile> = std::fs::read_to_string(&file)
             .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
+            .and_then(|text| serde_json::from_str(&text).ok());
+        let (next_id, mut items) = match saved {
+            Some(SavedFile::Current(s)) => (s.next_id, s.items),
+            Some(SavedFile::Legacy(items)) => (0, items),
+            None => (0, Vec::new()),
+        };
         items.sort_by_key(|a| std::cmp::Reverse(a.id));
-        items.truncate(KEEP);
         let inner = Inner {
-            next_id: items.iter().map(|a| a.id).max().unwrap_or(0),
+            next_id: next_id.max(items.iter().map(|a| a.id).max().unwrap_or(0)),
             items: items.into(),
             fresh: Vec::new(),
         };
-        Self {
+        let alerts = Self {
             inner: Mutex::new(inner),
             file: Some(file),
-        }
+        };
+        alerts.purge_expired(&opw_quota::now_rfc3339());
+        alerts
     }
 
     /// Write the bell to its file (a temp file renamed over it, so a crash leaves the old one).
     fn save(&self, inner: &Inner) {
         let Some(file) = &self.file else { return };
-        let items: Vec<&AlertView> = inner.items.iter().collect();
-        if let Ok(json) = serde_json::to_string(&items) {
+        let saved = SavedBell {
+            next_id: inner.next_id,
+            items: inner.items.iter().cloned().collect(),
+        };
+        if let Ok(json) = serde_json::to_string(&saved) {
             let _ = write_replacing(file, &json);
         }
     }
@@ -84,9 +111,10 @@ impl Alerts {
             body: alert.body,
             tab: alert.tab,
             read: false,
+            deleted_at: None,
         };
         inner.items.push_front(view.clone());
-        inner.items.truncate(KEEP);
+        trim_active(&mut inner, at);
         inner.fresh.push(view);
         self.save(&inner);
     }
@@ -110,7 +138,15 @@ impl Alerts {
     pub fn unread(&self) -> u32 {
         self.inner
             .lock()
-            .map(|i| u32::try_from(i.items.iter().filter(|a| !a.read).count()).unwrap_or(u32::MAX))
+            .map(|i| {
+                u32::try_from(
+                    i.items
+                        .iter()
+                        .filter(|a| !a.read && a.deleted_at.is_none())
+                        .count(),
+                )
+                .unwrap_or(u32::MAX)
+            })
             .unwrap_or_default()
     }
 
@@ -128,7 +164,11 @@ impl Alerts {
     fn mark(&self, which: impl Fn(&AlertView) -> bool) {
         let Ok(mut inner) = self.inner.lock() else { return };
         let mut changed = false;
-        for a in inner.items.iter_mut().filter(|a| !a.read && which(a)) {
+        for a in inner
+            .items
+            .iter_mut()
+            .filter(|a| !a.read && a.deleted_at.is_none() && which(a))
+        {
             a.read = true;
             changed = true;
         }
@@ -136,6 +176,106 @@ impl Alerts {
             self.save(&inner);
         }
     }
+
+    /// Move selected active alerts to Deleted; empty selects all active alerts.
+    /// They become read and cannot be handed to the shell as fresh toasts afterwards.
+    pub fn delete(&self, ids: &[u64], now: &str) {
+        let Ok(mut inner) = self.inner.lock() else { return };
+        let mut removed = Vec::new();
+        for a in inner
+            .items
+            .iter_mut()
+            .filter(|a| a.deleted_at.is_none() && (ids.is_empty() || ids.contains(&a.id)))
+        {
+            a.deleted_at = Some(now.to_owned());
+            a.read = true;
+            removed.push(a.id);
+        }
+        if !removed.is_empty() {
+            inner.fresh.retain(|a| !removed.contains(&a.id));
+            cap_deleted(&mut inner);
+            self.save(&inner);
+        }
+    }
+
+    /// Restore selected alerts (empty = all deleted), keeping them read and never re-toasting.
+    pub fn restore(&self, ids: &[u64]) {
+        let Ok(mut inner) = self.inner.lock() else { return };
+        let mut restored = VecDeque::new();
+        inner.items.retain_mut(|a| {
+            if a.deleted_at.is_none() || (!ids.is_empty() && !ids.contains(&a.id)) {
+                return true;
+            }
+            a.deleted_at = None;
+            a.read = true;
+            restored.push_back(a.clone());
+            false
+        });
+        if !restored.is_empty() {
+            // Restoring an old item into a full bell must keep that restored item.
+            restored.append(&mut inner.items);
+            inner.items = restored;
+            trim_active(&mut inner, &opw_quota::now_rfc3339());
+            self.save(&inner);
+        }
+    }
+
+    /// Called at startup and while the app runs. The 30 days start at deletion, not creation.
+    pub fn purge_expired(&self, now: &str) {
+        let Ok(mut inner) = self.inner.lock() else { return };
+        let before = inner.items.len();
+        inner.items.retain(|a| {
+            !a.deleted_at.as_deref().is_some_and(|deleted| {
+                opw_quota::seconds_between(deleted, now).is_some_and(|age| age >= DELETED_RETENTION_SECS)
+            })
+        });
+        let archived = trim_active(&mut inner, now);
+        if before != inner.items.len() || archived {
+            self.save(&inner);
+        }
+    }
+}
+
+/// Keep overflow recoverable instead of erasing other alerts when an old one is restored.
+fn trim_active(inner: &mut Inner, now: &str) -> bool {
+    let mut active = 0;
+    let mut archived = Vec::new();
+    for a in &mut inner.items {
+        if a.deleted_at.is_some() {
+            continue;
+        }
+        active += 1;
+        if active > KEEP {
+            a.deleted_at = Some(now.to_owned());
+            a.read = true;
+            archived.push(a.id);
+        }
+    }
+    inner.fresh.retain(|a| !archived.contains(&a.id));
+    let capped = cap_deleted(inner);
+    !archived.is_empty() || capped
+}
+
+/// Drop the oldest deletions past [`DELETED_KEEP`], so the file and every bell poll stay small.
+fn cap_deleted(inner: &mut Inner) -> bool {
+    let deleted = inner.items.iter().filter(|a| a.deleted_at.is_some()).count();
+    if deleted <= DELETED_KEEP {
+        return false;
+    }
+    let since_epoch = |at: &str| opw_quota::seconds_between("1970-01-01T00:00:00Z", at).unwrap_or(0.0);
+    let mut by_age: Vec<(f64, u64)> = inner
+        .items
+        .iter()
+        .filter_map(|a| a.deleted_at.as_deref().map(|at| (since_epoch(at), a.id)))
+        .collect();
+    by_age.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let drop: std::collections::HashSet<u64> = by_age
+        .iter()
+        .take(deleted - DELETED_KEEP)
+        .map(|(_, id)| *id)
+        .collect();
+    inner.items.retain(|a| !drop.contains(&a.id));
+    true
 }
 
 fn write_replacing(file: &Path, text: &str) -> std::io::Result<()> {
@@ -190,14 +330,21 @@ pub struct QuotaCross {
 }
 
 /// Windows at or above one of `levels` (e.g. `[80, 95]`), with the highest level reached.
-pub fn quota_crossings(quota: &[QuotaSnapshot], levels: &[u8]) -> Vec<QuotaCross> {
+pub fn quota_crossings(quota: &[QuotaSnapshot], levels: &[u8], now: &str) -> Vec<QuotaCross> {
     let mut out = Vec::new();
     for snap in quota {
         for w in &snap.windows {
+            if !w.used_pct.is_finite()
+                || w.resets_at
+                    .as_deref()
+                    .is_some_and(|r| opw_quota::seconds_between(r, now).is_some_and(|s| s >= 0.0))
+            {
+                continue;
+            }
             let Some(level) = levels
                 .iter()
                 .copied()
-                .filter(|l| w.used_pct >= f64::from(*l))
+                .filter(|l| (1..=100).contains(l) && w.used_pct >= f64::from(*l))
                 .max()
             else {
                 continue;
@@ -224,18 +371,40 @@ pub fn quota_crossings(quota: &[QuotaSnapshot], levels: &[u8]) -> Vec<QuotaCross
 }
 
 /// What the app remembers about an announced level: `95@<resets_at>`.
-pub fn quota_mark(c: &QuotaCross) -> String {
-    format!("{}@{}", c.level, c.resets_at.as_deref().unwrap_or_default())
+pub fn quota_mark(c: &QuotaCross, remembered: Option<&str>, now: &str) -> String {
+    let previous = remembered.and_then(|m| m.split_once('@'));
+    let same_period = previous.is_some_and(|(_, reset)| !reset_passed(reset, now));
+    let level = if same_period {
+        c.level.max(
+            previous
+                .and_then(|(level, _)| level.parse::<u8>().ok())
+                .unwrap_or(0),
+        )
+    } else {
+        c.level
+    };
+    let old_reset = previous.map(|(_, r)| r).filter(|r| !r.is_empty());
+    let reset = match (same_period.then_some(old_reset).flatten(), c.resets_at.as_deref()) {
+        (Some(old), Some(new)) if opw_quota::seconds_between(new, old).is_some_and(|s| s >= 0.0) => old,
+        (_, Some(new)) => new,
+        (Some(old), None) => old,
+        _ => "",
+    };
+    format!("{level}@{reset}")
 }
 
 /// Announce `c` unless the same window already got this level (or a higher one) in the same
 /// reset period.
-pub fn quota_is_new(c: &QuotaCross, remembered: Option<&str>) -> bool {
+pub fn quota_is_new(c: &QuotaCross, remembered: Option<&str>, now: &str) -> bool {
     let Some((level, resets)) = remembered.and_then(|m| m.split_once('@')) else {
         return true;
     };
     let level: u8 = level.parse().unwrap_or(0);
-    resets != c.resets_at.as_deref().unwrap_or_default() || c.level > level
+    reset_passed(resets, now) || c.level > level
+}
+
+fn reset_passed(reset: &str, now: &str) -> bool {
+    opw_quota::seconds_between(reset, now).is_some_and(|s| s >= 0.0)
 }
 
 /// "Claude · 5 giờ đã dùng 82%".
@@ -284,7 +453,7 @@ mod tests {
         for i in 0..(KEEP as u64 + 5) {
             a.push(new(AlertKind::Error, i), "x");
         }
-        assert_eq!(a.list().len(), KEEP);
+        assert_eq!(a.list().iter().filter(|a| a.deleted_at.is_none()).count(), KEEP);
     }
 
     #[test]
@@ -335,6 +504,8 @@ mod tests {
 
     #[test]
     fn quota_levels_are_announced_once_per_reset() {
+        let now = "2026-11-17T08:00:00Z";
+        let reset = "2026-11-20T00:00:00Z";
         let snap = |used: f64, resets: &str| QuotaSnapshot {
             provider: Provider::Claude,
             windows: vec![QuotaWindow {
@@ -346,16 +517,147 @@ mod tests {
             observed_at: "x".into(),
             plan: None,
         };
-        assert!(quota_crossings(&[snap(79.0, "r1")], &[80, 95]).is_empty());
-        let c = &quota_crossings(&[snap(82.0, "r1")], &[80, 95])[0];
+        assert!(quota_crossings(&[snap(79.0, reset)], &[80, 95], now).is_empty());
+        let c = &quota_crossings(&[snap(82.0, reset)], &[80, 95], now)[0];
         assert_eq!((c.key.as_str(), c.level), ("claude.sevenDay", 80));
-        assert!(quota_is_new(c, None));
-        let mark = quota_mark(c);
-        assert!(!quota_is_new(c, Some(&mark)));
-        let higher = &quota_crossings(&[snap(96.0, "r1")], &[80, 95])[0];
-        assert!(quota_is_new(higher, Some(&mark)));
-        let next_week = &quota_crossings(&[snap(81.0, "r2")], &[80, 95])[0];
-        assert!(quota_is_new(next_week, Some(&mark)));
+        assert!(quota_is_new(c, None, now));
+        let mark = quota_mark(c, None, now);
+        assert!(!quota_is_new(c, Some(&mark), now));
+        let higher = &quota_crossings(&[snap(96.0, reset)], &[80, 95], now)[0];
+        assert!(quota_is_new(higher, Some(&mark), now));
+        let later = "2026-11-21T00:00:00Z";
+        let next_week = &quota_crossings(&[snap(81.0, "2026-11-27T00:00:00Z")], &[80, 95], later)[0];
+        assert!(quota_is_new(next_week, Some(&mark), later));
+        assert!(quota_crossings(&[snap(100.0, reset)], &[80, 95], later).is_empty());
         assert_eq!(quota_title(higher), "Claude · tuần đã dùng 96%");
+    }
+
+    #[test]
+    fn changing_sources_and_reset_formats_do_not_repeat_exhausted_quota() {
+        let now = "2026-11-17T09:00:00Z";
+        let mut c = QuotaCross {
+            key: "claude.fiveHour".into(),
+            provider: Provider::Claude,
+            window: QuotaWindowKind::FiveHour,
+            level: 80,
+            used_pct: 91.0,
+            resets_at: Some("2026-11-17T12:19:59Z".into()),
+        };
+        let mut mark = quota_mark(&c, None, now);
+        c.resets_at = Some("2026-11-17T19:20:00+07:00".into());
+        assert!(!quota_is_new(&c, Some(&mark), now));
+        c.level = 95;
+        c.used_pct = 100.0;
+        assert!(quota_is_new(&c, Some(&mark), now), "escalate once");
+        mark = quota_mark(&c, Some(&mark), now);
+        for i in 0..12 {
+            c.level = if i % 2 == 0 { 80 } else { 95 };
+            c.used_pct = if i % 2 == 0 { 91.0 } else { 100.0 };
+            c.resets_at = match i % 3 {
+                0 => None,
+                1 => Some("2026-11-17T12:19:59.999Z".into()),
+                _ => Some("2026-11-17T19:20:00+07:00".into()),
+            };
+            assert!(!quota_is_new(&c, Some(&mark), now));
+            mark = quota_mark(&c, Some(&mark), now);
+            assert!(mark.starts_with("95@"));
+        }
+    }
+
+    #[test]
+    fn deleted_keeps_the_latest_deletions_up_to_its_cap() {
+        let a = Alerts::default();
+        for i in 0..(KEEP + DELETED_KEEP + 10) as u64 {
+            a.push(new(AlertKind::Comment, i), "2099-01-01T00:00:00Z");
+        }
+        let list = a.list();
+        assert_eq!(list.iter().filter(|x| x.deleted_at.is_none()).count(), KEEP);
+        assert_eq!(
+            list.iter().filter(|x| x.deleted_at.is_some()).count(),
+            DELETED_KEEP
+        );
+        // the first alerts overflowed first, so they were dropped first
+        assert!(
+            list.iter().all(|x| x.id > 10),
+            "{:?}",
+            list.iter().map(|x| x.id).min()
+        );
+        a.delete(&[], "2099-01-02T00:00:00Z");
+        let list = a.list();
+        assert_eq!(list.len(), DELETED_KEEP);
+        assert!(list.iter().all(|x| x.deleted_at.is_some()));
+        // the alerts deleted just now stay, older overflow goes
+        assert_eq!(
+            list.iter()
+                .filter(|x| x.deleted_at.as_deref() == Some("2099-01-02T00:00:00Z"))
+                .count(),
+            KEEP
+        );
+    }
+
+    #[test]
+    fn deleted_alerts_are_read_restorable_and_never_toasted_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        let a = Alerts::open(file.clone());
+        a.push(new(AlertKind::Quota, 1), "2000-01-01T00:00:00Z");
+        a.push(new(AlertKind::Comment, 2), "2099-01-01T00:00:00Z");
+        a.delete(&[1], "2099-01-01T00:00:00Z");
+        a.delete(&[1], "2099-01-02T00:00:00Z"); // deleting again does not extend retention
+        assert_eq!(a.unread(), 1);
+        assert_eq!(a.take_fresh().iter().map(|a| a.id).collect::<Vec<_>>(), [2]);
+        let b = Alerts::open(file);
+        let deleted = b.list().into_iter().find(|a| a.id == 1).unwrap();
+        assert!(deleted.read);
+        assert_eq!(deleted.deleted_at.as_deref(), Some("2099-01-01T00:00:00Z"));
+        b.restore(&[1]);
+        assert_eq!(b.unread(), 1, "restoring keeps it read");
+        assert!(b.list().iter().all(|a| a.deleted_at.is_none()));
+        assert!(b.take_fresh().is_empty());
+        b.delete(&[], "2099-01-01T00:00:00Z");
+        assert_eq!(b.unread(), 0);
+    }
+
+    #[test]
+    fn only_deleted_alerts_expire_after_30_days_and_ids_are_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        let a = Alerts::open(file.clone());
+        a.push(new(AlertKind::Quota, 1), "2000-01-01T00:00:00Z");
+        a.delete(&[1], "2099-01-01T00:00:00Z");
+        a.purge_expired("2099-01-30T23:59:59Z");
+        assert_eq!(a.list().len(), 1, "creation time does not count");
+        a.purge_expired("2099-01-31T07:00:00+07:00");
+        assert!(a.list().is_empty());
+        let b = Alerts::open(file);
+        b.push(new(AlertKind::Comment, 2), "2000-01-01T00:00:00Z");
+        b.purge_expired("2099-02-02T00:00:00Z");
+        assert_eq!(b.list().len(), 1, "active alerts have no 30-day expiry");
+        assert_eq!(b.list()[0].id, 2);
+    }
+
+    #[test]
+    fn legacy_bells_load_and_new_active_alerts_cannot_evict_deleted_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        std::fs::write(&file, r#"[{"id":41,"at":"2026-11-17T00:00:00Z","kind":"quota","title":"quota","body":"","read":false}]"#).unwrap();
+        let a = Alerts::open(file.clone());
+        assert_eq!(a.unread(), 1);
+        a.delete(&[41], "2099-01-01T00:00:00Z");
+        for i in 0..KEEP + 5 {
+            a.push(new(AlertKind::Comment, i as u64), "2099-01-01T00:00:00Z");
+        }
+        assert_eq!(a.list().iter().filter(|a| a.deleted_at.is_none()).count(), KEEP);
+        assert!(a.list().iter().any(|a| a.id == 41 && a.deleted_at.is_some()));
+        a.restore(&[41]);
+        assert!(a.list().iter().any(|a| a.id == 41 && a.deleted_at.is_none()));
+        assert_eq!(
+            a.list().len(),
+            KEEP + 6,
+            "restoring must not erase other active alerts"
+        );
+        let b = Alerts::open(file);
+        assert!(b.list().iter().any(|a| a.id == 41));
+        assert!(b.take_fresh().is_empty());
     }
 }

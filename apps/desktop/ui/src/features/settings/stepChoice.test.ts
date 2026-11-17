@@ -99,9 +99,9 @@ describe("model and effort options", () => {
 
 describe("bell filter", () => {
   const alert = (id: number, read: boolean): AlertView => ({ id, at: "2026-11-14T10:00:00Z", kind: "gate", title: "t", body: "", read });
-  it("shows unread only, or everything", () => {
+  it("shows unread only, or everything, newest first", () => {
     const items = [alert(1, true), alert(2, false)];
     expect(visibleAlerts(items, "unread").map((a) => a.id)).toEqual([2]);
-    expect(visibleAlerts(items, "all").map((a) => a.id)).toEqual([1, 2]);
+    expect(visibleAlerts(items, "all").map((a) => a.id)).toEqual([2, 1]);
   });
 });

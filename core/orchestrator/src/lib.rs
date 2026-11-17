@@ -1352,6 +1352,7 @@ impl AppService {
 
     /// The bell, newest first.
     pub fn alerts(&self) -> Vec<AlertView> {
+        self.alerts.purge_expired(&opw_quota::now_rfc3339());
         self.alerts.list()
     }
 
@@ -1360,10 +1361,22 @@ impl AppService {
         self.alerts.mark_read(ids);
     }
 
+    pub fn delete_alerts(&self, ids: &[u64]) -> Vec<AlertView> {
+        self.alerts.delete(ids, &opw_quota::now_rfc3339());
+        self.alerts()
+    }
+
+    pub fn restore_alerts(&self, ids: &[u64]) -> Vec<AlertView> {
+        self.alerts.purge_expired(&opw_quota::now_rfc3339());
+        self.alerts.restore(ids);
+        self.alerts.list()
+    }
+
     /// Look for new comments, status changes and quota levels; return the alerts added since the
     /// last call whose kind has Windows notifications on. The shell calls this every few seconds.
     pub fn poll_alerts(&self) -> Vec<AlertView> {
         let now = opw_quota::now_rfc3339();
+        self.alerts.purge_expired(&now);
         let config = self.config();
         if let (Some(state), Some(store)) = (self.live_state(), &self.store) {
             if let Ok(store) = store.lock() {
@@ -1505,22 +1518,49 @@ impl AppService {
     }
 
     fn check_quota(&self, store: &Store, quota: &[QuotaSnapshot], levels: &[u8], now: &str) {
-        for c in alerts::quota_crossings(quota, levels) {
+        let mut announced = Vec::new();
+        for c in alerts::quota_crossings(quota, levels, now) {
             let remembered = store.kv_get(NO_TASK, QUOTA_NOTIFIED, &c.key).ok().flatten();
-            if !alerts::quota_is_new(&c, remembered.as_deref()) {
-                continue;
+            let is_new = alerts::quota_is_new(&c, remembered.as_deref(), now);
+            let mark = alerts::quota_mark(&c, remembered.as_deref(), now);
+            // Preserve the highest announced level while readings/sources fluctuate. Updating
+            // an overlapping reset deadline must not turn it into a new notification period.
+            if remembered.as_deref() != Some(mark.as_str()) {
+                let _ = store.kv_set(NO_TASK, QUOTA_NOTIFIED, &c.key, &mark, now);
             }
-            let _ = store.kv_set(NO_TASK, QUOTA_NOTIFIED, &c.key, &alerts::quota_mark(&c), now);
+            if is_new {
+                announced.push(c);
+            }
+        }
+        // Startup may discover both windows at once: one notification per provider.
+        for provider in [Provider::Claude, Provider::Codex] {
+            let crossed: Vec<_> = announced.iter().filter(|c| c.provider == provider).collect();
+            let Some(first) = crossed.first() else { continue };
+            let title = if crossed.len() == 1 {
+                alerts::quota_title(first)
+            } else if crossed.iter().any(|c| c.used_pct >= 100.0) {
+                format!("{} · đã hết hạn mức", quotagate::provider_name(provider))
+            } else {
+                format!("{} · hạn mức sắp hết", quotagate::provider_name(provider))
+            };
+            let body = crossed
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}: còn {:.0}%",
+                        quotagate::window_name(c.window),
+                        (100.0 - c.used_pct).max(0.0)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
             self.alerts.push(
                 NewAlert {
                     kind: AlertKind::Quota,
                     wp_id: None,
                     task_id: None,
-                    title: alerts::quota_title(&c),
-                    body: format!(
-                        "Còn khoảng {:.0}% tới lần reset. Mở Hạn mức để xem giờ reset.",
-                        (100.0 - c.used_pct).max(0.0)
-                    ),
+                    title,
+                    body: format!("{body}. Mở Hạn mức để xem giờ reset."),
                     tab: None,
                 },
                 now,
@@ -1984,6 +2024,72 @@ struct TaskComments<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_alerts_are_batched_and_fluctuating_sources_do_not_repeat_them() {
+        let svc = AppService::new();
+        let store = Store::open_in_memory().unwrap();
+        let now = "2026-11-17T09:00:00Z";
+        let make = |provider| QuotaSnapshot {
+            provider,
+            windows: vec![
+                opw_domain::view::QuotaWindow {
+                    kind: opw_domain::view::QuotaWindowKind::FiveHour,
+                    used_pct: 100.0,
+                    resets_at: Some("2026-11-17T12:20:00Z".into()),
+                },
+                opw_domain::view::QuotaWindow {
+                    kind: opw_domain::view::QuotaWindowKind::SevenDay,
+                    used_pct: 96.0,
+                    resets_at: Some("2026-11-20T00:00:00Z".into()),
+                },
+            ],
+            source: "probe".into(),
+            observed_at: now.into(),
+            plan: None,
+        };
+        let mut quota = vec![make(Provider::Claude), make(Provider::Codex)];
+        svc.check_quota(&store, &quota, &[80, 95], now);
+        let first = svc.alerts.take_fresh();
+        assert_eq!(first.len(), 2, "one per provider, not per window");
+        assert!(
+            first.iter().any(|a| a.title == "Claude · đã hết hạn mức"),
+            "{:?}",
+            first.iter().map(|a| &a.title).collect::<Vec<_>>()
+        );
+        for i in 0..10 {
+            for snap in &mut quota {
+                snap.windows[0].used_pct = if i % 2 == 0 { 91.0 } else { 100.0 };
+                snap.windows[0].resets_at = Some(
+                    if i % 2 == 0 {
+                        "2026-11-17T12:19:59Z"
+                    } else {
+                        "2026-11-17T19:20:00+07:00"
+                    }
+                    .into(),
+                );
+            }
+            svc.check_quota(&store, &quota, &[80, 95], now);
+        }
+        assert!(svc.alerts.take_fresh().is_empty());
+        assert_eq!(svc.alerts().len(), 2);
+        let restarted = AppService::new();
+        restarted.check_quota(&store, &quota, &[80, 95], now);
+        assert!(
+            restarted.alerts.take_fresh().is_empty(),
+            "SQLite marks prevent a startup burst"
+        );
+        for snap in &mut quota {
+            snap.windows[0].resets_at = Some("2026-11-21T12:20:00Z".into());
+            snap.windows[1].resets_at = Some("2026-11-27T00:00:00Z".into());
+        }
+        restarted.check_quota(&store, &quota, &[80, 95], "2026-11-21T09:00:00Z");
+        assert_eq!(
+            restarted.alerts.take_fresh().len(),
+            2,
+            "the next real period can warn again"
+        );
+    }
 
     #[test]
     fn without_live_threads_the_service_serves_demo_data() {

@@ -117,6 +117,8 @@ fn main() {
             flow_api::push_check,
             alerts_api::alerts,
             alerts_api::mark_alerts_read,
+            alerts_api::delete_alerts,
+            alerts_api::restore_alerts,
             alerts_api::set_notify,
             window_api::close_window,
             window_api::set_on_close,
