@@ -526,8 +526,12 @@ impl AppService {
                 .filter(|wp| active.iter().all(|a| a.wp_id != wp.id) && !done.contains(&wp.id))
                 .map(|wp| InboxItem {
                     task_id: display_id(&prefix, wp.id),
+                    wp_id: wp.id,
                     title: wp.subject.clone(),
                     project: wp.project.clone(),
+                    nx_status: wp.status.clone(),
+                    nx_status_color: state.status_color(&wp.status),
+                    priority: state.priority(&wp.priority),
                 })
                 .collect(),
             distant: Vec::new(),
@@ -1798,12 +1802,13 @@ mod tests {
         let config = Config::load(&opw_config::config_path().unwrap()).unwrap();
         let token = secrets::get(&config.tracker.token).unwrap().expect("token saved");
         let tracker = HttpTracker::new(&config.tracker.base_url, &token);
-        let colors = tracker.priority_colors().unwrap();
+        let p = tracker.priorities().unwrap();
         let tasks = tracker.inbox().unwrap();
         let named = tasks.iter().filter(|t| !t.priority.is_empty()).count();
         println!(
-            "priorities with a colour: {}; inbox tasks with a priority: {named}/{}",
-            colors.len(),
+            "priorities: {} in order, {} with a colour; inbox tasks with a priority: {named}/{}",
+            p.order.len(),
+            p.colors.len(),
             tasks.len()
         );
     }

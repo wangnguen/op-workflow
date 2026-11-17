@@ -4,6 +4,7 @@ import type { InboxItem } from "../../../ipc/types";
 import type { ItemDragStart } from "../OrbitScene";
 import { nebulaLayout, type Point } from "../geometry";
 import type { LayoutOverrides } from "../useLayout";
+import { nebulaTone } from "../nebulaTone";
 import { interactive } from "./interactive";
 import { textUnits, truncate, wrapText } from "./text";
 
@@ -32,6 +33,8 @@ const CARD_LINE_CHARS = 38;
 const CARD_LINE_H = 15;
 
 export const nebulaKey = (taskId: string) => `nebula:${taskId}`;
+/** One gradient per nebula: its priority's colour and strength. */
+const gradientId = (taskId: string) => `g-neb-${taskId.replace(/[^\w-]/g, "_")}`;
 
 /** Lines on a dark rounded card, centred on (0, top); drawn last so nothing covers it. */
 function TextCard({ at, title, lines }: { at: Point; title?: string; lines: string[] }) {
@@ -102,6 +105,23 @@ export function Nebulae({ inbox, notice, selectedTaskId, onSelect, layout, onDra
 
   return (
     <g className="nebulae">
+      <defs>
+        {inbox.map((item) => {
+          const tone = nebulaTone(item.priority);
+          return (
+            <g key={item.taskId}>
+              <radialGradient id={gradientId(item.taskId)}>
+                <stop offset="0%" style={{ stopColor: tone.color, stopOpacity: tone.cloud }} />
+                <stop offset="100%" style={{ stopColor: tone.color, stopOpacity: 0 }} />
+              </radialGradient>
+              <radialGradient id={`${gradientId(item.taskId)}-core`}>
+                <stop offset="0%" style={{ stopColor: tone.color, stopOpacity: tone.core }} />
+                <stop offset="100%" style={{ stopColor: tone.color, stopOpacity: 0 }} />
+              </radialGradient>
+            </g>
+          );
+        })}
+      </defs>
       <IdleCore count={inbox.length} notice={inbox.length === 0 ? notice : undefined} />
       {inbox.map((item, i) => {
         const at = place(i, item.taskId);
@@ -125,8 +145,8 @@ export function Nebulae({ inbox, notice, selectedTaskId, onSelect, layout, onDra
             {...interactive(`${item.taskId} ${item.title}`, () => onSelect(item.taskId), selected)}
           >
             <g transform={`scale(${spot.scale})`}>
-              <ellipse rx={62} ry={38} fill={`url(#g-nebula-${i % 3})`} className="nebula-cloud" />
-              <ellipse rx={30} ry={18} fill={`url(#g-nebula-${i % 3})`} className="nebula-core" />
+              <ellipse rx={62} ry={38} fill={`url(#${gradientId(item.taskId)})`} className="nebula-cloud" />
+              <ellipse rx={30} ry={18} fill={`url(#${gradientId(item.taskId)}-core)`} className="nebula-core" />
               <circle r={2} className="nebula-seed" />
               {selected && <ellipse rx={44} ry={28} className="select-ring" />}
             </g>
@@ -143,7 +163,7 @@ export function Nebulae({ inbox, notice, selectedTaskId, onSelect, layout, onDra
       {hoverItem && hoverAt && (
         <TextCard
           at={{ x: hoverAt.p.x, y: hoverAt.p.y + LABEL_Y * hoverAt.spot.scale - 14 }}
-          title={`${hoverItem.taskId} · ${hoverItem.project}`}
+          title={[hoverItem.taskId, hoverItem.project, hoverItem.priority?.name].filter(Boolean).join(" · ")}
           lines={wrapText(hoverItem.title, CARD_LINE_CHARS)}
         />
       )}

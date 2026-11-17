@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { orbitForFrame } from "../../ipc/mock";
+import { STEP_COUNT } from "../../shared/steps";
 import { groupSessions } from "./sessions";
 
 const NOW = Date.parse("2026-11-13T08:00:00Z");
@@ -27,5 +28,23 @@ describe("groupSessions", () => {
     expect(item?.agent).toBeUndefined();
     // sessions of a task with agents point back at their task
     expect(g.running.concat(g.idle, g.waiting).some((s) => s.agent && s.taskId === active.taskId)).toBe(true);
+  });
+
+  it("gives every AI session of a task the task's name, status, repo, branch and step", () => {
+    const snap = orbitForFrame(10, NOW);
+    const tasks = [snap.active!, ...(snap.others ?? [])];
+    const g = groupSessions(snap);
+    const sessions = [...g.waiting, ...g.running, ...g.idle].filter((s) => s.inApp && s.agent);
+    expect(sessions.some((s) => s.taskId === snap.active!.taskId)).toBe(true);
+    for (const s of sessions) {
+      const task = tasks.find((t) => t.taskId === s.taskId)!;
+      expect(s).toMatchObject({
+        title: `${task.taskId} · ${task.title}`,
+        repo: task.repo,
+        branch: task.branch,
+        nxStatus: task.nxStatus,
+      });
+      expect(s.detail).toMatch(new RegExp(`\\d/${STEP_COUNT} `));
+    }
   });
 });

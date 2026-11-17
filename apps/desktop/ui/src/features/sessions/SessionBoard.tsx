@@ -1,6 +1,7 @@
 import { agentLabel, vi } from "../../i18n/vi";
 import type { AgentKind, OrbitSnapshot, SessionStatus } from "../../ipc/types";
 import { Icon } from "../../shared/ui/Icon";
+import { StatusChip } from "../../shared/ui/StatusChip";
 import { groupSessions, type SessionItem } from "./sessions";
 
 interface Props {
@@ -43,9 +44,19 @@ function Card({ s, onShow, onIssues, onBrief, onOpen, reading }: { s: SessionIte
           <span className="faint" title={s.agent ? `${agentLabel[s.agent]} · ${s.detail}` : s.detail}>
             {s.agent ? `${agentLabel[s.agent]} · ${s.detail}` : s.detail}
           </span>
-          {s.branch && (
-            <span className="s-branch mono" title={s.branch}>
-              {s.branch}
+          {(s.nxStatus || s.repo || s.branch) && (
+            <span className="s-meta">
+              {s.nxStatus && <StatusChip name={s.nxStatus} color={s.nxStatusColor} />}
+              {s.repo && (
+                <span className="s-repo faint" title={s.repo}>
+                  {s.repo}
+                </span>
+              )}
+              {s.branch && (
+                <span className="s-branch mono" title={s.branch}>
+                  {s.branch}
+                </span>
+              )}
             </span>
           )}
         </span>

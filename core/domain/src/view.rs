@@ -32,6 +32,12 @@ pub struct PriorityView {
     /// `#rrggbb` when the OpenProject admin gave the priority a colour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Place in OpenProject's own order of priorities, 1 = lowest; with `ranks` (how many there
+    /// are) it tells how urgent the task is, e.g. the map draws higher ones stronger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranks: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1260,8 +1266,15 @@ pub struct FindingDecision {
 #[serde(rename_all = "camelCase")]
 pub struct InboxItem {
     pub task_id: String,
+    /// OpenProject work package id (opens the task there).
+    pub wp_id: u64,
     pub title: String,
     pub project: String,
+    pub nx_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nx_status_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<PriorityView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

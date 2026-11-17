@@ -27,6 +27,8 @@ interface Props {
   onStartTask?: (taskId: string) => void;
   /** open the task window of a task in progress */
   onOpenTask?: (taskId: string, tab?: TaskTab) => void;
+  /** open an Inbox task on OpenProject */
+  onOpenLink?: (wpId: number) => void;
   /** the map is hidden (Phiên shows Bảng): stop the motion, keep the angle */
   paused?: boolean;
 }
@@ -50,7 +52,7 @@ function statusLine(s: OrbitSnapshot): string {
   return parts.join(" · ");
 }
 
-export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, onStartTask, onOpenTask, paused = false }: Props) {
+export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, onStartTask, onOpenTask, onOpenLink, paused = false }: Props) {
   const [picked, setPicked] = useState<Selection | null>(null);
   // several tasks can be in progress; the picked one sits in the centre
   const [ownFocus, setOwnFocus] = useState<string | null>(null);
@@ -88,7 +90,7 @@ export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, on
 
         <div
           className={`orbit-status${snapshot.active?.gate ? " is-waiting" : snapshot.active ? "" : " is-idle"}`}
-          title={statusLine(snapshot)}
+          title={snapshot.active ? `${statusLine(snapshot)}\n${snapshot.active.title}` : statusLine(snapshot)}
         >
           <span className="orbit-status-dot" />
           {statusLine(snapshot)}
@@ -154,7 +156,7 @@ ${vi.orbit.systemPick}`,
           </button>
         </div>
       </div>
-      <DetailPanel snapshot={snapshot} selection={selection} onSelect={setPicked} now={now} onStartTask={onStartTask} onOpenTask={onOpenTask} />
+      <DetailPanel snapshot={snapshot} selection={selection} onSelect={setPicked} now={now} onStartTask={onStartTask} onOpenTask={onOpenTask} onOpenLink={onOpenLink} />
     </div>
   );
 }

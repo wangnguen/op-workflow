@@ -288,6 +288,19 @@
   align-items: center;
   font-size: 11.5px;
 }
+/* OpenProject status, repo, branch of the task */
+.s-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 4px;
+  min-width: 0;
+}
+.s-repo {
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
 .s-branch {
   color: var(--text-dim);
   font-size: 11.5px;

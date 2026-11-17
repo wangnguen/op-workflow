@@ -113,10 +113,9 @@ impl HttpTracker {
         serde_json::from_str(&body).map_err(|e| TrackerError::Shape(e.to_string()))
     }
 
-    /// Priority colours set by the OpenProject admin (`GET /api/v3/priorities`; same shape as
-    /// statuses). Priorities without a colour are left out.
-    pub fn priority_colors(&self) -> TrackerResult<Vec<(String, String)>> {
-        Ok(crate::parse_status_colors(&self.get_json("/api/v3/priorities")?))
+    /// Priorities (`GET /api/v3/priorities`): the admin's colours and OpenProject's order.
+    pub fn priorities(&self) -> TrackerResult<crate::Priorities> {
+        Ok(crate::parse_priorities(&self.get_json("/api/v3/priorities")?))
     }
 
     /// Status colours set by the OpenProject admin (`GET /api/v3/statuses`).

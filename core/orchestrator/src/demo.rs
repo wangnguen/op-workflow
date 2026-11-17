@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use opw_domain::finding::{Finding, FindingState, Severity};
 use opw_domain::view::{
     AgentKind, AgentView, BoardSnapshot, DistantSession, FindingView, GateKind, GateView, InboxItem,
-    OrbitSnapshot, Provider, QuotaSnapshot, QuotaWindow, QuotaWindowKind, SessionStatus, StepRef, StepView,
-    SubagentView, TaskCard, TaskColumn, TaskSystem, TodayStats, ToolEvent,
+    OrbitSnapshot, PriorityView, Provider, QuotaSnapshot, QuotaWindow, QuotaWindowKind, SessionStatus,
+    StepRef, StepView, SubagentView, TaskCard, TaskColumn, TaskSystem, TodayStats, ToolEvent,
 };
 use opw_domain::workflow::{Phase, StepKind, StepState, Workflow, WorkflowEvent as E};
 
@@ -287,13 +287,31 @@ pub fn orbit(tick: u64) -> OrbitSnapshot {
         inbox: vec![
             InboxItem {
                 task_id: "WP-188001".into(),
+                wp_id: 188001,
                 title: "Thêm bộ lọc danh sách user".into(),
                 project: "Web Platform".into(),
+                nx_status: "Open".into(),
+                nx_status_color: None,
+                priority: Some(PriorityView {
+                    name: "High".into(),
+                    color: Some("#ff922b".into()),
+                    rank: Some(3),
+                    ranks: Some(4),
+                }),
             },
             InboxItem {
                 task_id: "WP-188002".into(),
+                wp_id: 188002,
                 title: "Lỗi upload file lớn".into(),
                 project: "Mobile App".into(),
+                nx_status: "Open".into(),
+                nx_status_color: None,
+                priority: Some(PriorityView {
+                    name: "Normal".into(),
+                    color: None,
+                    rank: Some(2),
+                    ranks: Some(4),
+                }),
             },
         ],
         distant: vec![DistantSession {
@@ -336,16 +354,20 @@ pub fn board(tick: u64) -> BoardSnapshot {
     };
     let mut tasks = vec![
         TaskCard {
-            priority: Some(opw_domain::view::PriorityView {
+            priority: Some(PriorityView {
                 name: "High".into(),
                 color: Some("#ff922b".into()),
+                rank: Some(3),
+                ranks: Some(4),
             }),
             ..inbox(188001, "Thêm bộ lọc danh sách user", "Web Platform", 2)
         },
         TaskCard {
-            priority: Some(opw_domain::view::PriorityView {
+            priority: Some(PriorityView {
                 name: "Normal".into(),
                 color: None,
+                rank: Some(2),
+                ranks: Some(4),
             }),
             ..inbox(188002, "Lỗi upload file lớn", "Mobile App", 0)
         },

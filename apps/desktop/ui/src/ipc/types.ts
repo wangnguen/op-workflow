@@ -110,6 +110,9 @@ export interface PriorityView {
   name: string;
   /** `#rrggbb` when the OpenProject admin gave the priority a colour */
   color?: string;
+  /** place in OpenProject's order of priorities, 1 = lowest, out of `ranks` */
+  rank?: number;
+  ranks?: number;
 }
 
 /** Is the task branch on origin? Made by "Đã push xong" (`git fetch`, then the local branch
@@ -604,8 +607,13 @@ export interface TaskSystem {
 
 export interface InboxItem {
   taskId: string;
+  /** OpenProject work package id (opens the task there) */
+  wpId: number;
   title: string;
   project: string;
+  nxStatus: string;
+  nxStatusColor?: string;
+  priority?: PriorityView;
 }
 
 export interface DistantSession {

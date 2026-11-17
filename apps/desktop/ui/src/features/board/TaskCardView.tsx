@@ -7,6 +7,7 @@ import type { TaskTab } from "../task/taskTabs";
 import { formatHourMinute, formatRelative, formatUsd } from "../../shared/format";
 import { STEP_COUNT } from "../../shared/steps";
 import { Icon } from "../../shared/ui/Icon";
+import { PriorityChip } from "../../shared/ui/PriorityChip";
 import { StatusChip } from "../../shared/ui/StatusChip";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
 
@@ -294,19 +295,7 @@ export function TaskCardView(props: TaskCardProps) {
             </button>
             <span className="card-sub-sep">·</span>
             <span className="card-project">{card.project}</span>
-            {card.priority?.color ? (
-              <StatusChip
-                name={card.priority.name}
-                color={card.priority.color}
-                className="card-prio"
-                title={b.priorityHint(card.priority.name)}
-              />
-            ) : card.priority ? (
-              // no colour on OpenProject: plain, as OpenProject shows it
-              <span className="chip card-prio" title={b.priorityHint(card.priority.name)}>
-                {card.priority.name}
-              </span>
-            ) : null}
+            {card.priority && <PriorityChip priority={card.priority} className="card-prio" />}
           </span>
         </span>
         <StatusChip

@@ -47,19 +47,6 @@ export const SceneDefs = memo(function SceneDefs() {
         <stop offset="100%" style={{ stopColor: "#9fd0ff", stopOpacity: 0 }} />
       </linearGradient>
 
-      <radialGradient id="g-nebula-0">
-        <stop offset="0%" style={{ stopColor: "#8c7bff", stopOpacity: 0.55 }} />
-        <stop offset="100%" style={{ stopColor: "#8c7bff", stopOpacity: 0 }} />
-      </radialGradient>
-      <radialGradient id="g-nebula-1">
-        <stop offset="0%" style={{ stopColor: "#4fd1c5", stopOpacity: 0.5 }} />
-        <stop offset="100%" style={{ stopColor: "#4fd1c5", stopOpacity: 0 }} />
-      </radialGradient>
-      <radialGradient id="g-nebula-2">
-        <stop offset="0%" style={{ stopColor: "#f78fb3", stopOpacity: 0.5 }} />
-        <stop offset="100%" style={{ stopColor: "#f78fb3", stopOpacity: 0 }} />
-      </radialGradient>
-
       <filter id="f-glow" x="-80%" y="-80%" width="260%" height="260%">
         <feGaussianBlur stdDeviation="1.6" result="blur" />
         <feMerge>

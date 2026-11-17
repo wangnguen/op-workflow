@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import { vi } from "../../i18n/vi";
-import { errorMessage, isMockMode, openBrief } from "../../ipc/client";
+import { errorMessage, isMockMode, openBrief, openTaskLink } from "../../ipc/client";
 import type { BoardSnapshot, OrbitSnapshot, TaskCard } from "../../ipc/types";
 import { useDismiss } from "../../shared/hooks";
 import { Icon } from "../../shared/ui/Icon";
@@ -147,6 +147,7 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
                   if (c) start.open(c);
                 }}
                 onOpenTask={openTask}
+                onOpenLink={(wpId) => openTaskLink(wpId).catch(fail)}
               />
             </div>
             <div {...pane("board")}>

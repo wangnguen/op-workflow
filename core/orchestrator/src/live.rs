@@ -49,6 +49,8 @@ pub struct LiveState {
     pub status_colors: Vec<(String, String)>,
     /// Priority name → `#rrggbb`, refreshed with the inbox (when the server gives colours).
     pub priority_colors: Vec<(String, String)>,
+    /// Priority names from the lowest to the highest, as OpenProject orders them.
+    pub priority_order: Vec<String>,
     /// Comments of the inbox tasks (work package id → comments, oldest first).
     pub comments: HashMap<u64, Vec<Comment>>,
     pub claude: Option<QuotaSnapshot>,
@@ -69,6 +71,10 @@ impl LiveState {
     /// A task's priority as OpenProject shows it (`None` when it has no name).
     pub fn priority(&self, name: &str) -> Option<PriorityView> {
         let name = name.trim();
+        let at = self
+            .priority_order
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(name));
         (!name.is_empty()).then(|| PriorityView {
             name: name.to_owned(),
             color: self
@@ -76,6 +82,8 @@ impl LiveState {
                 .iter()
                 .find(|(n, _)| n.eq_ignore_ascii_case(name))
                 .map(|(_, c)| c.clone()),
+            rank: at.and_then(|i| u8::try_from(i + 1).ok()),
+            ranks: at.and_then(|_| u8::try_from(self.priority_order.len()).ok()),
         })
     }
 
@@ -419,7 +427,7 @@ fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver
             let user = need_user.then(|| tracker.me().ok()).flatten();
             let result = tracker.inbox();
             let colors = tracker.status_colors().ok().filter(|c| !c.is_empty());
-            let priority_colors = tracker.priority_colors().ok().filter(|c| !c.is_empty());
+            let priorities = tracker.priorities().ok();
             let cached: Vec<u64> = state
                 .lock()
                 .map(|s| s.comments.keys().copied().collect())
@@ -440,8 +448,13 @@ fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver
                 if let Some(colors) = colors {
                     s.status_colors = colors;
                 }
-                if let Some(colors) = priority_colors {
-                    s.priority_colors = colors;
+                if let Some(p) = priorities {
+                    if !p.colors.is_empty() {
+                        s.priority_colors = p.colors;
+                    }
+                    if !p.order.is_empty() {
+                        s.priority_order = p.order;
+                    }
                 }
                 match result {
                     Ok(tasks) => {
@@ -777,6 +790,15 @@ mod tests {
         );
         assert_eq!(s.priority("Normal").unwrap().color, None);
         assert!(s.priority(" ").is_none());
+        // no order read yet: no rank
+        assert_eq!((high.rank, high.ranks), (None, None));
+        let s = LiveState {
+            priority_order: vec!["Low".into(), "Normal".into(), "High".into(), "Immediate".into()],
+            ..s
+        };
+        let high = s.priority("High").unwrap();
+        assert_eq!((high.rank, high.ranks), (Some(3), Some(4)));
+        assert_eq!(s.priority("Odd").unwrap().rank, None);
     }
 
     #[test]

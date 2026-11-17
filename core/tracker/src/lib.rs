@@ -293,6 +293,34 @@ pub fn parse_status_colors(v: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// What `GET /api/v3/priorities` says: colours set by the admin, and the names in OpenProject's
+/// own order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Priorities {
+    /// name → `#rrggbb`; priorities without a colour are left out.
+    pub colors: Vec<(String, String)>,
+    /// Active priorities from the lowest to the highest (`position`).
+    pub order: Vec<String>,
+}
+
+pub fn parse_priorities(v: &Value) -> Priorities {
+    let mut order: Vec<(u64, String)> = v
+        .pointer("/_embedded/elements")
+        .and_then(Value::as_array)
+        .map(|els| {
+            els.iter()
+                .filter(|e| e.get("isActive").and_then(Value::as_bool) != Some(false))
+                .filter_map(|e| Some((e.get("position")?.as_u64()?, e.get("name")?.as_str()?.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default();
+    order.sort_by_key(|(position, _)| *position);
+    Priorities {
+        colors: parse_status_colors(v),
+        order: order.into_iter().map(|(_, name)| name).collect(),
+    }
+}
+
 /// Network side (read-only). [`HttpTracker`] implements it; the token comes from Windows
 /// Credential Manager.
 pub trait TrackerApi {
@@ -305,6 +333,27 @@ pub trait TrackerApi {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn priorities_come_in_openproject_order_without_inactive_ones() {
+        let v = json!({"_embedded": {"elements": [
+            {"name": "High", "position": 3, "color": "#FF922B", "isActive": true},
+            {"name": "Low", "position": 1, "isActive": true},
+            {"name": "Old", "position": 2, "isActive": false},
+            {"name": "Normal", "position": 2},
+            {"name": "Immediate", "position": 4, "color": "#e03131"}
+        ]}});
+        let p = parse_priorities(&v);
+        assert_eq!(p.order, vec!["Low", "Normal", "High", "Immediate"]);
+        assert_eq!(
+            p.colors,
+            vec![
+                ("High".to_owned(), "#ff922b".to_owned()),
+                ("Immediate".to_owned(), "#e03131".to_owned())
+            ]
+        );
+        assert_eq!(parse_priorities(&json!({})), Priorities::default());
+    }
 
     #[test]
     fn status_colors_keep_valid_hex_only() {

@@ -9,10 +9,12 @@ import {
   stepStateLabel,
   vi,
 } from "../../i18n/vi";
-import type { AgentView, OrbitSnapshot, StepView } from "../../ipc/types";
+import type { AgentView, OrbitSnapshot, StepView, TaskSystem } from "../../ipc/types";
 import { formatClock, formatDuration, formatRelative, formatTokens, formatUsd } from "../../shared/format";
 import { STEP_COUNT } from "../../shared/steps";
 import { findAgent, type Selection } from "./selection";
+import { Icon } from "../../shared/ui/Icon";
+import { PriorityChip } from "../../shared/ui/PriorityChip";
 import { StatusChip } from "../../shared/ui/StatusChip";
 import { gateTab, type TaskTab } from "../task/taskTabs";
 
@@ -24,6 +26,8 @@ interface Props {
   onStartTask?: (taskId: string) => void;
   /** open the task window of a task in progress, on the tab that matters */
   onOpenTask?: (taskId: string, tab?: TaskTab) => void;
+  /** open a task on OpenProject in the browser */
+  onOpenLink?: (wpId: number) => void;
   now: number;
 }
 
@@ -35,6 +39,20 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
       <span className="dp-key">{label}</span>
       <span className="dp-val">{children}</span>
     </div>
+  );
+}
+
+/** Which task a step, session, finding or gate belongs to; click for the task's own panel. */
+function TaskLine({ task, onSelect }: { task: TaskSystem; onSelect: (s: Selection) => void }) {
+  return (
+    <button className="dp-task" title={t.taskHint} onClick={() => onSelect({ kind: "star" })}>
+      <span className="dp-task-top">
+        <span className="mono dp-task-id">{task.taskId}</span>
+        <StatusChip name={task.nxStatus} color={task.nxStatusColor} />
+      </span>
+      <span className="dp-task-title">{task.title}</span>
+      <span className="mono dp-task-branch">{task.branch}</span>
+    </button>
   );
 }
 
@@ -59,10 +77,19 @@ function StepList({ steps, onSelect }: { steps: StepView[]; onSelect: (s: Select
   );
 }
 
-function AgentDetail({ agent, now, onSelect }: { agent: AgentView; now: number; onSelect: (s: Selection) => void }) {
+interface AgentDetailProps {
+  task: TaskSystem;
+  agent: AgentView;
+  now: number;
+  onSelect: (s: Selection) => void;
+  onOpenTask?: (taskId: string, tab?: TaskTab) => void;
+}
+
+function AgentDetail({ task, agent, now, onSelect, onOpenTask }: AgentDetailProps) {
   const ratio = agent.handoffAt > 0 ? agent.contextTokens / agent.handoffAt : 0;
   return (
     <>
+      <TaskLine task={task} onSelect={onSelect} />
       <header className={`dp-head agent-${agent.kind}`}>
         <span className={`chip chip--${agent.kind}`}>{agentLabel[agent.kind]}</span>
         <span className={`dp-status dp-status--${agent.status}`}>{sessionStatusLabel[agent.status]}</span>
@@ -75,6 +102,11 @@ function AgentDetail({ agent, now, onSelect }: { agent: AgentView; now: number; 
         <span style={{ width: `${Math.min(100, ratio * 100)}%` }} />
       </div>
       <Row label={t.compactions}>{agent.compactions}</Row>
+      {onOpenTask && (
+        <button className="btn btn--sm dp-open" title={t.openChatHint} onClick={() => onOpenTask(task.taskId, "chat")}>
+          {t.openChat}
+        </button>
+      )}
       {agent.subagents.length > 0 && (
         <section>
           <h4>{t.subagents}</h4>
@@ -121,7 +153,7 @@ function AgentDetail({ agent, now, onSelect }: { agent: AgentView; now: number; 
   );
 }
 
-export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, onOpenTask }: Props) {
+export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, onOpenTask, onOpenLink }: Props) {
   const a = snapshot.active;
   let body: ReactNode = <p className="dp-empty">{t.noneSelected}</p>;
 
@@ -154,6 +186,7 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
     if (s) {
       body = (
         <>
+          <TaskLine task={a} onSelect={onSelect} />
           <header className="dp-head">
             <span className="chip">
               {t.step} {s.index}/{STEP_COUNT}
@@ -172,12 +205,13 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
     }
   } else if (selection?.kind === "agent" && a) {
     const agent = findAgent(a.agents, selection.id);
-    if (agent) body = <AgentDetail agent={agent} now={now} onSelect={onSelect} />;
+    if (agent) body = <AgentDetail task={a} agent={agent} now={now} onSelect={onSelect} onOpenTask={onOpenTask} />;
   } else if (selection?.kind === "finding" && a) {
     const f = a.findings.find((x) => x.fingerprint === selection.fingerprint);
     if (f) {
       body = (
         <>
+          <TaskLine task={a} onSelect={onSelect} />
           <header className="dp-head">
             <span className={`chip sev-chip sev-chip--${f.severity}`}>{severityLabel[f.severity]}</span>
             <span className="chip">{findingStateLabel[f.state]}</span>
@@ -202,6 +236,7 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
   } else if (selection?.kind === "gate" && a?.gate) {
     body = (
       <div className="dp-gate">
+        <TaskLine task={a} onSelect={onSelect} />
         <header className="dp-head">
           <span className="chip chip--warn">{t.gate}</span>
           <span className="faint">{formatRelative(a.gate.since, now)}</span>
@@ -224,18 +259,37 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
         <>
           <header className="dp-head">
             <span className="chip">{t.inbox}</span>
+            {item.nxStatus && <StatusChip name={item.nxStatus} color={item.nxStatusColor} />}
           </header>
           <h3 className="dp-title">{item.title}</h3>
-          <Row label="Task">{item.taskId}</Row>
+          <Row label="Task">
+            {onOpenLink ? (
+              <button className="link-btn dp-nx-link" title={t.openOnNxHint} onClick={() => onOpenLink(item.wpId)}>
+                {item.taskId}
+                <Icon name="external" size={11} />
+              </button>
+            ) : (
+              item.taskId
+            )}
+          </Row>
           <Row label={t.project}>{item.project}</Row>
-          <button
-            className="btn btn--primary"
-            disabled={!onStartTask}
-            title={onStartTask ? undefined : t.startFromBoard}
-            onClick={() => onStartTask?.(item.taskId)}
-          >
-            {vi.board.start}
-          </button>
+          <Row label={t.priority}>{item.priority ? <PriorityChip priority={item.priority} /> : "—"}</Row>
+          <div className="dp-actions">
+            <button
+              className="btn btn--primary btn--sm"
+              disabled={!onStartTask}
+              title={onStartTask ? undefined : t.startFromBoard}
+              onClick={() => onStartTask?.(item.taskId)}
+            >
+              {vi.board.start}
+            </button>
+            {onOpenLink && (
+              <button className="btn btn--sm" title={t.openOnNxHint} onClick={() => onOpenLink(item.wpId)}>
+                <Icon name="external" size={12} />
+                {t.openOnNx}
+              </button>
+            )}
+          </div>
         </>
       );
     }

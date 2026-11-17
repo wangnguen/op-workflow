@@ -16,6 +16,7 @@ import type {
   IssueStatus,
   LinkStatus,
   OrbitSnapshot,
+  PriorityView,
   Provider,
   ProviderLink,
   QuotaSnapshot,
@@ -201,9 +202,33 @@ const iso = (ms: number) => new Date(ms).toISOString();
 
 // ---------- static mock data ----------
 
+/** OpenProject's usual order, lowest first; only some have a colour, as on a real server. */
+const PRIORITIES: PriorityView[] = [
+  { name: "Low", rank: 1, ranks: 4 },
+  { name: "Normal", rank: 2, ranks: 4 },
+  { name: "High", color: "#ff922b", rank: 3, ranks: 4 },
+  { name: "Immediate", color: "#e03131", rank: 4, ranks: 4 },
+];
+
 const INBOX: InboxItem[] = [
-  { taskId: "WP-188001", title: "Lỗi đồng bộ quyền khi đổi owner thư mục", project: "Web Platform" },
-  { taskId: "WP-188002", title: "Thêm bộ lọc ngày cho báo cáo chia sẻ", project: "Mobile App" },
+  {
+    taskId: "WP-188001",
+    wpId: 188001,
+    title: "Lỗi đồng bộ quyền khi đổi owner thư mục",
+    project: "Web Platform",
+    nxStatus: "Open",
+    nxStatusColor: "#1a67a3",
+    priority: PRIORITIES[1],
+  },
+  {
+    taskId: "WP-188002",
+    wpId: 188002,
+    title: "Thêm bộ lọc ngày cho báo cáo chia sẻ",
+    project: "Mobile App",
+    nxStatus: "Reopened",
+    nxStatusColor: "#ff3300",
+    priority: PRIORITIES[3],
+  },
 ];
 
 const BASE_DISTANT: DistantSession[] = [
@@ -229,6 +254,9 @@ const INBOX_VIEW: InboxItem[] = (() => {
   return Array.from({ length: n }, (_, i) =>
     INBOX[i] ?? {
       taskId: `WP-${188100 + i}`,
+      wpId: 188100 + i,
+      nxStatus: i % 2 === 0 ? "New" : "In progress",
+      priority: PRIORITIES[i % PRIORITIES.length],
       title:
         i % 3 === 2
           ? `■ Demo ■ [Bug] 共有フォルダの権限変更で403 insufficient_scopeエラーが発生する問題の調査・対応 / Điều tra lỗi 403 khi đổi quyền thư mục (${i + 1})`
