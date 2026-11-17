@@ -11,7 +11,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, AppHandle, Emitter, Manager};
 
-const TRAY_ID: &str = "quota";
+pub(crate) const TRAY_ID: &str = "quota";
 /// Event the UI listens to: open the quota popover.
 pub const OPEN_QUOTA_EVENT: &str = "opw://open-quota";
 /// How often new alerts and the tray picture are checked.
@@ -50,7 +50,8 @@ pub fn install(app: &App) -> tauri::Result<()> {
                 let _ = app.emit(OPEN_QUOTA_EVENT, ());
             }
             "reconnect" => app.state::<AppService>().reconnect_quota(None),
-            "quit" => app.exit(0),
+            // like "Thoát hẳn": running AI steps stop first
+            "quit" => crate::window_api::quit(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

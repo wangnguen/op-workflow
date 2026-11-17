@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use opw_domain::finding::GatePolicy;
 use opw_domain::task::DEFAULT_BRANCH_TEMPLATE;
-use opw_domain::view::{NotifyKind, NotifySettings};
+use opw_domain::view::{CloseChoice, NotifyKind, NotifySettings};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -230,6 +230,8 @@ pub struct Config {
     pub steps: StepsConfig,
     /// Windows notifications by kind (`notify`); all on by default.
     pub notify: NotifySettings,
+    /// What the window's X does (`onClose`): ask (default), tray or quit.
+    pub on_close: CloseChoice,
     pub workspaces: Vec<String>,
     pub projects: BTreeMap<String, ProjectConfig>,
     pub repos: BTreeMap<String, RepoConfig>,
@@ -252,6 +254,7 @@ impl Config {
             gate: section(root, "gate", &mut warnings),
             steps: section(root, "steps", &mut warnings),
             notify: section(root, "notify", &mut warnings),
+            on_close: section(root, "onClose", &mut warnings),
             workspaces: section(root, "workspaces", &mut warnings),
             projects: section(root, "projects", &mut warnings),
             repos: section(root, "repos", &mut warnings),
@@ -312,6 +315,14 @@ pub fn save_notify(path: &Path, kind: NotifyKind, on: bool) -> ConfigResult<()> 
     };
     edit_file(path, |root| {
         object_at(root, "notify").insert(key.into(), Value::Bool(on));
+    })
+}
+
+/// Write `onClose` (what the window's X does), keeping every other key.
+pub fn save_on_close(path: &Path, choice: CloseChoice) -> ConfigResult<()> {
+    let value = serde_json::to_value(choice).unwrap_or(Value::Null);
+    edit_file(path, |root| {
+        root.insert("onClose".into(), value);
     })
 }
 
@@ -692,6 +703,24 @@ mod tests {
         );
         save_claude_probe(&path, 5, 15).unwrap();
         assert_eq!(Config::load(&path).unwrap().quota.claude_active_probe_sec, 30);
+    }
+
+    #[test]
+    fn the_close_choice_is_saved_and_a_bad_one_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"quota":{"codexPollSec":30}}"#).unwrap();
+        assert_eq!(Config::load(&path).unwrap().on_close, CloseChoice::Ask);
+        save_on_close(&path, CloseChoice::Tray).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!((cfg.on_close, cfg.quota.codex_poll_sec), (CloseChoice::Tray, 30));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(r#""onClose": "tray""#)
+        );
+        let cfg = Config::from_value(&json!({ "onClose": "minimize" }));
+        assert_eq!((cfg.on_close, cfg.warnings.len()), (CloseChoice::Ask, 1));
     }
 
     #[test]

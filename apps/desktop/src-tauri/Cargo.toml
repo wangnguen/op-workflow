@@ -12,6 +12,7 @@ tauri-build.workspace = true
 [dependencies]
 opw-domain.workspace = true
 opw-orchestrator.workspace = true
+serde.workspace = true
 tauri.workspace = true
 tauri-plugin-notification.workspace = true
 tauri-plugin-single-instance.workspace = true

@@ -655,6 +655,23 @@ export const vi = {
       quota: "Hạn mức",
     },
   },
+  close: {
+    title: "Đóng op-workflow?",
+    running: (n: number) => `${n} bước AI đang chạy.`,
+    idle: "Không có bước AI nào đang chạy.",
+    tray: "Thu xuống khay",
+    trayHint: "Cửa sổ ẩn đi, app và AI vẫn chạy như thường. Mở lại bằng icon ở khay (góc phải taskbar).",
+    quit: "Thoát hẳn",
+    quitHint:
+      "Dừng mọi bước AI đang chạy, tắt cả các tiến trình chúng bật (dev server, Chrome…), rồi thoát. Mở app lại thì bấm Thử lại ở bước bị dừng.",
+    quitIdleHint: "Tắt app. Chuông và thông báo Windows dừng tới khi bạn mở lại.",
+    remember: "Nhớ lựa chọn, lần sau không hỏi",
+    rememberHint: "Đổi lại ở Cài đặt → Thông báo → Khi đóng cửa sổ.",
+    cancel: "Huỷ",
+    setting: "Khi đóng cửa sổ (nút X)",
+    settingHint: "Thu xuống khay: AI vẫn chạy. Thoát hẳn: dừng mọi bước AI đang chạy cùng các tiến trình chúng bật.",
+    choices: { ask: "Hỏi mỗi lần", tray: "Thu xuống khay", quit: "Thoát hẳn" },
+  },
   notify: {
     title: "Thông báo",
     hint: "Thông báo Windows (góc dưới màn hình). Chuông trên thanh trên vẫn ghi lại mọi thông báo.",

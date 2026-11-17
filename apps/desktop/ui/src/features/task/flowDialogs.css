@@ -130,3 +130,23 @@
   min-width: 190px;
   margin-top: 6px;
 }
+
+/* Đóng op-workflow? (the window's X) */
+.close-remember {
+  cursor: pointer;
+}
+.close-remember input {
+  flex: none;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+.close-remember > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* same width for "Thu xuống khay" and "Thoát hẳn": Huỷ never moves */
+.btn.close-go {
+  min-width: 124px;
+  justify-content: center;
+}

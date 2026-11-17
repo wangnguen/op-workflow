@@ -97,6 +97,8 @@ impl CheckRunner for ProcessRunner {
             ],
             account: Account::Subscription,
             timeout,
+            // tsc / eslint / prettier start nothing that outlives them
+            sweep: false,
         };
         let mut out = String::new();
         let outcome = run(&spec, stop, &mut |line| {

@@ -32,7 +32,7 @@ use opw_config::{Config, secrets};
 use opw_context::BriefComment;
 use opw_domain::task::display_id;
 use opw_domain::view::{
-    AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CommentsView, DataMode,
+    AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CloseChoice, CommentsView, DataMode,
     DeleteBranchRequest, DiffView, FindingDecision, FlowAction, FlowStatus, InboxItem, IssueFetch,
     IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, PushCheck, QuotaSnapshot, RepoState,
     SettingsView, StartOptions, StartRequest, StartResult, StepChoiceRequest, StepRef, StepView, TaskCard,
@@ -1440,6 +1440,40 @@ impl AppService {
         Ok(self.settings())
     }
 
+    /// What the window's X does (`onClose`): ask, tray or quit.
+    pub fn close_choice(&self) -> CloseChoice {
+        self.config().on_close
+    }
+
+    /// Settings → Thông báo, or "Nhớ lựa chọn" in the close dialog.
+    pub fn set_on_close(&self, choice: CloseChoice) -> Result<SettingsView, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
+        opw_config::save_on_close(path, choice).map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        Ok(self.settings())
+    }
+
+    /// AI steps running right now (the close dialog says how many).
+    pub fn running_steps(&self) -> usize {
+        self.flow.as_ref().map_or(0, Flow::running_count)
+    }
+
+    /// "Thoát hẳn": stop every running AI step (each process with what it started) and wait up
+    /// to `wait` for them to end, so nothing keeps running after the app is gone. Returns how
+    /// many were running.
+    pub fn quit_flow(&self, wait: Duration) -> usize {
+        let Some(flow) = &self.flow else { return 0 };
+        let stopped = flow.stop_all();
+        let deadline = std::time::Instant::now() + wait;
+        while flow.running_count() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        stopped
+    }
+
     /// Open `chrome://inspect/#remote-debugging`, where the user allows "Lấy issue" to connect.
     pub fn open_browser_debug(&self) -> Result<(), ApiError> {
         opw_browser::open_debug_settings().map_err(|e| ApiError::new("browser.open", e))
@@ -1548,6 +1582,7 @@ impl AppService {
             steps: steps::settings(&config, &self.done_step_runs()),
             claude_active_probe_sec: config.quota.claude_active_probe_sec,
             claude_probe_min: config.quota.claude_probe_min,
+            on_close: config.on_close,
         }
     }
 

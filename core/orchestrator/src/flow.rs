@@ -23,6 +23,7 @@ use opw_agents::ModelChoice;
 use opw_agents::claude::{self, ClaudeEvent, Denial, RunResult};
 use opw_agents::codex::{self, CodexEvent};
 use opw_agents::env::Account;
+use opw_agents::procs::Sweep;
 use opw_agents::run::{RunOutcome, RunSpec};
 use opw_agents::text::{self, RawFinding};
 use opw_agents::transcript;
@@ -131,6 +132,7 @@ impl Launcher for CliLauncher {
             env: opw_vcs::guard_env(&self.hooks_dir),
             account: Account::Subscription,
             timeout: job.timeout,
+            sweep: true,
         };
         opw_agents::run::run(&spec, stop, on_line).map_err(|e| LaunchError::Spawn(e.to_string()))
     }
@@ -188,6 +190,8 @@ struct Running {
     command: Option<String>,
     /// Row of this run in `step_run`, once the process started.
     run_id: Option<i64>,
+    /// What the step's AI runs left running and the app killed (dev servers, Chrome).
+    swept: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -636,6 +640,8 @@ struct Inner {
     alert_sink: Mutex<Option<AlertSink>>,
     /// Runs the Kiểm tra commands (tests swap in a fake).
     checker: Mutex<Arc<dyn CheckRunner>>,
+    /// The user quit the app: running steps were stopped and no new one starts.
+    quitting: AtomicBool,
 }
 
 /// The workflow engine shared by the Tauri commands.
@@ -761,6 +767,7 @@ impl Flow {
                 quota_sink: Mutex::new(None),
                 alert_sink: Mutex::new(None),
                 checker: Mutex::new(Arc::new(ProcessRunner)),
+                quitting: AtomicBool::new(false),
             }),
         }
     }
@@ -854,6 +861,28 @@ impl Flow {
         if let Some(run) = self.inner.lock_tasks().get(&wp_id).and_then(|e| e.run.as_ref()) {
             run.stop.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// The app is quitting: stop every running step (each AI process with everything it
+    /// started) and start no new one. Returns how many were running.
+    pub fn stop_all(&self) -> usize {
+        self.inner.quitting.store(true, Ordering::Relaxed);
+        let tasks = self.inner.lock_tasks();
+        let mut n = 0;
+        for run in tasks.values().filter_map(|e| e.run.as_ref()) {
+            run.stop.store(true, Ordering::Relaxed);
+            n += 1;
+        }
+        n
+    }
+
+    /// Steps running right now, over all tasks.
+    pub fn running_count(&self) -> usize {
+        self.inner
+            .lock_tasks()
+            .values()
+            .filter(|e| e.run.is_some())
+            .count()
     }
 
     /// A button of the task window or the card.
@@ -2243,6 +2272,12 @@ impl Inner {
 
     /// [`Inner::claim`] with the tasks lock already held; also returns the log line to keep.
     fn claim_in(&self, tasks: &mut HashMap<u64, Entry>, ctx: &TaskCtx) -> Result<(Claim, String), ApiError> {
+        if self.quitting.load(Ordering::Relaxed) {
+            return Err(ApiError::new(
+                "app.quitting",
+                "App đang thoát nên không chạy bước mới",
+            ));
+        }
         let repo = ctx.row.repo.clone();
         if let Some(repo) = repo.as_deref() {
             let busy = tasks.iter().find_map(|(id, e)| {
@@ -2285,6 +2320,7 @@ impl Inner {
             effort: choice.effort.clone(),
             command: command.clone(),
             run_id: None,
+            swept: Vec::new(),
         });
         entry.saved.in_flight = true;
         entry.saved.error = None;
@@ -2318,16 +2354,30 @@ impl Inner {
         result: Result<Done, FlowError>,
     ) -> Option<Result<Claim, ApiError>> {
         let wp_id = ctx.row.wp_id;
+        let quitting = self.quitting.load(Ordering::Relaxed);
+        let result = result.map_err(|err| match err.code.as_str() {
+            "step.stopped" if quitting => flow_error(
+                "step.stopped",
+                "App đã thoát hẳn khi bước này đang chạy nên AI đã dừng. Bấm Thử lại để chạy lại.",
+            ),
+            _ => err,
+        });
         // the run's note is on its row before the task stops showing "running"
-        let early = self
+        let (early, swept) = self
             .lock_tasks()
             .get(&wp_id)
             .and_then(|e| e.run.as_ref())
-            .and_then(|r| r.run_id);
-        let early_note = match &result {
+            .map(|r| (r.run_id, r.swept.join("; ")))
+            .unwrap_or_default();
+        let with_sweep = |note: String| match (note.is_empty(), swept.is_empty()) {
+            (_, true) => note,
+            (true, false) => swept.clone(),
+            (false, false) => format!("{note}; {swept}"),
+        };
+        let early_note = with_sweep(match &result {
             Ok(done) => done.note.clone(),
             Err(err) => short(&err.message),
-        };
+        });
         if let (Some(id), Ok(store)) = (early.filter(|_| !early_note.is_empty()), self.store.lock()) {
             let _ = store.set_step_run_note(id, &early_note);
         }
@@ -2379,6 +2429,7 @@ impl Inner {
                 ("error", text)
             }
         };
+        let note = with_sweep(note);
         push_log(entry, Some(step), kind, &text);
         pass_not_yet(entry);
         self.persist(wp_id, entry);
@@ -2447,6 +2498,21 @@ impl Inner {
         if let Some(run) = self.lock_tasks().get_mut(&wp_id).and_then(|e| e.run.as_mut()) {
             run.context = Some(tokens);
         }
+    }
+
+    /// What a run left running and the app killed: a line in the log (kept), and the step's
+    /// note in Tiến trình says it. A port still taken afterwards is flagged.
+    fn on_sweep(&self, wp_id: u64, step: StepKind, sweep: &Sweep) {
+        let Some(text) = sweep_note(sweep) else { return };
+        if let Some(run) = self.lock_tasks().get_mut(&wp_id).and_then(|e| e.run.as_mut()) {
+            run.swept.push(text.clone());
+        }
+        let kind = if sweep.still_busy.is_empty() {
+            "info"
+        } else {
+            "error"
+        };
+        self.log(wp_id, Some(step), kind, &format!("Dọn tiến trình: {text}"), true);
     }
 
     fn on_rate_limit(&self, event: &serde_json::Value) {
@@ -2532,6 +2598,9 @@ impl Inner {
             }
         };
         let launched = self.launcher.launch(job, stop, &mut on_line);
+        if let Ok(o) = &launched {
+            self.on_sweep(wp_id, step, &o.sweep);
+        }
         let ok = matches!(&launched, Ok(o) if o.success()) && result.as_ref().is_some_and(|r| !r.is_error);
         let state = if ok { "done" } else { "failed" };
         if let (Some(id), Ok(store)) = (run_id, self.store.lock()) {
@@ -2642,6 +2711,9 @@ impl Inner {
             }
         };
         let launched = self.launcher.launch(job, stop, &mut on_line);
+        if let Ok(o) = &launched {
+            self.on_sweep(wp_id, step, &o.sweep);
+        }
         let ok = matches!(&launched, Ok(o) if o.success()) && failed.is_none();
         if let (Some(id), Ok(store)) = (run_id, self.store.lock()) {
             let _ = store.end_step_run(
@@ -2713,6 +2785,20 @@ impl Inner {
             .and_then(|()| store.findings(ctx.row.wp_id))
             .map_err(|e| flow_error("storage", e.to_string()))
     }
+}
+
+/// "đã tắt 2 tiến trình AI để lại: node.exe (cổng 5173)", plus the ports still taken.
+fn sweep_note(sweep: &Sweep) -> Option<String> {
+    let mut text = sweep.describe()?;
+    if !sweep.still_busy.is_empty() {
+        let ports: Vec<String> = sweep.still_busy.iter().map(u16::to_string).collect();
+        text.push_str(&format!(
+            "; cổng {} vẫn bị chiếm sau khi tắt (xem bằng `netstat -ano | findstr :{}`)",
+            ports.join(", "),
+            ports[0]
+        ));
+    }
+    Some(text)
 }
 
 fn launch_failed(agent: AgentKind, e: &LaunchError) -> FlowError {
@@ -4248,6 +4334,53 @@ mod tests {
         assert_eq!(d.error.unwrap().code, "step.stopped");
         assert_eq!(d.current, Some(StepKind::Analyze));
         assert_eq!(flow.running_step(1), None);
+    }
+
+    #[test]
+    fn quitting_stops_every_step_and_says_what_was_left_running() {
+        let Some(s) = setup() else { return };
+        let (flow, _) = flow_with(&s, false, |_, stop, _| {
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            RunOutcome {
+                stopped: true,
+                sweep: Sweep {
+                    killed: vec![(41, "node.exe".into()), (42, "chrome.exe".into())],
+                    ports: vec![5173],
+                    still_busy: vec![5173],
+                },
+                ..RunOutcome::default()
+            }
+        });
+        let one = s.ctx(1, &Config::default());
+        flow.started(&one, None).unwrap();
+        flow.act(one.clone(), FlowAction::Run).unwrap();
+        assert_eq!(flow.running_count(), 1);
+        assert_eq!(flow.stop_all(), 1);
+        let d = settle(&flow, &one);
+        assert_eq!(flow.running_count(), 0);
+        let err = d.error.unwrap();
+        assert_eq!(err.code, "step.stopped");
+        assert!(err.message.contains("thoát hẳn"), "{}", err.message);
+        let note = d.runs.last().and_then(|r| r.note.clone()).unwrap_or_default();
+        assert!(
+            note.contains("đã tắt 2 tiến trình AI để lại: node.exe, chrome.exe (cổng 5173)")
+                && note.contains("cổng 5173 vẫn bị chiếm"),
+            "{note}"
+        );
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.kind == "error" && l.text.starts_with("Dọn tiến trình:")),
+            "{:?}",
+            d.log
+        );
+        // no new step starts while the app quits
+        assert_eq!(
+            flow.act(one.clone(), FlowAction::Retry).unwrap_err().code,
+            "app.quitting"
+        );
     }
 
     #[test]

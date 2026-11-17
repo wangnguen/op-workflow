@@ -11,7 +11,8 @@ describe("settings search", () => {
   it("matches English keywords and needs every word", () => {
     expect(searchEntries("update").map((e) => e.id)).toEqual(["version"]);
     expect(searchEntries("quota codex").map((e) => e.id)).toEqual(["codex", "notifyQuota"]);
-    expect(searchEntries("thong bao khay").map((e) => e.id)).toEqual(["tray"]);
+    expect(searchEntries("thong bao khay").map((e) => e.id)).toEqual(["tray", "onClose"]);
+    expect(searchEntries("thoat").map((e) => e.id)).toEqual(["onClose"]);
     expect(searchEntries("   ")).toEqual([]);
     expect(searchEntries("khong-co-gi")).toEqual([]);
   });

@@ -347,6 +347,20 @@ pub struct SettingsView {
     /// Probe Claude this often (minutes) when Claude Code is not in use (`quota.claudeProbeMin`).
     #[serde(default)]
     pub claude_probe_min: u32,
+    /// What the window's X does (`onClose`).
+    #[serde(default)]
+    pub on_close: CloseChoice,
+}
+
+/// What closing the main window does (`onClose` in config): ask each time, go to the tray (the AI
+/// keeps running) or quit (every running AI step is stopped with what it started).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CloseChoice {
+    #[default]
+    Ask,
+    Tray,
+    Quit,
 }
 
 /// Models and effort levels the Claude and Codex CLIs on this machine offer, for Settings →

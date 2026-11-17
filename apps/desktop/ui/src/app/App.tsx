@@ -8,6 +8,7 @@ import {
   isMockMode,
   markAlertsRead,
   onAlertClicked,
+  onCloseAsked,
   openReleasePage,
 } from "../ipc/client";
 import { OPEN_QUOTA_EVENT } from "../features/quota/quota";
@@ -20,6 +21,7 @@ import { TaskWindow } from "../features/task/TaskWindow";
 import { asTab, type TaskTab } from "../features/task/taskTabs";
 import { useNow, usePolling } from "../shared/hooks";
 import { BottomBar } from "./BottomBar";
+import { CloseDialog } from "./CloseDialog";
 import { TopBar, type Tab } from "./TopBar";
 import "./app.css";
 
@@ -34,6 +36,8 @@ export function App() {
   const [opened, setOpened] = useState<{ wpId: number; tab?: TaskTab }>();
   // the comments of an Inbox task, opened from the bell (it has no task window yet)
   const [peeking, setPeeking] = useState<{ wpId: number; taskId: string; title: string }>();
+  // the window's X asked what to do (`onClose` = ask): AI steps running at that moment
+  const [closing, setClosing] = useState<number>();
   const board = usePolling(getBoard, POLL_MS);
   const orbit = usePolling(getOrbit, POLL_MS);
   const info = usePolling(getAppInfo, INFO_POLL_MS);
@@ -69,6 +73,7 @@ export function App() {
       }),
     [refreshAll],
   );
+  useEffect(() => onCloseAsked(setClosing), []);
 
   return (
     <div className="app">
@@ -120,6 +125,7 @@ export function App() {
           onUpdateChanged={update.refresh}
         />
       )}
+      {closing !== undefined && <CloseDialog running={closing} onClose={() => setClosing(undefined)} />}
       <BottomBar
         board={board.data}
         orbit={orbit.data}

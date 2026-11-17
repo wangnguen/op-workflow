@@ -15,10 +15,11 @@ import {
   revealPath,
   saveNxToken,
   setNotify,
+  setOnClose,
   setQuotaProbe,
   setTasksDir,
 } from "../../ipc/client";
-import type { NotifyKind, Provider, ProviderLink, SettingsView, StepModels, UpdateView } from "../../ipc/types";
+import type { CloseChoice, NotifyKind, Provider, ProviderLink, SettingsView, StepModels, UpdateView } from "../../ipc/types";
 import { LinkActions } from "../quota/QuotaPopover";
 import { linkProblem } from "../quota/quota";
 import { formatRelative } from "../../shared/format";
@@ -51,6 +52,8 @@ const IDLE_CHOICES = [5, 10, 15, 30, 60];
 function withSaved(choices: number[], current: number): number[] {
   return choices.includes(current) ? choices : [...choices, current].sort((a, b) => a - b);
 }
+
+const CLOSE_CHOICES: CloseChoice[] = ["ask", "tray", "quit"];
 
 const NOTIFY_ROWS: { kind: NotifyKind; id: string; label: string; hint: string }[] = [
   { kind: "comments", id: "notifyComments", label: vi.notify.comments, hint: vi.notify.commentsHint },
@@ -659,6 +662,21 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                     </Group>
                     <Group title={vi.notify.trayLabel}>
                       <Row id="tray" label={vi.notify.trayLabel} hint={vi.notify.tray} />
+                      <Row id="onClose" label={vi.close.setting} hint={vi.close.settingHint}>
+                        <select
+                          className="input set-probe-select"
+                          aria-label={vi.close.setting}
+                          disabled={busy || !view}
+                          value={view?.onClose ?? "ask"}
+                          onChange={(e) => run(() => setOnClose(e.target.value as CloseChoice), false)}
+                        >
+                          {CLOSE_CHOICES.map((choice) => (
+                            <option key={choice} value={choice}>
+                              {vi.close.choices[choice]}
+                            </option>
+                          ))}
+                        </select>
+                      </Row>
                     </Group>
                   </>
                 )}

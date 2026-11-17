@@ -2,6 +2,7 @@
 // Every DEMO_FRAME_MS the active task advances one frame through the 8 steps.
 import type {
   AgentCatalog,
+  CloseChoice,
   AgentKind,
   AgentView,
   AppInfo,
@@ -599,7 +600,16 @@ export function mockSettings(): SettingsView {
     steps: mockStepSettings(),
     claudeActiveProbeSec: mockProbe.activeSec,
     claudeProbeMin: mockProbe.idleMin,
+    onClose: mockClose.choice,
   };
+}
+
+const mockClose: { choice: CloseChoice } = { choice: "ask" };
+
+/** Browser preview: Settings → Thông báo → "Khi đóng cửa sổ", in memory only. */
+export function mockSetOnClose(choice: CloseChoice): SettingsView {
+  mockClose.choice = choice;
+  return mockSettings();
 }
 
 const mockProbe = { activeSec: 60, idleMin: 15 };

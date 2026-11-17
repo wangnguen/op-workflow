@@ -12,8 +12,9 @@ mod settings_api;
 mod start_api;
 mod toast;
 mod tray;
+mod window_api;
 
-use tauri::Manager;
+use tauri::{Manager, RunEvent, WindowEvent};
 
 fn main() {
     // PTY spike from inside the app binary (PLAN.md §12): `op-workflow-desktop --pty-selftest`.
@@ -61,6 +62,16 @@ fn main() {
             tray::show_main(app.handle());
             Ok(())
         })
+        // X asks (or does what the user chose to remember): tray or quit, never a silent exit
+        // that leaves the AI running
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    window_api::on_close_requested(window.app_handle());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             app_api::app_info,
             app_api::board_snapshot,
@@ -105,7 +116,17 @@ fn main() {
             alerts_api::alerts,
             alerts_api::mark_alerts_read,
             alerts_api::set_notify,
+            window_api::close_window,
+            window_api::set_on_close,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running op-workflow");
+        .build(tauri::generate_context!())
+        .expect("error while building op-workflow")
+        .run(|app, event| {
+            // an exit that did not go through "Thoát hẳn" still stops the AI it can
+            if let RunEvent::Exit = event {
+                if let Some(service) = app.try_state::<opw_orchestrator::AppService>() {
+                    service.quit_flow(window_api::EXIT_WAIT);
+                }
+            }
+        });
 }

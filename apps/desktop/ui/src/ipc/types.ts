@@ -192,6 +192,10 @@ export interface BoardSnapshot {
 // ---------- settings ----------
 
 /** Settings dialog data; never contains the token itself. */
+/** What closing the main window does: ask, go to the tray (the AI keeps running) or quit (every
+ *  running AI step is stopped with what it started). */
+export type CloseChoice = "ask" | "tray" | "quit";
+
 export interface SettingsView {
   nxBaseUrl: string;
   nxTokenSet: boolean;
@@ -224,6 +228,8 @@ export interface SettingsView {
   claudeActiveProbeSec?: number;
   /** probe Claude this often (minutes) when Claude Code is not in use */
   claudeProbeMin?: number;
+  /** what the window's X does */
+  onClose?: CloseChoice;
 }
 
 /** Models and effort levels the Claude / Codex CLIs on this machine offer (`step_models`). */
@@ -940,6 +946,8 @@ export interface Commands {
   allow_bash: TaskDetail;
   open_resume: null;
   push_check: PushCheck;
+  close_window: null;
+  set_on_close: SettingsView;
 }
 
 export interface CommandArgs {
@@ -974,4 +982,6 @@ export interface CommandArgs {
   allow_bash: { wpId: number; rule: string };
   open_resume: { wpId: number; runId: number };
   push_check: { wpId: number };
+  close_window: { choice: CloseChoice; remember: boolean };
+  set_on_close: { choice: CloseChoice };
 }

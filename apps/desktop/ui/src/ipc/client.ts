@@ -13,6 +13,7 @@ import {
   mockRepoState,
   mockSaveToken,
   mockSetTasksDir,
+  mockSetOnClose,
   mockSetQuotaProbe,
   mockSetStepChoice,
   mockSettings,
@@ -40,6 +41,7 @@ import {
   mockTaskDiff,
 } from "./mockTask";
 import type {
+  CloseChoice,
   AlertView,
   ApiError,
   AppInfo,
@@ -224,6 +226,27 @@ function onEvent<T>(name: string, handler: (payload: T) => void): () => void {
     stop?.();
   };
 }
+
+/** The window's X was pressed and `onClose` says "ask": show the close dialog. `running` = AI
+ *  steps running now. Returns the unsubscribe function. */
+export function onCloseAsked(handler: (running: number) => void): () => void {
+  // browser preview: `?close=2` opens the dialog as if X was pressed with 2 steps running
+  if (!isTauri() && typeof location !== "undefined") {
+    const raw = new URLSearchParams(location.search).get("close");
+    if (raw !== null) {
+      const timer = window.setTimeout(() => handler(Number(raw) || 0), 300);
+      return () => window.clearTimeout(timer);
+    }
+  }
+  return onEvent<{ running: number }>("opw://close-asked", (p) => handler(p.running));
+}
+/** The close dialog's answer: tray (the AI keeps running) or quit (every AI step stops first).
+ *  `remember` saves it as `onClose`. */
+export const closeWindow = (choice: CloseChoice, remember: boolean): Promise<null> =>
+  call("close_window", () => null, { choice, remember });
+/** Settings → Thông báo → "Khi đóng cửa sổ". */
+export const setOnClose = (choice: CloseChoice): Promise<SettingsView> =>
+  call("set_on_close", () => mockSetOnClose(choice), { choice });
 
 /** The tray icon asks to open the quota popover. Returns the unsubscribe function. */
 export const onOpenQuota = (handler: () => void): (() => void) => onEvent("opw://open-quota", () => handler());

@@ -1,6 +1,7 @@
 //! Run one AI CLI process: argument array (never a shell string), prompt on stdin, stdout read
 //! line by line. Stopped on request or after a timeout, together with its child processes.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -9,6 +10,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::env::{Account, is_stripped};
+use crate::procs::{self, Sweep};
 
 /// How often the reader wakes up to look at the stop flag and the deadline.
 const POLL: Duration = Duration::from_millis(200);
@@ -16,6 +18,9 @@ const POLL: Duration = Duration::from_millis(200);
 const DRAIN_AFTER_KILL: Duration = Duration::from_secs(5);
 /// Bytes of stderr kept for the error message.
 const STDERR_TAIL: usize = 4096;
+/// After the process itself exits, how long its last output may take to arrive before what it
+/// left running (holding the pipes open) is killed.
+const AFTER_EXIT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct RunSpec {
@@ -28,6 +33,9 @@ pub struct RunSpec {
     pub env: Vec<(String, String)>,
     pub account: Account,
     pub timeout: Duration,
+    /// Look for what the process left running when it ends and kill it (dev servers, Chrome).
+    /// Costs a PowerShell query or two, so short commands that start nothing skip it.
+    pub sweep: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,6 +47,8 @@ pub struct RunOutcome {
     /// The stop flag ended it.
     pub stopped: bool,
     pub timed_out: bool,
+    /// Processes the run left behind (dev servers, Chrome, …), killed when it ended.
+    pub sweep: Sweep,
 }
 
 impl RunOutcome {
@@ -47,7 +57,7 @@ impl RunOutcome {
     }
 }
 
-fn hide_window(cmd: &mut Command) {
+pub(crate) fn hide_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -96,7 +106,15 @@ pub fn run(spec: &RunSpec, stop: &AtomicBool, on_line: &mut dyn FnMut(&str)) -> 
     }
     cmd.envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     hide_window(&mut cmd);
+    let started_ms = procs::now_ms();
     let mut child = cmd.spawn()?;
+    let root = child.id();
+    let watch = spec.sweep.then(|| procs::Watch::start(root, started_ms));
+    let mut known: Option<HashMap<u32, u64>> = None;
+    let sweep_now = |known: &mut Option<HashMap<u32, u64>>, watch: &mut Option<procs::Watch>| {
+        let seen = known.get_or_insert_with(|| watch.take().map(procs::Watch::finish).unwrap_or_default());
+        procs::sweep(root, started_ms, seen)
+    };
 
     if let (Some(prompt), Some(mut stdin)) = (spec.stdin.clone(), child.stdin.take()) {
         std::thread::Builder::new()
@@ -143,11 +161,23 @@ pub fn run(spec: &RunSpec, stop: &AtomicBool, on_line: &mut dyn FnMut(&str)) -> 
     let deadline = Instant::now() + spec.timeout;
     let mut outcome = RunOutcome::default();
     let mut killed_at: Option<Instant> = None;
+    let mut exited_at: Option<Instant> = None;
+    let mut watch = watch;
+    let mut swept = !spec.sweep;
     loop {
         match rx.recv_timeout(POLL) {
             Ok(line) => on_line(&line),
             Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
+        }
+        // the CLI is gone but something it started keeps stdout open: clean up, then the pipe
+        // closes and the loop ends
+        if exited_at.is_none() && killed_at.is_none() && matches!(child.try_wait(), Ok(Some(_))) {
+            exited_at = Some(Instant::now());
+        }
+        if !swept && exited_at.is_some_and(|at| at.elapsed() > AFTER_EXIT) {
+            outcome.sweep = sweep_now(&mut known, &mut watch);
+            swept = true;
         }
         match killed_at {
             Some(at) if at.elapsed() > DRAIN_AFTER_KILL => break,
@@ -165,6 +195,10 @@ pub fn run(spec: &RunSpec, stop: &AtomicBool, on_line: &mut dyn FnMut(&str)) -> 
         }
     }
     let status = child.wait()?;
+    if !swept {
+        // what the run started and left running (a dev server, Chrome) goes with it
+        outcome.sweep = sweep_now(&mut known, &mut watch);
+    }
     outcome.code = if killed_at.is_some() { None } else { status.code() };
     outcome.stderr_tail = stderr_thread.join().unwrap_or_default();
     Ok(outcome)
@@ -184,6 +218,7 @@ mod tests {
             env: vec![("OPW_TEST_VAR".into(), "1".into())],
             account: Account::Subscription,
             timeout,
+            sweep: false,
         }
     }
 
