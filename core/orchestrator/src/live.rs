@@ -190,6 +190,10 @@ pub struct LiveSettings {
     pub probe_dir: PathBuf,
 }
 
+/// Told each task's comments as the inbox poll reads them (the app keeps them for the next start).
+pub type CommentsSink = Box<CommentsFn>;
+pub type CommentsFn = dyn Fn(u64, &[Comment]) + Send;
+
 #[derive(Debug)]
 pub struct Live {
     state: Arc<Mutex<LiveState>>,
@@ -228,10 +232,19 @@ fn now() -> String {
 
 impl Live {
     /// Start the background threads. `token` is the saved OpenProject token, if any.
-    pub fn start(settings: LiveSettings, base_url: String, token: Option<String>) -> Self {
+    /// `saved`: comments kept from the last run, shown until the first poll reads them again;
+    /// `on_comments`: told every fresh read.
+    pub fn start(
+        settings: LiveSettings,
+        base_url: String,
+        token: Option<String>,
+        saved: HashMap<u64, Vec<Comment>>,
+        on_comments: Option<CommentsSink>,
+    ) -> Self {
         let state = Arc::new(Mutex::new(LiveState {
             base_url,
             token,
+            comments: saved,
             claude_link: Some(link(Provider::Claude, LinkStatus::Connecting, None)),
             codex_link: Some(link(Provider::Codex, LinkStatus::Connecting, None)),
             claude_probe: settings.claude_probe,
@@ -240,7 +253,7 @@ impl Live {
         let (wake_tasks, wake_rx) = mpsc::channel();
         spawn_named("opw-tasks", {
             let (state, s) = (state.clone(), settings.clone());
-            move || tasks_loop(&state, &s, &wake_rx)
+            move || tasks_loop(&state, &s, &wake_rx, on_comments.as_deref())
         });
         let (wake_codex, codex_rx) = mpsc::channel();
         spawn_named("opw-codex-quota", {
@@ -471,7 +484,12 @@ fn update(state: &Mutex<LiveState>, f: impl FnOnce(&mut LiveState)) {
 
 // ---------- tasks ----------
 
-fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver<()>) {
+fn tasks_loop(
+    state: &Mutex<LiveState>,
+    settings: &LiveSettings,
+    wake: &Receiver<()>,
+    on_comments: Option<&CommentsFn>,
+) {
     // `updatedAt` of each task when its comments were last read
     let mut read_at: HashMap<u64, String> = HashMap::new();
     loop {
@@ -493,6 +511,11 @@ fn tasks_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver
                 Ok(tasks) => fetch_changed_comments(&tracker, tasks, &cached, &mut read_at),
                 Err(_) => HashMap::new(),
             };
+            if let Some(keep) = on_comments {
+                for (wp_id, list) in &fresh {
+                    keep(*wp_id, list);
+                }
+            }
             update(state, |s| {
                 // the token may have been cleared or replaced while we were fetching
                 if s.token.as_deref() != Some(token.as_str()) {

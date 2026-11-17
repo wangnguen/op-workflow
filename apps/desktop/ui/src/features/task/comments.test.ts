@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mockNewComments, mockTaskComments } from "../../ipc/mockTask";
-import type { CommentView } from "../../ipc/types";
-import { commentCounts, oneLine } from "./comments";
+import type { CommentsView, CommentView } from "../../ipc/types";
+import { commentCounts, knownEmpty, oneLine, readProblem } from "./comments";
 
 const c = (id: string, isNew: boolean, mine: boolean): CommentView => ({
   id,
@@ -17,6 +17,28 @@ describe("comment tab", () => {
     // an own comment is never "cần xem", even if flagged new by mistake
     expect(commentCounts([c("4", true, true)])).toEqual({ fresh: 0, mine: 1 });
     expect(commentCounts([])).toEqual({ fresh: 0, mine: 0 });
+  });
+
+  it("says when the comments shown are the saved copy", () => {
+    const now = Date.parse("2026-11-17T10:00:00Z");
+    const view = (over: Partial<CommentsView>): CommentsView => ({
+      comments: [],
+      issues: [],
+      briefStale: false,
+      fetchedAt: "2026-11-17T10:00:00Z",
+      ...over,
+    });
+    expect(readProblem(undefined, now)).toBeUndefined();
+    expect(readProblem(view({}), now)).toBeUndefined();
+    expect(knownEmpty(view({}))).toBe(true);
+    // offline, nothing saved: only the reason, and no "chưa có comment" (it is unknown)
+    expect(readProblem(view({ error: "Mất mạng." }), now)).toBe("Mất mạng.");
+    expect(knownEmpty(view({ error: "Mất mạng." }))).toBe(false);
+    // offline with a saved read
+    const saved = view({ error: "Mất mạng.", savedAt: "2026-11-17T09:55:00Z" });
+    expect(readProblem(saved, now)).toBe("Mất mạng. Đang hiện bản đọc 5 phút trước.");
+    expect(knownEmpty(saved)).toBe(true);
+    expect(knownEmpty(view({ savedAt: "x", error: "e", comments: [c("1", false, false)] }))).toBe(false);
   });
 
   it("folds an own comment to one line", () => {

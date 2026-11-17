@@ -1,4 +1,6 @@
-import type { CommentView } from "../../ipc/types";
+import { vi } from "../../i18n/vi";
+import type { CommentsView, CommentView } from "../../ipc/types";
+import { formatRelative } from "../../shared/format";
 
 /** What the Comment tab head counts: other people's comments to look at, and the user's own. */
 export function commentCounts(list: readonly CommentView[]): { fresh: number; mine: number } {
@@ -14,4 +16,16 @@ export function commentCounts(list: readonly CommentView[]): { fresh: number; mi
 /** The folded line of the user's own comment: whitespace collapsed (CSS adds the "…"). */
 export function oneLine(text: string): string {
   return text.split(/\s+/).filter(Boolean).join(" ");
+}
+
+/** Why OpenProject could not be read, and how old the saved comments shown instead are. */
+export function readProblem(view: CommentsView | undefined, now: number): string | undefined {
+  if (!view?.error) return undefined;
+  if (!view.savedAt) return view.error;
+  return `${view.error} ${vi.flow.comments.savedCopy(formatRelative(view.savedAt, now))}`;
+}
+
+/** "Task chưa có comment nào": known to be empty, read now or from the saved copy. */
+export function knownEmpty(view: CommentsView | undefined): boolean {
+  return view !== undefined && view.comments.length === 0 && (!view.error || view.savedAt !== undefined);
 }

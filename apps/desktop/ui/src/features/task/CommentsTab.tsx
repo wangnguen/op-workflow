@@ -6,7 +6,7 @@ import { formatRelative } from "../../shared/format";
 import { useNow } from "../../shared/hooks";
 import { Icon } from "../../shared/ui/Icon";
 import { CommentItem, useNewMarks } from "./CommentList";
-import { commentCounts } from "./comments";
+import { commentCounts, knownEmpty, readProblem } from "./comments";
 
 const t = vi.flow.comments;
 
@@ -75,6 +75,7 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
   };
 
   const { fresh, mine } = commentCounts(view?.comments ?? []);
+  const problem = readProblem(view, now);
   const running = d.status === "running";
   const open = (url: string) => {
     openTaskLink(d.wpId, url).catch((e: unknown) => setError(errorMessage(e)));
@@ -108,7 +109,7 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
       </div>
 
       {error && <p className="note note--error">{error}</p>}
-      {view?.error && <p className="note note--warn">{view.error}</p>}
+      {problem && <p className="note note--warn">{problem}</p>}
       {note && <p className="note">{note}</p>}
 
       {view?.briefStale && (
@@ -126,7 +127,7 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
         </div>
       )}
 
-      {view && view.comments.length === 0 && !view.error && <p className="dim">{t.none}</p>}
+      {knownEmpty(view) && <p className="dim">{t.none}</p>}
       {view && view.comments.length > 0 && (
         <ul className="comment-list">
           {view.comments.map((c) => (

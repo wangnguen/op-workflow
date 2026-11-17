@@ -11,7 +11,7 @@ pub use http::HttpTracker;
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, thiserror::Error)]
@@ -96,7 +96,9 @@ pub fn parse_work_package_collection(v: &Value) -> TrackerResult<Vec<WorkPackage
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Also saved as JSON (the Comment tab's last read, `task_kv` kind `comments.op`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Comment {
     pub id: u64,
     pub created_at: String,

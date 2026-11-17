@@ -44,7 +44,7 @@ use opw_tracker::{Comment, HttpTracker, TrackerApi, WorkPackage};
 
 use crate::alerts::{Alerts, NewAlert};
 use crate::flow::{CliLauncher, Flow, TaskCtx};
-use crate::live::{ClaudeProbe, Live, LiveSettings, LiveState};
+use crate::live::{ClaudeProbe, CommentsSink, Live, LiveSettings, LiveState};
 use crate::updater::Updater;
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -112,7 +112,6 @@ impl AppService {
             claude_probe_model: config.quota.claude_probe_model.clone(),
             probe_dir,
         };
-        let live = Arc::new(Live::start(settings, config.tracker.base_url.clone(), token));
         let (store, store_error) = match open_store(data_dir.as_deref()) {
             Ok(s) => (Some(s), None),
             Err(e) => (None, Some(e)),
@@ -121,8 +120,29 @@ impl AppService {
             .as_ref()
             .and_then(|s| s.active_tasks().ok())
             .unwrap_or_default();
+        // comments read before the restart show at once; every new read is kept for next time
+        let saved_comments = store.as_ref().map(comments::all_saved_op).unwrap_or_default();
         let store = store.map(|s| Arc::new(Mutex::new(s)));
-        let alerts = Arc::new(Alerts::default());
+        let keep_comments = store.clone().map(|store| -> CommentsSink {
+            Box::new(move |wp_id, list| {
+                if let Ok(store) = store.lock() {
+                    comments::save_op(&store, wp_id, list, &opw_quota::now_rfc3339());
+                }
+            })
+        });
+        let live = Arc::new(Live::start(
+            settings,
+            config.tracker.base_url.clone(),
+            token,
+            saved_comments,
+            keep_comments,
+        ));
+        let alerts = Arc::new(
+            data_dir
+                .as_ref()
+                .map(|d| Alerts::open(d.join(alerts::FILE)))
+                .unwrap_or_default(),
+        );
         let flow = store.as_ref().and_then(|store| {
             let dir = data_dir.as_ref()?;
             let launcher = CliLauncher::new(dir.join("guard-hooks")).ok()?;
@@ -1120,12 +1140,23 @@ impl AppService {
         };
         let state = self.live_state().unwrap_or_default();
         let now = opw_quota::now_rfc3339();
-        let (list, error) = match self.read_comments(wp_id, &state) {
+        let (mut list, error) = match self.read_comments(wp_id, &state) {
             Ok(list) => (list, None),
-            Err(e) => (state.comments.get(&wp_id).cloned().unwrap_or_default(), Some(e)),
+            Err(e) => (Vec::new(), Some(e)),
         };
         let brief = brief_file.and_then(|f| std::fs::read_to_string(f).ok());
         let store = self.store.as_ref().and_then(|s| s.lock().ok());
+        // OpenProject cannot be read now: show the last read, saying when it was
+        let mut saved_at = None;
+        if error.is_some() {
+            match store.as_ref().and_then(|s| comments::saved_op(s, wp_id)) {
+                Some(saved) => {
+                    list = saved.comments;
+                    saved_at = Some(saved.saved_at);
+                }
+                None => list = state.comments.get(&wp_id).cloned().unwrap_or_default(),
+            }
+        }
         let seen = store.as_ref().and_then(|s| comments::seen_id(s, wp_id));
         let (issues, issues_seen) = store.as_ref().map_or_else(Default::default, |s| {
             (comments::stored_issues(s, wp_id), comments::issues_seen(s, wp_id))
@@ -1139,6 +1170,7 @@ impl AppService {
             issues_read_at: issues.iter().map(|i| i.read_at.clone()).max(),
             brief_stale: error.is_none() && comments::brief_stale(brief.as_deref(), &list, me),
             error,
+            saved_at,
             fetched_at: now.clone(),
         };
         if mark_seen {
@@ -1155,7 +1187,8 @@ impl AppService {
         Ok(view)
     }
 
-    /// OpenProject comments of one task, read now; the cache (badges) follows.
+    /// OpenProject comments of one task, read now; the cache (badges) and the saved copy follow.
+    /// Callers must not hold the store lock.
     fn read_comments(&self, wp_id: u64, state: &LiveState) -> Result<Vec<Comment>, String> {
         let Some(token) = state.token.as_deref().filter(|_| !state.base_url.is_empty()) else {
             return Err("Chưa có token OpenProject: nhập ở Cài đặt → OpenProject để xem comment.".into());
@@ -1163,6 +1196,9 @@ impl AppService {
         let list = HttpTracker::new(&state.base_url, token)
             .comments(wp_id)
             .map_err(|e| format!("Không đọc được comment từ OpenProject: {e}"))?;
+        if let Some(store) = self.store.as_ref().and_then(|s| s.lock().ok()) {
+            comments::save_op(&store, wp_id, &list, &opw_quota::now_rfc3339());
+        }
         if let Some(live) = &self.live {
             live.put_comments(wp_id, list.clone());
         }

@@ -5,7 +5,7 @@ use opw_domain::view::{AlertView, ApiError, NotifyKind, SettingsView};
 use opw_orchestrator::AppService;
 use tauri::State;
 
-/// Alerts of this session, newest first.
+/// The bell (kept across restarts), newest first.
 #[tauri::command]
 pub fn alerts(service: State<'_, AppService>) -> Vec<AlertView> {
     service.alerts()

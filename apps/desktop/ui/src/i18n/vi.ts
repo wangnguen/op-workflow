@@ -521,6 +521,7 @@ export const vi = {
       openHint: "Mở tab Comment của task",
       openProject: "OpenProject",
       none: "Task chưa có comment nào.",
+      savedCopy: (at: string) => `Đang hiện bản đọc ${at}.`,
       isNew: "cần xem",
       isNewHint: "Người khác viết sau lần bạn mở tab này trước",
       newCount: (n: number) => `${n} cần xem`,
@@ -637,7 +638,7 @@ export const vi = {
   },
   alerts: {
     title: "Thông báo",
-    empty: "Chưa có thông báo nào trong phiên này.",
+    empty: "Chưa có thông báo nào.",
     emptyUnread: "Không có thông báo chưa đọc.",
     markAll: "Đánh dấu đã đọc hết",
     unread: "Chưa đọc",

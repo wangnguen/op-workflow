@@ -8,7 +8,7 @@ import type { CommentsView } from "../../ipc/types";
 import { useNow } from "../../shared/hooks";
 import { Icon } from "../../shared/ui/Icon";
 import { CommentItem, useNewMarks } from "../task/CommentList";
-import { commentCounts } from "../task/comments";
+import { commentCounts, knownEmpty, readProblem } from "../task/comments";
 import "../task/flowDialogs.css";
 
 const t = vi.flow.comments;
@@ -70,6 +70,7 @@ export function CommentsPeek({ wpId, taskId, title, onClose, onChanged, onStart 
     openTaskLink(wpId, url).catch((e: unknown) => setError(errorMessage(e)));
   };
   const { fresh, mine } = commentCounts(view?.comments ?? []);
+  const problem = readProblem(view, now);
 
   return (
     <div className="scrim flow-scrim" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -114,8 +115,8 @@ export function CommentsPeek({ wpId, taskId, title, onClose, onChanged, onStart 
           </div>
 
           {error && <p className="note note--error">{error}</p>}
-          {view?.error && <p className="note note--warn">{view.error}</p>}
-          {view && view.comments.length === 0 && !view.error && <p className="dim">{t.none}</p>}
+          {problem && <p className="note note--warn">{problem}</p>}
+          {knownEmpty(view) && <p className="dim">{t.none}</p>}
           {view && view.comments.length > 0 && (
             <ul className="comment-list">
               {view.comments.map((c) => (

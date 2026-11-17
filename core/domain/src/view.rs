@@ -697,6 +697,9 @@ pub struct CommentsView {
     /// Why the OpenProject comments could not be read (no token, network, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// With `error`: `comments` is the last read saved at this time (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_url: Option<String>,
     pub issues: Vec<IssueThread>,

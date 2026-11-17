@@ -5,6 +5,8 @@
 //! - `comments.seen`: highest OpenProject comment id the user saw (set at start, when the brief
 //!   took the comments in, and when the Comment tab opens);
 //! - `comments.notified`: highest id already announced in the bell;
+//! - `comments.op`: the OpenProject comments as last read, JSON, so a restart shows the badges
+//!   at once and the tab still has them when OpenProject cannot be reached;
 //! - `issues.read` (key = issue URL): the issue as last read, JSON;
 //! - `issues.seen` (key = issue URL): date of the newest issue comment the user saw;
 //! - `nx.status`: the OpenProject status last seen, to notice Test failed / Reopened.
@@ -22,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SEEN: &str = "comments.seen";
 pub const NOTIFIED: &str = "comments.notified";
+pub const OP_SAVED: &str = "comments.op";
 pub const ISSUES: &str = "issues.read";
 pub const ISSUES_SEEN: &str = "issues.seen";
 pub const STATUS: &str = "nx.status";
@@ -80,6 +83,45 @@ impl StoredIssue {
                 .filter(|c| !c.mine && c.created_at.as_str() > seen),
         )
     }
+}
+
+/// OpenProject comments of one task as last read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedComments {
+    pub saved_at: String,
+    /// Oldest first, as OpenProject gives them.
+    pub comments: Vec<Comment>,
+}
+
+/// Keep this read of a task's OpenProject comments.
+pub fn save_op(store: &Store, wp_id: u64, comments: &[Comment], at: &str) {
+    let saved = SavedComments {
+        saved_at: at.to_owned(),
+        comments: comments.to_vec(),
+    };
+    if let Ok(json) = serde_json::to_string(&saved) {
+        let _ = store.kv_set(wp_id, OP_SAVED, "", &json, at);
+    }
+}
+
+/// The last read of one task's OpenProject comments, if any.
+pub fn saved_op(store: &Store, wp_id: u64) -> Option<SavedComments> {
+    let json = store.kv_get(wp_id, OP_SAVED, "").ok().flatten()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// Every task's last read (work package id → comments), to fill the cache at start.
+pub fn all_saved_op(store: &Store) -> HashMap<u64, Vec<Comment>> {
+    store
+        .kv_kind(OP_SAVED)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(wp_id, _, json)| {
+            let saved: SavedComments = serde_json::from_str(&json).ok()?;
+            Some((wp_id, saved.comments))
+        })
+        .collect()
 }
 
 fn count<T>(it: impl Iterator<Item = T>) -> u32 {
@@ -467,5 +509,27 @@ mod tests {
         // seen never goes back
         raise(&store, 7, SEEN, 2, "t5");
         assert_eq!(seen_id(&store, 7), Some(4));
+    }
+
+    #[test]
+    fn the_last_op_read_is_kept_for_the_next_start() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(saved_op(&store, 7).is_none());
+        let list = [c(3, "a"), mine(4, "b")];
+        save_op(&store, 7, &list, "t1");
+        save_op(&store, 8, &[], "t1");
+        save_op(&store, 7, &list, "t2");
+        let saved = saved_op(&store, 7).unwrap();
+        assert_eq!(
+            (saved.saved_at.as_str(), saved.comments.as_slice()),
+            ("t2", &list[..])
+        );
+        let all = all_saved_op(&store);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[&7], list);
+        assert!(all[&8].is_empty());
+        // a value that is not ours is skipped, not an error
+        store.kv_set(9, OP_SAVED, "", "{", "t3").unwrap();
+        assert_eq!(all_saved_op(&store).len(), 2);
     }
 }

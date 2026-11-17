@@ -1,14 +1,19 @@
 //! The bell: alerts from the workflow (a step ended and waits), OpenProject (new comments, a task
-//! moved to Test failed / Reopened) and quota levels. The last [`KEEP`] stay in memory; the
-//! shell shows the new ones as Windows notifications when that kind is on (`notify` in config).
+//! moved to Test failed / Reopened) and quota levels. The last [`KEEP`] are kept in
+//! `<data>/alerts.json` with their read marks, so a restart keeps the bell; the shell shows the
+//! new ones as Windows notifications when that kind is on (`notify` in config). Alerts read back
+//! from the file are never shown as notifications again.
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use opw_domain::view::{AlertKind, AlertView, NotifySettings, Provider, QuotaSnapshot, QuotaWindowKind};
 
 /// Alerts kept for the bell.
 pub const KEEP: usize = 100;
+/// The bell's file in the data folder.
+pub const FILE: &str = "alerts.json";
 
 /// An alert before it gets its id and time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,9 +38,39 @@ struct Inner {
 #[derive(Debug, Default)]
 pub struct Alerts {
     inner: Mutex<Inner>,
+    /// Where the bell is saved; `None` keeps it in memory only (tests, browser previews).
+    file: Option<PathBuf>,
 }
 
 impl Alerts {
+    /// The bell saved in `file` (empty when the file is missing or unreadable).
+    pub fn open(file: PathBuf) -> Self {
+        let mut items: Vec<AlertView> = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        items.sort_by_key(|a| std::cmp::Reverse(a.id));
+        items.truncate(KEEP);
+        let inner = Inner {
+            next_id: items.iter().map(|a| a.id).max().unwrap_or(0),
+            items: items.into(),
+            fresh: Vec::new(),
+        };
+        Self {
+            inner: Mutex::new(inner),
+            file: Some(file),
+        }
+    }
+
+    /// Write the bell to its file (a temp file renamed over it, so a crash leaves the old one).
+    fn save(&self, inner: &Inner) {
+        let Some(file) = &self.file else { return };
+        let items: Vec<&AlertView> = inner.items.iter().collect();
+        if let Ok(json) = serde_json::to_string(&items) {
+            let _ = write_replacing(file, &json);
+        }
+    }
+
     pub fn push(&self, alert: NewAlert, at: &str) {
         let Ok(mut inner) = self.inner.lock() else { return };
         inner.next_id += 1;
@@ -53,6 +88,7 @@ impl Alerts {
         inner.items.push_front(view.clone());
         inner.items.truncate(KEEP);
         inner.fresh.push(view);
+        self.save(&inner);
     }
 
     /// Alerts added since the last call (for Windows notifications), oldest first.
@@ -80,25 +116,35 @@ impl Alerts {
 
     /// Mark these alerts read; an empty list marks all.
     pub fn mark_read(&self, ids: &[u64]) {
-        if let Ok(mut inner) = self.inner.lock() {
-            for a in &mut inner.items {
-                if ids.is_empty() || ids.contains(&a.id) {
-                    a.read = true;
-                }
-            }
-        }
+        self.mark(|a| ids.is_empty() || ids.contains(&a.id));
     }
 
     /// The user looked at what these alerts were about (e.g. opened the Comment tab).
     pub fn mark_task_read(&self, wp_id: u64, kinds: &[AlertKind]) {
-        if let Ok(mut inner) = self.inner.lock() {
-            for a in &mut inner.items {
-                if a.wp_id == Some(wp_id) && kinds.contains(&a.kind) {
-                    a.read = true;
-                }
-            }
+        self.mark(|a| a.wp_id == Some(wp_id) && kinds.contains(&a.kind));
+    }
+
+    /// Mark the unread alerts that `which` picks as read; save only when one changed.
+    fn mark(&self, which: impl Fn(&AlertView) -> bool) {
+        let Ok(mut inner) = self.inner.lock() else { return };
+        let mut changed = false;
+        for a in inner.items.iter_mut().filter(|a| !a.read && which(a)) {
+            a.read = true;
+            changed = true;
+        }
+        if changed {
+            self.save(&inner);
         }
     }
+}
+
+fn write_replacing(file: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = file.with_extension("json.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, file)
 }
 
 /// Whether a Windows notification shows for this kind (the bell lists every alert anyway).
@@ -239,6 +285,34 @@ mod tests {
             a.push(new(AlertKind::Error, i), "x");
         }
         assert_eq!(a.list().len(), KEEP);
+    }
+
+    #[test]
+    fn the_bell_survives_a_restart_without_notifying_again() {
+        let dir = std::env::temp_dir().join(format!("opw-alerts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join(FILE);
+        let a = Alerts::open(file.clone());
+        assert!(a.list().is_empty(), "no file yet");
+        a.push(new(AlertKind::Comment, 1), "2026-11-14T01:00:00Z");
+        a.push(new(AlertKind::Gate, 2), "2026-11-14T02:00:00Z");
+        a.mark_task_read(2, &[AlertKind::Gate]);
+        assert_eq!(a.take_fresh().len(), 2);
+
+        let b = Alerts::open(file.clone());
+        let list = b.list();
+        assert_eq!(list.iter().map(|x| x.id).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!((list[0].read, list[1].read), (true, false));
+        assert_eq!(b.unread(), 1);
+        assert!(b.take_fresh().is_empty(), "read back, not new");
+        b.push(new(AlertKind::Error, 3), "2026-11-14T03:00:00Z");
+        assert_eq!(b.list()[0].id, 3, "ids go on after the saved ones");
+        b.mark_read(&[]);
+        assert_eq!(Alerts::open(file.clone()).unread(), 0);
+
+        std::fs::write(&file, "not json").unwrap();
+        assert!(Alerts::open(file).list().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

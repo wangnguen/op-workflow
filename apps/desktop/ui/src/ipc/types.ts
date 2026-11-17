@@ -457,6 +457,8 @@ export interface CommentsView {
   comments: CommentView[];
   /** why OpenProject comments could not be read */
   error?: string;
+  /** with `error`: `comments` is the last read, saved at this time */
+  savedAt?: string;
   taskUrl?: string;
   /** issues of the last "Lấy issue" */
   issues: IssueThread[];
