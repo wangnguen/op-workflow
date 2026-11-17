@@ -11,6 +11,7 @@ import type {
   ChatView,
   FindingDecision,
   FindingView,
+  DevServer,
   FlowAction,
   FlowError,
   FlowStatus,
@@ -152,6 +153,8 @@ const PROPOSALS: StepProposal[] = [
     step: "browserTest",
     recommend: false,
     reason: "Chỉ đổi API; màn hình web giữ nguyên.",
+    checks: "- mở /files bằng user chưa có org → thấy danh sách rỗng, không trắng trang",
+    devServer: { command: "pnpm --filter web dev", dir: "", url: "http://localhost:5173" },
   },
 ];
 
@@ -329,6 +332,10 @@ interface Flow {
   picked: StepKind[];
   /** Harness / Test trình duyệt results */
   tests: TestView[];
+  /** Test trình duyệt: the dev server the user confirmed (the preview keeps no repo memory) */
+  devServer?: DevServer;
+  /** question gate: what the AI asked */
+  ask?: { question: string; url: string };
   /** Quota preview: one reset deadline, and whether auto-run stopped before an AI step. */
   quotaUntil?: number;
   quotaWaiting?: boolean;
@@ -778,6 +785,15 @@ function complete(f: Flow): void {
       return;
     }
     case "browserTest": {
+      // the first run stops to ask for a login, like a real app behind one
+      if (n === 1) {
+        f.ask = { question: "Trang yêu cầu đăng nhập: đăng nhập tài khoản test trong cửa sổ Chrome test rồi bấm Tiếp tục.", url: "http://localhost:5173/login" };
+        toGate(f, "agentQuestion", "browserTest");
+        f.states.browserTest = "waitingUser";
+        done(`AI hỏi: ${f.ask.question} (cửa sổ Chrome test vẫn mở)`);
+        return;
+      }
+      f.ask = undefined;
       f.states.browserTest = "done";
       f.tests = [...f.tests.filter((x) => x.step !== "browserTest"), browserView(n)];
       done("OK 2/2, 1 ảnh");
@@ -920,7 +936,7 @@ function gateView(f: Flow): GateView | undefined {
     findings: `${LABEL[f.fixFor ?? "finalReview"]} báo lỗi: ${open} lỗi đang mở, đã chọn ${picked} cho AI sửa. Chọn lỗi cần sửa, hoặc sang ${next ? LABEL[next] : "bước sau"} mà không sửa.${rounds}`,
     afterFix: `Sửa lỗi xong. ${ask}${rounds}`,
     selfCode: 'Bạn đang tự code trên nhánh này. Xong thì bấm "Tôi code xong" để app review.',
-    agentQuestion: "AI đang hỏi bạn.",
+    agentQuestion: f.ask ? `AI hỏi: ${f.ask.question} Làm xong thì bấm Tiếp tục.` : "AI đang hỏi bạn.",
     error: f.error?.message ?? "Bước vừa chạy bị lỗi.",
   };
   const review = f.gate === "findings" || f.gate === "afterFix" ? f.fixFor : undefined;
@@ -979,6 +995,12 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     questions: f.questions.map((q) => ({ ...q })),
     proposals: f.proposals.map((p) => ({ ...p })),
     uses: OPTIONAL_STEPS.filter((s) => f.uses.includes(s)),
+    devServer: f.devServer ? { ...f.devServer } : undefined,
+    devServerFromRepo: false,
+    agentQuestion:
+      f.phase === "gate" && f.gate === "agentQuestion" && f.ask
+        ? { step: "browserTest", question: f.ask.question, url: f.ask.url, browserOpen: true }
+        : undefined,
     findings: f.findings.map((x) => ({ ...x })),
     reviewNotes: STEP_ORDER.filter((s) => f.notes[s]).map((s) => ({ step: s, text: f.notes[s] ?? "" })),
     push: f.push,
@@ -1069,6 +1091,33 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       if (!q) throw fail("plan.question", "Không thấy câu hỏi này nữa");
       q.aiDecides = action.aiDecides === true || undefined;
       q.answer = q.aiDecides ? undefined : action.answer?.trim() || undefined;
+      break;
+    }
+    case "setDevServer": {
+      const url = action.url.trim();
+      if (url && !/^https?:\/\/[^/\s:]+(:\d+)?(\/\S*)?$/i.test(url)) {
+        throw fail("devserver.invalid", `URL phải dạng http://localhost:5173 (đang là \`${url}\`)`);
+      }
+      f.devServer = url ? { command: action.command.trim(), url, dir: action.dir.trim() } : undefined;
+      log(
+        f,
+        "info",
+        url
+          ? action.command.trim()
+            ? `Test trình duyệt: app chạy \`${action.command.trim()}\` rồi mở ${url}`
+            : `Test trình duyệt dùng app đang chạy ở ${url}`
+          : "Bỏ lệnh chạy app: Test trình duyệt để AI tự bật app",
+        "browserTest",
+      );
+      break;
+    }
+    case "answerAgent": {
+      if (f.phase !== "gate" || f.gate !== "agentQuestion") throw fail("flow.notNow", "Lúc này chưa trả lời AI được");
+      const answer = action.answer.trim();
+      log(f, "ok", answer ? `Bạn trả lời AI: ${answer}` : "Bạn đã làm việc AI hỏi: AI chạy tiếp", "browserTest");
+      // like the engine: the step goes on at once, in the same session
+      goTo(f, "browserTest");
+      startRun(f);
       break;
     }
     case "setUses": {

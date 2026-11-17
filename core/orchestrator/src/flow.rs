@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use crate::browsertest;
 use crate::checks::{self, Check, CheckKind, CheckResult, CheckRunner, ProcessRunner};
+use crate::devserver::{self, AppProcess, AppStarter, ShellStarter, Up};
 use crate::harness;
 use crate::quotagate;
 use opw_agents::ModelChoice;
@@ -34,10 +35,11 @@ use opw_config::{Config, RepoConfig, StepConfig, StepsConfig};
 use opw_context::prompts::{self, FixItem};
 use opw_domain::finding::{Severity, fingerprint};
 use opw_domain::view::{
-    AgentKind, AgentView, AlertKind, ApiError, CarryOn, ChatItem, ChatKind, ChatView, Decision,
-    FindingDecision, FindingView, FlowAction, FlowError, FlowStatus, GateKind, GateView, LogLine,
-    PlanQuestion, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote, RunState, RunSummary, RunView,
-    SessionStatus, StepProposal, StepRef, StepView, TaskColumn, TaskDetail, TestCase, TestView, ToolEvent,
+    AgentKind, AgentQuestionView, AgentView, AlertKind, ApiError, CarryOn, ChatItem, ChatKind, ChatView,
+    Decision, DevServer, FindingDecision, FindingView, FlowAction, FlowError, FlowStatus, GateKind, GateView,
+    LogLine, PlanQuestion, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote, RunState, RunSummary,
+    RunView, SessionStatus, StepProposal, StepRef, StepView, TaskColumn, TaskDetail, TestCase, TestView,
+    ToolEvent,
 };
 use opw_domain::workflow::{AfterFix, Phase, StepKind, StepState, Workflow, WorkflowEvent};
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
@@ -182,6 +184,53 @@ struct Saved {
     browser: Option<BrowserState>,
     /// The usage limit ended a run in the middle: which, and when it can go on.
     cut: Option<CutRun>,
+    /// Test trình duyệt: the dev server the user confirmed for this task (else the repo's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dev_server: Option<DevServer>,
+    /// The AI of a step stopped to ask the user (question gate), and the answer once given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ask: Option<AskState>,
+}
+
+/// What the AI asked at the question gate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AskState {
+    step: Option<StepKind>,
+    question: String,
+    url: String,
+    /// The session to go on in once the user answered.
+    session: String,
+    /// What the user said (`Some("")` = they only did what was asked).
+    answer: Option<String>,
+}
+
+/// The test's Chrome window and the dev server the app started for a task: kept open while its
+/// AI waits for the user at the question gate, stopped when the test ends.
+#[derive(Default)]
+struct BrowserSession {
+    chrome: Option<(Box<dyn AppProcess>, u16)>,
+    server: Option<Box<dyn AppProcess>>,
+}
+
+impl BrowserSession {
+    fn close(self, inner: &Inner, wp_id: u64) {
+        let mut parts = Vec::new();
+        if let Some((chrome, _)) = self.chrome {
+            let _ = chrome.stop();
+            parts.push("cửa sổ Chrome test".to_owned());
+        }
+        if let Some(server) = self.server {
+            parts.push(match server.stop() {
+                Some(what) => format!("dev server ({what})"),
+                None => "dev server".to_owned(),
+            });
+        }
+        if !parts.is_empty() {
+            let line = format!("Đã tắt {}", parts.join(" và "));
+            inner.log(wp_id, Some(StepKind::BrowserTest), "info", &line, false);
+        }
+    }
 }
 
 impl Saved {
@@ -457,6 +506,18 @@ pub fn permission_default(step: StepKind, agent: AgentKind) -> Option<&'static s
         AgentKind::Codex => Some("read-only"),
         _ => None,
     }
+}
+
+/// The dev server Test trình duyệt uses: the task's own, else the one remembered for the repo
+/// (`true`). `None` = the AI starts the app itself.
+fn dev_server_of(ctx: &TaskCtx, saved: &Saved) -> Option<(DevServer, bool)> {
+    let usable = |d: &DevServer| !d.url.trim().is_empty() && devserver::check(d).is_ok();
+    saved
+        .dev_server
+        .clone()
+        .filter(usable)
+        .map(|d| (d, false))
+        .or_else(|| ctx.repo_config().dev_server.filter(usable).map(|d| (d, true)))
 }
 
 /// `analyze`, `reviewLocal`, … as in JSON and in SQLite.
@@ -861,6 +922,10 @@ struct Inner {
     alert_sink: Mutex<Option<AlertSink>>,
     /// Runs the Kiểm tra commands (tests swap in a fake).
     checker: Mutex<Arc<dyn CheckRunner>>,
+    /// Starts the dev server of Test trình duyệt (a fake in tests).
+    starter: Mutex<Arc<dyn AppStarter>>,
+    /// Chrome windows and dev servers kept open while an AI waits for the user.
+    browsers: Mutex<HashMap<u64, BrowserSession>>,
     /// The user quit the app: running steps were stopped and no new one starts.
     quitting: AtomicBool,
     quota_source: Mutex<Option<QuotaSource>>,
@@ -1010,6 +1075,8 @@ impl Flow {
                 quota_sink: Mutex::new(None),
                 alert_sink: Mutex::new(None),
                 checker: Mutex::new(Arc::new(ProcessRunner)),
+                starter: Mutex::new(Arc::new(ShellStarter)),
+                browsers: Mutex::new(HashMap::new()),
                 quitting: AtomicBool::new(false),
                 quota_source: Mutex::new(None),
             }),
@@ -1020,6 +1087,13 @@ impl Flow {
     pub fn set_check_runner(&self, runner: Arc<dyn CheckRunner>) {
         if let Ok(mut c) = self.inner.checker.lock() {
             *c = runner;
+        }
+    }
+
+    /// Replace what starts the dev server of Test trình duyệt (tests).
+    pub fn set_app_starter(&self, starter: Arc<dyn AppStarter>) {
+        if let Ok(mut s) = self.inner.starter.lock() {
+            *s = starter;
         }
     }
 
@@ -1194,6 +1268,15 @@ impl Flow {
     /// started) and start no new one. Returns how many were running.
     pub fn stop_all(&self) -> usize {
         self.inner.quitting.store(true, Ordering::Relaxed);
+        let open: Vec<(u64, BrowserSession)> = self
+            .inner
+            .browsers
+            .lock()
+            .map(|mut b| b.drain().collect())
+            .unwrap_or_default();
+        for (wp_id, session) in open {
+            session.close(&self.inner, wp_id);
+        }
         let tasks = self.inner.lock_tasks();
         let mut n = 0;
         for run in tasks.values().filter_map(|e| e.run.as_ref()) {
@@ -1225,6 +1308,15 @@ impl Flow {
             }
             start
         };
+        // the task left the question gate another way: nothing waits on its Chrome window now
+        let left = match &action {
+            FlowAction::Finish { .. } | FlowAction::Reopen { .. } => true,
+            FlowAction::SetUses { step, on } => *step == StepKind::BrowserTest && !on,
+            _ => false,
+        };
+        if left {
+            self.inner.close_browser(wp_id);
+        }
         if start {
             let claim = self.inner.claim(&ctx)?;
             let inner = self.inner.clone();
@@ -1438,6 +1530,23 @@ impl Flow {
             plan: ctx.read(PLAN_FILE),
             questions: entry.saved.questions.clone(),
             proposals: entry.saved.proposals.clone(),
+            dev_server: dev_server_of(ctx, &entry.saved).map(|(d, _)| d),
+            dev_server_from_repo: dev_server_of(ctx, &entry.saved).is_some_and(|(_, repo)| repo),
+            agent_question: entry
+                .saved
+                .ask
+                .as_ref()
+                .filter(|_| entry.saved.workflow.phase() == Phase::Gate(GateKind::AgentQuestion))
+                .map(|a| AgentQuestionView {
+                    step: a.step.unwrap_or(StepKind::BrowserTest),
+                    question: a.question.clone(),
+                    url: Some(a.url.clone()).filter(|u| !u.is_empty()),
+                    browser_open: self
+                        .inner
+                        .browsers
+                        .lock()
+                        .is_ok_and(|b| b.get(&ctx.row.wp_id).is_some_and(|s| s.chrome.is_some())),
+                }),
             uses: SWITCHABLE
                 .into_iter()
                 .filter(|s| entry.saved.workflow.uses(*s))
@@ -1983,6 +2092,61 @@ fn apply_action(
             );
             Ok(false)
         }
+        FlowAction::SetDevServer { command, url, dir } => {
+            if entry
+                .run
+                .as_ref()
+                .is_some_and(|r| r.step == StepKind::BrowserTest)
+            {
+                return Err(ApiError::new(
+                    "devserver.busy",
+                    "Test trình duyệt đang chạy: bấm Dừng trước khi đổi lệnh chạy app",
+                ));
+            }
+            let server = DevServer {
+                command: command.trim().to_owned(),
+                url: url.trim().to_owned(),
+                dir: dir.trim().trim_matches(['/', '\\']).to_owned(),
+            };
+            devserver::check(&server).map_err(|e| ApiError::new("devserver.invalid", e))?;
+            let text = if server.url.is_empty() {
+                "Bỏ lệnh chạy app: Test trình duyệt để AI tự bật app".to_owned()
+            } else if server.command.is_empty() {
+                format!("Test trình duyệt dùng app đang chạy ở {}", server.url)
+            } else {
+                format!(
+                    "Test trình duyệt: app chạy `{}`{} rồi mở {}",
+                    server.command,
+                    if server.dir.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" trong {}", server.dir)
+                    },
+                    server.url
+                )
+            };
+            entry.saved.dev_server = (!server.url.is_empty()).then_some(server);
+            push_log(entry, Some(StepKind::BrowserTest), "info", &text);
+            Ok(false)
+        }
+        FlowAction::AnswerAgent { answer } => {
+            if phase != Phase::Gate(GateKind::AgentQuestion) {
+                return Err(not_now("trả lời AI"));
+            }
+            let answer = answer.trim().to_owned();
+            let text = if answer.is_empty() {
+                "Bạn đã làm việc AI hỏi: AI chạy tiếp".to_owned()
+            } else {
+                format!("Bạn trả lời AI: {}", short(&answer))
+            };
+            if let Some(ask) = entry.saved.ask.as_mut() {
+                ask.answer = Some(answer);
+            }
+            let step = entry.saved.workflow.asking();
+            event(entry, E::AgentAnswered)?;
+            push_log(entry, step, "ok", &text);
+            Ok(true)
+        }
         FlowAction::SetUses { step, on } => {
             if !SWITCHABLE.contains(step) {
                 return Err(ApiError::new(
@@ -2271,6 +2435,16 @@ fn stop_alert(ctx: &TaskCtx, step: StepKind, entry: &Entry, text: &str) -> Optio
             ctx.row.title.clone(),
             "progress",
         ),
+        Phase::Gate(GateKind::AgentQuestion) => (
+            AlertKind::Gate,
+            title_of(&format!("{} hỏi bạn", step_label(step))),
+            entry
+                .saved
+                .ask
+                .as_ref()
+                .map_or_else(|| ctx.row.title.clone(), |a| a.question.clone()),
+            "progress",
+        ),
         Phase::Gate(_) => (
             AlertKind::Gate,
             title_of("chờ bạn"),
@@ -2447,7 +2621,10 @@ fn gate_message(kind: GateKind, entry: &Entry, findings: &[FindingRow]) -> Strin
         GateKind::SelfCode => {
             "Bạn đang tự code trên nhánh này. Xong thì bấm \"Tôi code xong\" để app review.".into()
         }
-        GateKind::AgentQuestion => "AI đang hỏi bạn.".into(),
+        GateKind::AgentQuestion => match &entry.saved.ask {
+            Some(a) => format!("AI hỏi: {} Làm xong thì bấm Tiếp tục.", a.question),
+            None => "AI đang hỏi bạn.".into(),
+        },
         GateKind::Error => entry
             .saved
             .error
@@ -3042,6 +3219,14 @@ impl Inner {
                 .flatten()
         })
         .flatten()
+    }
+
+    /// Stop the test's Chrome window and dev server of a task, if any are open.
+    fn close_browser(&self, wp_id: u64) {
+        let session = self.browsers.lock().ok().and_then(|mut b| b.remove(&wp_id));
+        if let Some(session) = session {
+            session.close(self, wp_id);
+        }
     }
 
     /// What a run left running and the app killed: a line in the log (kept), and the step's
@@ -3768,6 +3953,22 @@ fn code_job(
     }
 }
 
+/// The test's Chrome profile for a repo (`<data dir>/browser-profiles/<repo path as a name>`):
+/// a login made there is kept for the repo's next tasks. Without a data dir (tests) it sits in
+/// the task folder.
+fn browser_profile(inner: &Inner, ctx: &TaskCtx, repo: &Path) -> PathBuf {
+    let name: String = repo
+        .to_string_lossy()
+        .trim_end_matches(['/', '\\'])
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    match inner.runs_dir.as_deref().and_then(Path::parent) {
+        Some(data) => data.join("browser-profiles").join(name),
+        None => ctx.task_dir.join(browsertest::DIR).join("profile"),
+    }
+}
+
 /// The task's scratch folder (`<data dir>/scratch/<task>`): outside the repo and outside
 /// `%TEMP%`. Without a data dir (tests) it sits in the task folder.
 fn scratch_dir(inner: &Inner, ctx: &TaskCtx) -> PathBuf {
@@ -4045,21 +4246,120 @@ fn run_browser_test(
     let shots = ctx.task_dir.join(browsertest::DIR);
     let mcp = shots.join("mcp.json");
     std::fs::create_dir_all(&shots)
-        .and_then(|()| std::fs::write(&mcp, claude::BROWSER_MCP))
-        .map_err(|e| flow_error("task.write", format!("Không ghi được {}: {e}", mcp.display())))?;
+        .map_err(|e| flow_error("task.write", format!("Không tạo được {}: {e}", shots.display())))?;
     let path = |p: &Path| p.to_string_lossy().into_owned();
     let repo_config = ctx.repo_config();
     let mut allowed: Vec<String> = claude::BROWSER_BASH.iter().map(|s| (*s).to_owned()).collect();
     allowed.extend(repo_config.allow_bash.iter().cloned());
     let plan = ctx.read(PLAN_FILE).unwrap_or_default();
-    let prompt = prompts::browser_test(&plan, brief, &scenario, &path(&shots), &allowed);
-    let args = claude::with_mode(
+    // the dev server the user confirmed: the app starts it (or finds it running) before the AI
+    let server = inner
+        .with_saved(wp_id, |s| dev_server_of(ctx, s))
+        .flatten()
+        .map(|(d, _)| d);
+    // the user answered what the AI asked: go on in that session, with the window left open
+    let answered = inner
+        .with_saved(wp_id, |s| {
+            s.ask
+                .take()
+                .filter(|a| a.answer.is_some() && !a.session.is_empty())
+        })
+        .flatten();
+    let mut session = inner
+        .browsers
+        .lock()
+        .ok()
+        .and_then(|mut b| b.remove(&wp_id))
+        .unwrap_or_default();
+    let mut restarted = false;
+    if let Some((chrome, _)) = session.chrome.as_mut() {
+        if chrome.exited().is_some() {
+            session.chrome = None;
+            restarted = true;
+        }
+    }
+    if session.server.as_mut().is_some_and(|p| p.exited().is_some()) {
+        session.server = None;
+    }
+    if let (Some(d), None) = (&server, &session.server) {
+        match start_app(inner, ctx, claim, repo, d, &shots) {
+            Ok(p) => session.server = p,
+            Err(e) => {
+                session.close(inner, wp_id);
+                return Err(e);
+            }
+        }
+    }
+    // the test's own Chrome window (profile per repo, so a login is kept for the next task)
+    if session.chrome.is_none() {
+        let starter = inner.starter.lock().map(|s| s.clone()).ok();
+        let profile = browser_profile(inner, ctx, repo);
+        let url = server.as_ref().map(|d| d.url.as_str()).unwrap_or_default();
+        match starter.map(|s| s.open_browser(&profile, url)) {
+            Some(Ok(opened)) => {
+                inner.log(
+                    wp_id,
+                    Some(StepKind::BrowserTest),
+                    "info",
+                    &format!("Mở cửa sổ Chrome test (profile {})", profile.display()),
+                    false,
+                );
+                session.chrome = Some(opened);
+            }
+            Some(Err(why)) => inner.log(
+                wp_id,
+                Some(StepKind::BrowserTest),
+                "info",
+                &format!("Không mở được cửa sổ Chrome test ({why}): AI dùng Chrome headless riêng"),
+                false,
+            ),
+            None => {}
+        }
+    }
+    let mcp_json = match &session.chrome {
+        Some((_, port)) => claude::browser_mcp(*port),
+        None => claude::BROWSER_MCP.to_owned(),
+    };
+    if let Err(e) = std::fs::write(&mcp, mcp_json) {
+        session.close(inner, wp_id);
+        return Err(flow_error(
+            "task.write",
+            format!("Không ghi được {}: {e}", mcp.display()),
+        ));
+    }
+    let memory = browsertest::claude_projects().and_then(|p| browsertest::repo_memory(&p, repo));
+    let app = match &server {
+        Some(d) => prompts::BrowserApp::Running(&d.url),
+        None => prompts::BrowserApp::Start(&allowed),
+    };
+    let prompt = match &answered {
+        Some(a) => prompts::browser_answer(a.answer.as_deref().unwrap_or_default(), restarted),
+        None => prompts::browser_test(
+            &plan,
+            brief,
+            &scenario,
+            &path(&shots),
+            app,
+            memory.as_deref().map(path).as_deref(),
+        ),
+    };
+    let dirs: Vec<String> = memory.iter().map(|m| path(m)).collect();
+    let mut args = claude::with_mode(
         claude::with_model(
-            claude::browser_test_args(budget, &repo_config.allow_bash, &path(&mcp)),
+            claude::browser_test_args(
+                budget,
+                &repo_config.allow_bash,
+                &path(&mcp),
+                server.is_none(),
+                &dirs,
+            ),
             &claim.choice,
         ),
         claim.mode.as_deref(),
     );
+    if let Some(a) = &answered {
+        args.splice(1..1, ["--resume".to_owned(), a.session.clone()]);
+    }
     let job = Job {
         agent: Provider::Claude,
         args,
@@ -4067,7 +4367,44 @@ fn run_browser_test(
         stdin: Some(prompt),
         timeout,
     };
-    let r = inner.run_claude(ctx, StepKind::BrowserTest, &job, claim)?;
+    let ran = inner.run_claude(ctx, StepKind::BrowserTest, &job, claim);
+    // the AI asks the user: keep the window (and the app) open until they answer
+    if let Ok(r) = &ran {
+        if let Some((question, url)) = browsertest::question(&r.text) {
+            let open = session.chrome.is_some();
+            if let Ok(mut b) = inner.browsers.lock() {
+                b.insert(wp_id, session);
+            }
+            inner.with_saved(wp_id, |s| {
+                s.ask = Some(AskState {
+                    step: Some(StepKind::BrowserTest),
+                    question: question.clone(),
+                    url,
+                    session: r.session_id.clone(),
+                    answer: None,
+                });
+            });
+            let where_ = if open {
+                " (cửa sổ Chrome test vẫn mở)"
+            } else {
+                ""
+            };
+            return Ok(Done {
+                event: WorkflowEvent::AgentAsked(StepKind::BrowserTest),
+                note: format!("AI hỏi: {}{where_}", short(&question)),
+                cost: Some(r.cost_usd),
+            });
+        }
+    }
+    // the test ended (or failed): close what the app opened for it
+    let started_server = session.server.is_some();
+    session.close(inner, wp_id);
+    let app_note = match (started_server, &server) {
+        (true, _) => "; app bật rồi tắt dev server",
+        (false, Some(_)) => "; dùng app đang chạy sẵn",
+        (false, None) => "",
+    };
+    let r = ran?;
     let answer = browsertest::answer(&r.text).ok_or_else(|| {
         flow_error(
             "browser.parse",
@@ -4100,9 +4437,52 @@ fn run_browser_test(
     inner.with_saved(wp_id, |s| s.browser = Some(state));
     Ok(Done {
         event,
-        note,
+        note: format!("{note}{app_note}"),
         cost: Some(r.cost_usd),
     })
+}
+
+/// Test trình duyệt with a dev server: start it unless it already answers, and wait for its URL.
+/// `Some` = the app started it and stops it when the step ends.
+fn start_app(
+    inner: &Inner,
+    ctx: &TaskCtx,
+    claim: &Claim,
+    repo: &Path,
+    server: &DevServer,
+    shots: &Path,
+) -> Result<Option<Box<dyn devserver::AppProcess>>, FlowError> {
+    let wp_id = ctx.row.wp_id;
+    let starter = inner
+        .starter
+        .lock()
+        .map(|s| s.clone())
+        .map_err(|_| flow_error("devserver.start", "Không bật được dev server"))?;
+    let what = if server.command.is_empty() {
+        server.url.as_str()
+    } else {
+        server.command.as_str()
+    };
+    inner.on_tool(wp_id, StepKind::BrowserTest, "Dev server", what);
+    let log = shots.join("dev-server.log");
+    match devserver::bring_up(&*starter, repo, server, &log, devserver::READY_WAIT, &claim.stop) {
+        Ok(Up::Running) => {
+            let line = format!("Dùng app đang chạy ở {} (app không tắt nó)", server.url);
+            inner.log(wp_id, Some(StepKind::BrowserTest), "info", &line, false);
+            Ok(None)
+        }
+        Ok(Up::Started(p, after)) => {
+            let line = format!(
+                "Dev server: app chạy `{}`, {} mở sau {} giây",
+                server.command,
+                server.url,
+                after.as_secs()
+            );
+            inner.log(wp_id, Some(StepKind::BrowserTest), "info", &line, false);
+            Ok(Some(p))
+        }
+        Err((code, message)) => Err(flow_error(code, message)),
+    }
 }
 
 fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<Done, FlowError> {
@@ -4177,7 +4557,13 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 })
                 .collect();
             let answers: Vec<(&str, &str)> = answers.iter().map(|(q, a)| (q.as_str(), a.as_str())).collect();
-            let prompt = prompts::analyze(&brief, previous, &answers);
+            let mut prompt = prompts::analyze(&brief, previous, &answers);
+            // notes from earlier work on the repo: where it runs, how it is tested
+            let memory = browsertest::claude_projects().and_then(|p| browsertest::repo_memory(&p, repo));
+            let dirs: Vec<String> = memory.iter().map(|m| m.to_string_lossy().into_owned()).collect();
+            if let Some(dir) = dirs.first() {
+                prompt.push_str(&prompts::memory_note(dir));
+            }
             let analyze = if codex {
                 job(
                     Provider::Codex,
@@ -4185,7 +4571,11 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     Some(prompt),
                 )
             } else {
-                job(Provider::Claude, cl(claude::analyze_args(budget)), Some(prompt))
+                job(
+                    Provider::Claude,
+                    cl(claude::analyze_args(budget, &dirs)),
+                    Some(prompt),
+                )
             };
             let r = inner.run_ai(ctx, step, &analyze, claim)?;
             let answer = text::plan_answer(&r.text);
@@ -4215,6 +4605,11 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                         recommend: p.recommend,
                         reason: p.reason,
                         checks: p.checks,
+                        dev_server: p.dev_server.map(|d| DevServer {
+                            command: d.command,
+                            url: d.url,
+                            dir: d.dir,
+                        }),
                     })
                 })
                 .collect();
@@ -6135,6 +6530,294 @@ mod tests {
     /// Test trình duyệt: Chrome DevTools MCP only, screenshots in the task folder; NG cases go
     /// through the findings gate, are fixed in step 9, and "Không" at "Review chéo lại?" runs the
     /// test again.
+    /// A dev server that answers once started, and the test's Chrome window; counts starts and
+    /// stops of each.
+    #[derive(Default)]
+    struct FakeStarter {
+        started: Mutex<Vec<(PathBuf, String)>>,
+        stops: Arc<AtomicUsize>,
+        browsers: Mutex<Vec<(PathBuf, String)>>,
+        chrome_stops: Arc<AtomicUsize>,
+    }
+
+    struct FakeApp(Arc<AtomicUsize>);
+
+    impl devserver::AppProcess for FakeApp {
+        fn exited(&mut self) -> Option<Option<i32>> {
+            None
+        }
+        fn stop(self: Box<Self>) -> Option<String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Some("đã tắt 2 tiến trình: node.exe (cổng 5173)".into())
+        }
+    }
+
+    impl AppStarter for FakeStarter {
+        fn is_up(&self, _url: &str) -> bool {
+            !self.started.lock().unwrap().is_empty() && self.stops.load(Ordering::SeqCst) == 0
+        }
+        fn start(
+            &self,
+            cwd: &Path,
+            command: &str,
+            _log: &Path,
+        ) -> Result<Box<dyn devserver::AppProcess>, String> {
+            self.started
+                .lock()
+                .unwrap()
+                .push((cwd.to_path_buf(), command.to_owned()));
+            Ok(Box::new(FakeApp(self.stops.clone())))
+        }
+        fn open_browser(
+            &self,
+            profile: &Path,
+            url: &str,
+        ) -> Result<(Box<dyn devserver::AppProcess>, u16), String> {
+            self.browsers
+                .lock()
+                .unwrap()
+                .push((profile.to_path_buf(), url.to_owned()));
+            Ok((Box::new(FakeApp(self.chrome_stops.clone())), 9333))
+        }
+    }
+
+    #[test]
+    fn the_app_starts_the_confirmed_dev_server_and_the_ai_only_drives_chrome() {
+        let Some(s) = setup() else { return };
+        std::fs::create_dir_all(s.repo.join("web")).unwrap();
+        let (flow, fake) = flow_with(&s, false, move |job, stop, out| match kind(job) {
+            "analyze" => {
+                out(&result_line(
+                    "## Nguyên nhân\nx\n```json\n{\"browserTest\":{\"recommend\":true,\"reason\":\"đổi màn hình\",\"scenario\":[\"mở /files\"],\
+                     \"devServer\":{\"command\":\"npm run dev\",\"dir\":\"web\",\"url\":\"http://localhost:5173\"}}}\n```",
+                ));
+                ok()
+            }
+            "browser" => {
+                out(&result_line(
+                    "```json\n{\"result\":\"ok\",\"summary\":\"ổn\",\"url\":\"http://localhost:5173/files\",\"cases\":[{\"name\":\"mở /files\",\"ok\":true}]}\n```",
+                ));
+                ok()
+            }
+            _ => (happy(CLEAN))(job, stop, out),
+        });
+        let starter = Arc::new(FakeStarter::default());
+        flow.set_app_starter(starter.clone());
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        let d = run(&flow, &ctx, FlowAction::Run);
+        // the analysis only proposes it: nothing is used until the user confirms
+        let proposed = d
+            .proposals
+            .iter()
+            .find(|p| p.step == StepKind::BrowserTest)
+            .and_then(|p| p.dev_server.clone())
+            .unwrap();
+        assert_eq!(
+            (proposed.command.as_str(), proposed.dir.as_str()),
+            ("npm run dev", "web")
+        );
+        assert_eq!(d.dev_server, None);
+        let set = |command: &str, url: &str, dir: &str| FlowAction::SetDevServer {
+            command: command.into(),
+            url: url.into(),
+            dir: dir.into(),
+        };
+        assert_eq!(
+            flow.act(ctx.clone(), set("npm run dev", "localhost:5173", "web"))
+                .unwrap_err()
+                .code,
+            "devserver.invalid"
+        );
+        assert_eq!(
+            flow.act(ctx.clone(), set("npm run dev", "http://localhost:5173", "../x"))
+                .unwrap_err()
+                .code,
+            "devserver.invalid"
+        );
+        flow.act(ctx.clone(), set(" npm run dev ", "http://localhost:5173", "web/"))
+            .unwrap();
+        let d = flow.detail(&ctx);
+        assert_eq!(d.dev_server, Some(proposed.clone()));
+        assert!(!d.dev_server_from_repo);
+
+        let mut d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        for _ in 0..12 {
+            if d.status == FlowStatus::AwaitingPush || d.current == Some(StepKind::FinalReview) {
+                break;
+            }
+            let action = match (d.status, d.gate.as_ref().map(|g| g.kind)) {
+                (FlowStatus::Gate, Some(GateKind::Findings)) => FlowAction::PickFindings { fix: false },
+                (FlowStatus::Ready, _) => FlowAction::Run,
+                other => panic!("{other:?}: {:?}", d.error),
+            };
+            d = run(&flow, &ctx, action);
+        }
+        assert_eq!(
+            *starter.started.lock().unwrap(),
+            [(s.repo.join("web"), "npm run dev".to_owned())]
+        );
+        assert_eq!(starter.stops.load(Ordering::SeqCst), 1);
+        // the test's own Chrome window, opened on the app and closed with it
+        assert_eq!(starter.browsers.lock().unwrap()[0].1, "http://localhost:5173");
+        assert_eq!(starter.chrome_stops.load(Ordering::SeqCst), 1);
+        let mcp = std::fs::read_to_string(ctx.task_dir.join("browser-test").join("mcp.json")).unwrap();
+        assert!(
+            mcp.contains("http://127.0.0.1:9333") && !mcp.contains("--headless"),
+            "{mcp}"
+        );
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let browser = jobs.iter().find(|j| kind(j) == "browser").unwrap();
+        // no shell for the AI: the app runs the dev server
+        assert!(
+            browser
+                .args
+                .windows(2)
+                .any(|w| w == ["--tools", "Read,Grep,Glob"])
+        );
+        let prompt = browser.stdin.as_deref().unwrap();
+        assert!(
+            prompt.contains("already running at http://localhost:5173"),
+            "{prompt}"
+        );
+        let run_row = d.runs.iter().find(|r| r.step == StepKind::BrowserTest).unwrap();
+        assert!(
+            run_row
+                .note
+                .as_deref()
+                .is_some_and(|n| n.ends_with("app bật rồi tắt dev server")),
+            "{:?}",
+            run_row.note
+        );
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text.starts_with("Dev server: app chạy `npm run dev`"))
+        );
+        assert!(
+            d.log.iter().any(|l| l
+                .text
+                .contains("Đã tắt cửa sổ Chrome test và dev server (đã tắt 2 tiến trình")),
+            "{:?}",
+            d.log
+        );
+
+        // an empty URL clears it: the AI starts the app itself again
+        flow.act(ctx.clone(), set("", "", "")).unwrap();
+        assert_eq!(flow.detail(&ctx).dev_server, None);
+        // one remembered for the repo is used when the task has none
+        let mut config = Config::default();
+        config.repos.insert(
+            s.repo.to_string_lossy().into_owned(),
+            opw_config::RepoConfig {
+                dev_server: Some(proposed.clone()),
+                ..opw_config::RepoConfig::default()
+            },
+        );
+        let d = flow.detail(&s.ctx(1, &config));
+        assert_eq!(d.dev_server, Some(proposed));
+        assert!(d.dev_server_from_repo);
+    }
+
+    #[test]
+    fn the_ai_asks_for_a_login_and_goes_on_in_the_same_window_after_the_user_answers() {
+        let Some(s) = setup() else { return };
+        let tests = AtomicUsize::new(0);
+        let (flow, fake) = flow_with(&s, false, move |job, stop, out| match kind(job) {
+            "analyze" => {
+                out(&result_line(
+                    "## Nguyên nhân\nx\n```json\n{\"browserTest\":{\"recommend\":true,\"scenario\":[\"mở /files\"]}}\n```",
+                ));
+                ok()
+            }
+            "browser" => {
+                out(&init_line());
+                if tests.fetch_add(1, Ordering::SeqCst) == 0 {
+                    out(&result_line(
+                        "Trang đòi đăng nhập.\n```json\n{\"result\":\"ask\",\"question\":\"Đăng nhập tài khoản test trong cửa sổ Chrome test\",\"url\":\"http://localhost:5173/login\"}\n```",
+                    ));
+                } else {
+                    out(&result_line(
+                        "```json\n{\"result\":\"ok\",\"summary\":\"ổn\",\"cases\":[{\"name\":\"mở /files\",\"ok\":true}]}\n```",
+                    ));
+                }
+                ok()
+            }
+            _ => (happy(CLEAN))(job, stop, out),
+        });
+        let starter = Arc::new(FakeStarter::default());
+        flow.set_app_starter(starter.clone());
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        let mut d = run(&flow, &ctx, FlowAction::Run);
+        for _ in 0..12 {
+            if d.status == FlowStatus::Gate
+                && d.gate.as_ref().map(|g| g.kind) == Some(GateKind::AgentQuestion)
+            {
+                break;
+            }
+            let action = match (d.status, d.gate.as_ref().map(|g| g.kind)) {
+                (FlowStatus::Gate, Some(GateKind::PlanReview)) => FlowAction::ApprovePlan,
+                (FlowStatus::Gate, Some(GateKind::Findings)) => FlowAction::PickFindings { fix: false },
+                (FlowStatus::Ready, _) => FlowAction::Run,
+                other => panic!("{other:?}: {:?}", d.error),
+            };
+            d = run(&flow, &ctx, action);
+        }
+        // the AI waits for the user; its window stays open meanwhile
+        let q = d.agent_question.clone().expect("a question");
+        assert_eq!(q.question, "Đăng nhập tài khoản test trong cửa sổ Chrome test");
+        assert_eq!(q.url.as_deref(), Some("http://localhost:5173/login"));
+        assert!(q.browser_open);
+        assert_eq!(starter.chrome_stops.load(Ordering::SeqCst), 0);
+        // no dev server set: the window starts blank and the AI starts the app itself
+        assert_eq!(starter.browsers.lock().unwrap().len(), 1);
+        assert_eq!(starter.browsers.lock().unwrap()[0].1, "");
+        assert!(
+            d.steps
+                .iter()
+                .any(|st| st.kind == StepKind::BrowserTest && st.state == StepState::WaitingUser)
+        );
+        // nothing else is accepted at this gate
+        assert_eq!(
+            flow.act(ctx.clone(), FlowAction::ApprovePlan).unwrap_err().code,
+            "flow.notNow"
+        );
+
+        let d = run(&flow, &ctx, FlowAction::AnswerAgent { answer: " ".into() });
+        assert_eq!(d.agent_question, None);
+        assert_ne!(d.current, Some(StepKind::BrowserTest), "{:?}", d.error);
+        // the same window, the same session, then everything closed
+        assert_eq!(starter.browsers.lock().unwrap().len(), 1);
+        assert_eq!(starter.chrome_stops.load(Ordering::SeqCst), 1);
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let tests: Vec<&Job> = jobs.iter().filter(|j| kind(j) == "browser").collect();
+        assert_eq!(tests.len(), 2);
+        assert!(!tests[0].args.contains(&"--resume".to_owned()));
+        assert_eq!(&tests[1].args[1..3], ["--resume", "s-1"]);
+        let again = tests[1].stdin.as_deref().unwrap();
+        assert!(
+            again.starts_with("The user did what you asked.") && again.contains("still open"),
+            "{again}"
+        );
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text == "Bạn đã làm việc AI hỏi: AI chạy tiếp")
+        );
+        let run_rows: Vec<_> = d
+            .runs
+            .iter()
+            .filter(|r| r.step == StepKind::BrowserTest)
+            .collect();
+        assert!(
+            run_rows[0]
+                .note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("AI hỏi: Đăng nhập"))
+        );
+    }
+
     #[test]
     fn the_browser_test_reports_ng_cases_with_screenshots_and_runs_again_after_the_fix() {
         let Some(s) = setup() else { return };
@@ -6936,12 +7619,14 @@ mod tests {
                 recommend: true,
                 reason: String::new(),
                 checks: String::new(),
+                dev_server: None,
             },
             StepProposal {
                 step: StepKind::BrowserTest,
                 recommend: false,
                 reason: String::new(),
                 checks: String::new(),
+                dev_server: None,
             },
         ];
         assert_eq!(plan_note("x", 2, &advice), "plan: 2 câu hỏi, đề xuất Harness");

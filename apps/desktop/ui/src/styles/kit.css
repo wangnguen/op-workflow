@@ -270,9 +270,10 @@ select.input {
 
 /* ---------- inline note: glyph + text on a soft tint ---------- */
 
+/* the icon sits in the middle of the text beside it, however many lines it takes */
 .note {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 7px;
   margin: 0;
   padding: 7px 10px;
@@ -283,7 +284,7 @@ select.input {
   line-height: 1.45;
 }
 .note .icon {
-  margin-top: 2px;
+  flex: none;
 }
 .note--warn {
   background: var(--st-waiting-soft);

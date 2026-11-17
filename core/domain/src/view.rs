@@ -1122,6 +1122,36 @@ pub struct StepProposal {
     /// What it would check (harness) or the scenario (browser test).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub checks: String,
+    /// Test trình duyệt: how the analysis thinks this repo runs locally. Only a proposal: the
+    /// app runs nothing until the user confirms it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_server: Option<DevServer>,
+}
+
+/// What the AI of a step stopped to ask (question gate): log in to the app in the test's own
+/// Chrome window, give an account, start a service…
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQuestionView {
+    pub step: StepKind,
+    pub question: String,
+    /// The page the AI was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The test's Chrome window is still open for the user.
+    #[serde(default)]
+    pub browser_open: bool,
+}
+
+/// How Test trình duyệt reaches the app (part 6c): the command the app runs from `dir` (inside
+/// the repo, relative; empty = its root) and the URL it waits for. Empty command = the app is
+/// already running at the URL; empty URL = no dev server (the AI starts the app itself).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DevServer {
+    pub command: String,
+    pub url: String,
+    pub dir: String,
 }
 
 /// What a review said about documentation and tests (the `/review-local` docs/test section).
@@ -1332,6 +1362,15 @@ pub struct TaskDetail {
     /// Optional steps this task runs (Harness, Test trình duyệt; off = "bỏ qua").
     #[serde(default)]
     pub uses: Vec<StepKind>,
+    /// Test trình duyệt: the dev server the app starts (this task's, else the repo's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_server: Option<DevServer>,
+    /// `dev_server` is the one remembered for the repo, not one set on this task.
+    #[serde(default)]
+    pub dev_server_from_repo: bool,
+    /// At the question gate: what the AI asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_question: Option<AgentQuestionView>,
     pub findings: Vec<FindingView>,
     /// Docs/test judgement of the latest review of each kind (Tự review, Review chốt, …).
     #[serde(default)]
@@ -1429,6 +1468,21 @@ pub enum FlowAction {
     /// Turn an optional step (Harness, Test trình duyệt) on or off for this task, until the flow
     /// gets there.
     SetUses { step: StepKind, on: bool },
+    /// Test trình duyệt: the dev server the app starts for this task, remembered for the repo
+    /// too. An empty URL clears both (the AI starts the app itself again).
+    SetDevServer {
+        #[serde(default)]
+        command: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        dir: String,
+    },
+    /// Question gate: the user did what the AI asked (or answers it); the step goes on.
+    AnswerAgent {
+        #[serde(default)]
+        answer: String,
+    },
     /// The user finished coding by hand.
     SelfCodeDone,
     /// Findings gate: fix the picked findings (`fix`), or go on without fixing.

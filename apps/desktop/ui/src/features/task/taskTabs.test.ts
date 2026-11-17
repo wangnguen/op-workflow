@@ -127,8 +127,15 @@ describe("mock workflow (browser preview)", () => {
     expect(cross.current).toBe("browserTest");
     expect(cross.steps.map((s) => s.kind).slice(9, 11)).toEqual(["browserTest", "finalReview"]);
     expect(cross.findings.find((f) => f.severity === "high")?.state).toBe("fixed");
-    // the browser test: OK, with its result card; then Review chốt
+    // the browser test first stops for a login, in its own Chrome window
     mockFlowAction(7, { type: "run" });
+    const asked = step(7);
+    expect(asked.gate?.kind).toBe("agentQuestion");
+    expect(asked.agentQuestion).toMatchObject({ step: "browserTest", browserOpen: true });
+    expect(asked.gate?.message).toMatch(/^AI hỏi: Trang yêu cầu đăng nhập/);
+    expect(() => mockFlowAction(7, { type: "approvePlan" })).toThrow();
+    // the user logs in and goes on: OK, with its result card; then Review chốt
+    mockFlowAction(7, { type: "answerAgent", answer: "" });
     const tried = step(7);
     expect([tried.status, tried.current]).toEqual(["ready", "finalReview"]);
     expect(tried.tests?.find((x) => x.step === "browserTest")).toMatchObject({ passed: true, url: "http://localhost:5173/files" });

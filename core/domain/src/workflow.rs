@@ -209,6 +209,11 @@ pub enum WorkflowEvent {
     /// reached. Earlier steps keep their state, this one and the later ones start over. The
     /// caller refuses it while a step process runs.
     Reopen(StepKind),
+    /// The AI of a running step stopped to ask the user something only they can do (log in to
+    /// the app under test, give an account): the step waits at the question gate.
+    AgentAsked(StepKind),
+    /// The user answered (or did what was asked): the step runs again and goes on.
+    AgentAnswered,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +387,17 @@ impl Workflow {
             Phase::Gate(GateKind::Error) => StepKind::ALL
                 .into_iter()
                 .find(|s| self.state_of(*s) == StepState::Failed),
+            Phase::Gate(GateKind::AgentQuestion) => self.asking(),
+            _ => None,
+        }
+    }
+
+    /// The step whose AI waits for the user's answer at the question gate.
+    pub fn asking(&self) -> Option<StepKind> {
+        match self.phase {
+            Phase::Gate(GateKind::AgentQuestion) => StepKind::ALL
+                .into_iter()
+                .find(|s| self.state_of(*s) == StepState::WaitingUser),
             _ => None,
         }
     }
@@ -455,6 +471,18 @@ impl Workflow {
                 if self.state_of(step) != StepState::Failed {
                     return Err(DomainError::NotCurrentStep(step));
                 }
+                self.run(step)
+            }
+            (Phase::Running(cur), E::AgentAsked(step)) => {
+                self.ensure_current(cur, step)?;
+                self.set(step, StepState::WaitingUser);
+                self.phase = Phase::Gate(GateKind::AgentQuestion);
+                Ok(())
+            }
+            (Phase::Gate(GateKind::AgentQuestion), E::AgentAnswered) => {
+                let step = self
+                    .asking()
+                    .ok_or(DomainError::NotCurrentStep(StepKind::Intake))?;
                 self.run(step)
             }
 
@@ -938,6 +966,32 @@ mod tests {
         let back: Workflow = serde_json::from_str(&serde_json::to_string(&wf).unwrap()).unwrap();
         assert_eq!(back, wf);
         assert_eq!(back.failed_step(), Some(StepKind::FixCross));
+    }
+
+    #[test]
+    fn an_ai_question_waits_for_the_answer_then_the_step_goes_on() {
+        let mut wf = Workflow::new();
+        wf.set_uses(StepKind::BrowserTest, true);
+        wf.apply(E::Start).unwrap();
+        // straight to the browser test for the test's sake
+        wf.phase = Phase::Running(StepKind::BrowserTest);
+        wf.set(StepKind::BrowserTest, StepState::Running);
+        assert!(wf.apply(E::AgentAsked(StepKind::FinalReview)).is_err());
+        wf.apply(E::AgentAsked(StepKind::BrowserTest)).unwrap();
+        assert_eq!(wf.phase(), Phase::Gate(GateKind::AgentQuestion));
+        assert_eq!(wf.asking(), Some(StepKind::BrowserTest));
+        assert_eq!(wf.current_step(), Some(StepKind::BrowserTest));
+        assert_eq!(wf.state_of(StepKind::BrowserTest), StepState::WaitingUser);
+        // it survives a save and a pause
+        let back: Workflow = serde_json::from_str(&serde_json::to_string(&wf).unwrap()).unwrap();
+        assert_eq!(back.asking(), Some(StepKind::BrowserTest));
+        wf.apply(E::Pause).unwrap();
+        wf.apply(E::Resume).unwrap();
+        assert!(wf.apply(E::Retry(StepKind::BrowserTest)).is_err());
+        wf.apply(E::AgentAnswered).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::BrowserTest));
+        assert_eq!(wf.state_of(StepKind::BrowserTest), StepState::Running);
+        assert!(wf.apply(E::AgentAnswered).is_err());
     }
 
     #[test]

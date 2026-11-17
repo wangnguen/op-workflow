@@ -295,6 +295,16 @@ pub struct RawProposal {
     pub reason: String,
     /// What a harness would check, or the browser test scenario.
     pub checks: String,
+    /// Browser test: how the analysis thinks the repo runs locally (`devServer`).
+    pub dev_server: Option<RawDevServer>,
+}
+
+/// `browserTest.devServer` of the analysis: command, folder inside the repo, URL.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RawDevServer {
+    pub command: String,
+    pub url: String,
+    pub dir: String,
 }
 
 /// An analysis answer split into the plan the user reads and the trailing json block.
@@ -354,11 +364,21 @@ fn proposal(v: &Value, key: &'static str) -> Option<RawProposal> {
         })
         .find(|s| !s.is_empty())
         .unwrap_or_default();
+    let dev_server = p
+        .get("devServer")
+        .filter(|d| d.is_object())
+        .map(|d| RawDevServer {
+            command: string_at(d, "command"),
+            url: string_at(d, "url"),
+            dir: string_at(d, "dir"),
+        })
+        .filter(|d| !d.url.is_empty());
     Some(RawProposal {
         step: key,
         recommend,
         reason: string_at(p, "reason"),
         checks,
+        dev_server,
     })
 }
 
@@ -567,6 +587,17 @@ mod tests {
         assert_eq!(a.proposals[1].step, "browserTest");
         assert!(!a.proposals[1].recommend);
         assert_eq!(a.proposals[1].reason, "không có UI");
+        assert_eq!(a.proposals[1].dev_server, None);
+        // how the repo runs locally, when the analysis knows
+        let ui = "## Đề xuất\nx\n```json\n{\"browserTest\":{\"recommend\":true,\"scenario\":[\"mở /files\"],\
+                  \"devServer\":{\"command\":\"npm run dev\",\"dir\":\"web\",\"url\":\"http://localhost:5173\"}}}\n```";
+        let d = plan_answer(ui).proposals[0].dev_server.clone().unwrap();
+        assert_eq!(
+            (d.command.as_str(), d.dir.as_str(), d.url.as_str()),
+            ("npm run dev", "web", "http://localhost:5173")
+        );
+        let unsure = "```json\n{\"browserTest\":{\"recommend\":true,\"devServer\":null}}\n```";
+        assert_eq!(plan_answer(unsure).proposals[0].dev_server, None);
         // other code blocks stay in the plan
         let code = "## Đề xuất\n```ts\nconst a = 1;\n```";
         assert_eq!(plan_answer(code).plan, code);

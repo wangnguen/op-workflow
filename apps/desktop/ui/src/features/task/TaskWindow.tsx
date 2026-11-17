@@ -543,6 +543,8 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
           </button>
         </>
       );
+    } else if (kind === "agentQuestion") {
+      actions = <AnswerAgent disabled={disabled} browserOpen={d.agentQuestion?.browserOpen === true} onAction={onAction} />;
     } else if (kind === "selfCode") {
       actions = (
         <button className="btn btn--primary btn--sm" disabled={disabled} title={t.selfCodeDoneHint} onClick={() => onAction({ type: "selfCodeDone" })}>
@@ -590,6 +592,37 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
       <span className="task-status-text">{text}</span>
       <span className="task-status-actions">{actions}</span>
     </div>
+  );
+}
+
+/** The question gate: an optional answer, then the AI goes on where it stopped. */
+function AnswerAgent({
+  disabled,
+  browserOpen,
+  onAction,
+}: {
+  disabled: boolean;
+  browserOpen: boolean;
+  onAction: (a: FlowAction) => void;
+}) {
+  const [answer, setAnswer] = useState("");
+  const go = () => onAction({ type: "answerAgent", answer: answer.trim() });
+  return (
+    <>
+      {browserOpen && <span className="faint task-status-note">{t.browserOpen}</span>}
+      <input
+        className="input task-answer"
+        value={answer}
+        placeholder={t.answerPlaceholder}
+        disabled={disabled}
+        onChange={(e) => setAnswer(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && !disabled && go()}
+      />
+      <button className="btn btn--primary btn--sm" disabled={disabled} title={t.goOnHint} onClick={go}>
+        <Icon name="play" size={12} />
+        {t.goOn}
+      </button>
+    </>
   );
 }
 

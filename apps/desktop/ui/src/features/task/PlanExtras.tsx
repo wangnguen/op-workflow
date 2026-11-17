@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { FlowAction, PlanQuestion, StepKind, TaskDetail } from "../../ipc/types";
 import { stepLabel, vi } from "../../i18n/vi";
 import { Icon } from "../../shared/ui/Icon";
+import { DevServerBox } from "./DevServerBox";
 import { unanswered } from "./planQuestions";
 
 const t = vi.flow;
@@ -139,6 +140,13 @@ export function OptionalSteps({ detail: d, onAction }: Props) {
                   <span className="faint">{t.optional.checks[step]}</span>
                   <p>{p.checks}</p>
                 </div>
+              )}
+              {step === "browserTest" && (
+                <DevServerBox
+                  detail={d}
+                  disabled={d.parked === true || (d.status === "running" && d.running?.step === "browserTest")}
+                  onAction={onAction}
+                />
               )}
             </li>
           );

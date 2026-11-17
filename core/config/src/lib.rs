@@ -137,6 +137,9 @@ pub struct RepoConfig {
     /// Harness (step 5): this repo's own harness library (`C:\tmp\collabkeeper-harness`).
     /// `None` = `C:\tmp\<repo name>-harness`, created the first time a task uses it.
     pub harness_dir: Option<String>,
+    /// Test trình duyệt: how the app starts this repo's dev server (confirmed by the user at the
+    /// plan gate of a task, then offered for every task of the repo).
+    pub dev_server: Option<opw_domain::view::DevServer>,
 }
 
 /// Limits of one workflow step (`steps.<step>` in config). Unset fields use the app's defaults.
@@ -456,6 +459,35 @@ pub fn save_harness_dir(path: &Path, repo: &str, dir: Option<&str>) -> ConfigRes
     })
 }
 
+/// Write `repos.<repo>.devServer` (the repo's key as written in config, else `repo`); `None`
+/// removes it. Other keys stay untouched.
+pub fn save_dev_server(
+    path: &Path,
+    repo: &str,
+    server: Option<&opw_domain::view::DevServer>,
+) -> ConfigResult<()> {
+    edit_file(path, |root| {
+        let repos = object_at(root, "repos");
+        let key = repos
+            .keys()
+            .find(|k| same_path(k, repo))
+            .cloned()
+            .unwrap_or_else(|| repo.to_owned());
+        let entry = object_at(repos, &key);
+        match server.filter(|s| !s.url.trim().is_empty()) {
+            Some(s) => {
+                entry.insert(
+                    "devServer".into(),
+                    serde_json::json!({"command": s.command.trim(), "url": s.url.trim(), "dir": s.dir.trim()}),
+                );
+            }
+            None => {
+                entry.remove("devServer");
+            }
+        }
+    })
+}
+
 /// Same repo path, whatever the `~`, slash direction or (on Windows) letter case.
 pub fn same_path(a: &str, b: &str) -> bool {
     let norm = |p: &str| {
@@ -684,6 +716,34 @@ mod tests {
         assert_eq!((cfg.steps.fix.model, cfg.steps.fix.effort), (None, None));
         assert_eq!((cfg.steps.fix.agent, cfg.steps.fix.permission_mode), (None, None));
         assert_eq!(cfg.steps.fix.max_budget_usd, Some(3.0));
+    }
+
+    #[test]
+    fn the_dev_server_is_remembered_per_repo_and_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"repos":{"~/code/web":{"allowBash":["npm run lint *"]}}}"#,
+        )
+        .unwrap();
+        let server = opw_domain::view::DevServer {
+            command: " npm run dev ".into(),
+            url: "http://localhost:5173".into(),
+            dir: "web".into(),
+        };
+        let home = dirs::home_dir().unwrap().join("code").join("web");
+        save_dev_server(&path, &home.to_string_lossy(), Some(&server)).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let repo = &cfg.repos["~/code/web"];
+        let saved = repo.dev_server.clone().unwrap();
+        assert_eq!(
+            (saved.command.as_str(), saved.dir.as_str()),
+            ("npm run dev", "web")
+        );
+        assert_eq!(repo.allow_bash, ["npm run lint *"]);
+        save_dev_server(&path, "~/code/web", None).unwrap();
+        assert_eq!(Config::load(&path).unwrap().repos["~/code/web"].dev_server, None);
     }
 
     #[test]

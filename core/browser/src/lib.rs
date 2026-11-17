@@ -93,8 +93,8 @@ pub fn find_debug_port() -> Option<DebugPort> {
 }
 
 /// Chrome's own executable, for opening [`DEBUG_SETTINGS_URL`] (a `chrome://` page cannot be
-/// opened through the default-browser handler).
-fn chrome_exe() -> Option<PathBuf> {
+/// opened through the default-browser handler) and the browser test's own window.
+pub fn chrome_exe() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if cfg!(windows) {
         for var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {

@@ -50,6 +50,47 @@ fn string(v: &Value, key: &str) -> String {
         .to_owned()
 }
 
+/// Claude Code's memory of `repo`: `<projects>/<repo path, every other character than a letter
+/// or digit as '->/memory`, when it has one. The drive letter's case may differ from Claude's.
+pub fn repo_memory(projects: &std::path::Path, repo: &std::path::Path) -> Option<std::path::PathBuf> {
+    let full = repo.to_string_lossy();
+    let name: String = full
+        .trim_end_matches(['/', '\\'])
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let dir = std::fs::read_dir(projects)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&name))
+        })?;
+    let memory = dir.join("memory");
+    memory.is_dir().then_some(memory)
+}
+
+/// Where Claude Code keeps its projects: `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`.
+pub fn claude_projects() -> Option<std::path::PathBuf> {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) => Some(std::path::PathBuf::from(dir).join("projects")),
+        None => dirs::home_dir().map(|h| h.join(".claude").join("projects")),
+    }
+}
+
+/// The AI stopped to ask the user (`{"result": "ask", "question": …, "url": …}`, the last json
+/// block): (question, page).
+pub fn question(text: &str) -> Option<(String, String)> {
+    text::fenced_blocks(text).into_iter().rev().find_map(|b| {
+        let v: Value = serde_json::from_str(b.body.trim()).ok()?;
+        let v = v.get("browserTest").cloned().unwrap_or(v);
+        let asks = v.get("result").and_then(Value::as_str) == Some("ask");
+        let q = string(&v, "question");
+        (asks && !q.is_empty()).then(|| (q, string(&v, "url")))
+    })
+}
+
 /// Read the last ```json block with `cases`. A screenshot the AI named but that is not on disk
 /// is dropped (it never got written).
 pub fn answer(text: &str) -> Option<Answer> {
@@ -149,5 +190,39 @@ mod tests {
         assert_eq!(shown(&a)[0].name, "user chưa có org");
         assert!(answer("```json\n{\"result\":\"ok\"}\n```").is_none());
         assert!(!Answer::default().passed());
+    }
+
+    #[test]
+    fn the_repo_memory_is_found_whatever_the_drive_letter_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let memory = tmp.path().join("c--Users-me-Desktop-op-workflow").join("memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        let repo = std::path::Path::new("C:\\Users\\me\\Desktop\\op-workflow\\");
+        assert_eq!(repo_memory(tmp.path(), repo), Some(memory));
+        assert_eq!(
+            repo_memory(tmp.path(), std::path::Path::new("C:/Users/me/other")),
+            None
+        );
+        // a project folder without notes
+        std::fs::create_dir_all(tmp.path().join("C--x")).unwrap();
+        assert_eq!(repo_memory(tmp.path(), std::path::Path::new("C:/x")), None);
+    }
+
+    #[test]
+    fn the_ai_may_stop_to_ask_for_a_login() {
+        let text = "Trang yêu cầu đăng nhập.\n```json\n{\"result\":\"ask\",\"question\":\"Đăng nhập tài khoản test trong cửa sổ Chrome\",\"url\":\"http://localhost:5173/login\"}\n```";
+        assert_eq!(
+            question(text),
+            Some((
+                "Đăng nhập tài khoản test trong cửa sổ Chrome".to_owned(),
+                "http://localhost:5173/login".to_owned()
+            ))
+        );
+        assert!(answer(text).is_none());
+        assert_eq!(
+            question("```json\n{\"result\":\"ask\",\"question\":\" \"}\n```"),
+            None
+        );
+        assert_eq!(question("```json\n{\"result\":\"ok\",\"cases\":[]}\n```"), None);
     }
 }

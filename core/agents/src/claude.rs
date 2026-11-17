@@ -370,19 +370,28 @@ pub fn with_mode(mut args: Vec<String>, mode: Option<&str>) -> Vec<String> {
 }
 
 /// [2] Analyze: read only. `--restricted` also drops Bash/WebFetch and the user's settings
-/// files; the prompt (brief + plan template) comes on stdin.
-pub fn analyze_args(budget_usd: f64) -> Vec<String> {
-    stream_json(strings(&[
+/// files; the prompt (brief + plan template) comes on stdin. `dirs` = folders outside the repo it
+/// may read (the repo's memory).
+pub fn analyze_args(budget_usd: f64, dirs: &[String]) -> Vec<String> {
+    let mut args = strings(&[
         "-p",
         "--restricted",
         "--strict-mcp-config",
         "--tools",
         "Read,Grep,Glob",
+    ]);
+    let dirs: Vec<&String> = dirs.iter().filter(|d| !d.trim().is_empty()).collect();
+    if !dirs.is_empty() {
+        args.push("--add-dir".into());
+        args.extend(dirs.into_iter().cloned());
+    }
+    args.extend(strings(&[
         "--permission-prompts",
         "none",
         "--max-budget-usd",
         &budget(budget_usd),
-    ]))
+    ]));
+    stream_json(args)
 }
 
 /// `npm run lint *` → `Bash(npm run lint *)`; entries already written as `Bash(...)` stay.
@@ -473,8 +482,17 @@ pub fn harness_args(budget_usd: f64, allowed_bash: &[String], dirs: &[String]) -
 }
 
 /// The only MCP server of the browser test: Chrome DevTools MCP (the version Claude Code's own
-/// plugin uses), headless, in a throwaway profile so it never fights over the user's Chrome.
+/// plugin uses), headless, in a throwaway profile so it never fights over the user's Chrome. Used
+/// when the app cannot open the test's own Chrome window.
 pub const BROWSER_MCP: &str = r#"{"mcpServers":{"chrome-devtools":{"command":"npx","args":["-y","chrome-devtools-mcp@1.11.0","--isolated","--headless"]}}}"#;
+
+/// Chrome DevTools MCP attached to the Chrome window the app opened for the test (its own
+/// profile, debugging port `port`), so the window stays open while the AI waits for the user.
+pub fn browser_mcp(port: u16) -> String {
+    format!(
+        r#"{{"mcpServers":{{"chrome-devtools":{{"command":"npx","args":["-y","chrome-devtools-mcp@1.11.0","--browserUrl","http://127.0.0.1:{port}"]}}}}}}"#
+    )
+}
 
 /// Commands a browser test may run besides the repo's `allowBash`: start the app, see it answer.
 pub const BROWSER_BASH: [&str; 7] = [
@@ -487,24 +505,46 @@ pub const BROWSER_BASH: [&str; 7] = [
     "curl *",
 ];
 
-/// [10] Test trình duyệt, headless: read the repo, start the app (Bash from the allow list), drive
-/// Chrome through the MCP server in `mcp_config` (a file) and nothing else. No edits.
-pub fn browser_test_args(budget_usd: f64, allowed_bash: &[String], mcp_config: &str) -> Vec<String> {
+/// [10] Test trình duyệt, headless: read the repo, drive Chrome through the MCP server in
+/// `mcp_config` (a file) and nothing else. No edits. With `shell` the AI starts the app itself
+/// (Bash from the allow list); without it the app already runs the dev server and the AI has no
+/// Bash at all.
+pub fn browser_test_args(
+    budget_usd: f64,
+    allowed_bash: &[String],
+    mcp_config: &str,
+    shell: bool,
+    dirs: &[String],
+) -> Vec<String> {
     let mut args = strings(&[
         "-p",
         "--mcp-config",
         mcp_config,
         "--strict-mcp-config",
         "--tools",
-        "Read,Grep,Glob,Bash",
+        if shell {
+            "Read,Grep,Glob,Bash"
+        } else {
+            "Read,Grep,Glob"
+        },
     ]);
+    // the repo's memory, read only (it sits outside the repo)
+    let dirs: Vec<&String> = dirs.iter().filter(|d| !d.trim().is_empty()).collect();
+    if !dirs.is_empty() {
+        args.push("--add-dir".into());
+        args.extend(dirs.into_iter().cloned());
+    }
     let mut allowed: Vec<String> = vec!["mcp__chrome-devtools".into()];
-    for e in BROWSER_BASH
-        .iter()
-        .map(|e| (*e).to_owned())
-        .chain(allowed_bash.iter().cloned())
-        .filter(|e| !e.trim().is_empty())
-    {
+    let bash: Vec<String> = if shell {
+        BROWSER_BASH
+            .iter()
+            .map(|e| (*e).to_owned())
+            .chain(allowed_bash.iter().cloned())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for e in bash.into_iter().filter(|e| !e.trim().is_empty()) {
         let rule = bash_rule(&e);
         if !allowed.contains(&rule) {
             allowed.push(rule);
@@ -748,8 +788,9 @@ mod tests {
                 .windows(2)
                 .any(|w| w[0] == "--max-budget-usd" && w[1] == "2")
         );
-        let analyze = analyze_args(1.5);
+        let analyze = analyze_args(1.5, &["C:/mem".into()]);
         assert!(analyze.contains(&"--restricted".to_owned()));
+        assert!(analyze.windows(2).any(|w| w == ["--add-dir", "C:/mem"]));
         assert!(
             analyze
                 .windows(2)
@@ -789,7 +830,8 @@ mod tests {
 
     #[test]
     fn a_browser_test_gets_only_chrome_devtools_and_no_edits() {
-        let args = browser_test_args(3.0, &["npm run dev".into()], "C:/t/mcp.json");
+        let args = browser_test_args(3.0, &["npm run dev".into()], "C:/t/mcp.json", true, &[]);
+        assert!(!args.contains(&"--add-dir".to_owned()));
         assert!(args.windows(2).any(|w| w == ["--mcp-config", "C:/t/mcp.json"]));
         assert!(args.contains(&"--strict-mcp-config".to_owned()));
         assert!(args.windows(2).any(|w| w == ["--tools", "Read,Grep,Glob,Bash"]));
@@ -801,6 +843,24 @@ mod tests {
         assert!(allowed.ends_with("Bash(npm run dev)"));
         let denied = &args[args.iter().position(|a| a == "--disallowedTools").unwrap() + 1];
         assert!(denied.contains("git push") && denied.ends_with("Edit Write"));
+        // the app runs the dev server: no Bash at all
+        let none = browser_test_args(
+            3.0,
+            &["npm run dev".into()],
+            "C:/t/mcp.json",
+            false,
+            &["C:/mem".into()],
+        );
+        assert!(none.windows(2).any(|w| w == ["--add-dir", "C:/mem"]));
+        let attached: serde_json::Value = serde_json::from_str(&browser_mcp(51234)).unwrap();
+        assert!(
+            attached["mcpServers"]["chrome-devtools"]["args"]
+                .to_string()
+                .contains("\"--browserUrl\",\"http://127.0.0.1:51234\"")
+        );
+        assert!(none.windows(2).any(|w| w == ["--tools", "Read,Grep,Glob"]));
+        let allowed = &none[none.iter().position(|a| a == "--allowedTools").unwrap() + 1];
+        assert_eq!(allowed, "mcp__chrome-devtools");
         let mcp: serde_json::Value = serde_json::from_str(BROWSER_MCP).unwrap();
         assert!(
             mcp["mcpServers"]["chrome-devtools"]["args"]
@@ -837,7 +897,7 @@ mod tests {
             review_args(3.0),
             push_summary_args(None, 1.0),
             push_summary_default_args(1.0),
-            analyze_args(1.5),
+            analyze_args(1.5, &[]),
             code_args(None, 5.0, &[]),
         ] {
             assert!(args.contains(&"--strict-mcp-config".to_owned()), "{args:?}");

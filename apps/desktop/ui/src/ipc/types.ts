@@ -860,6 +860,26 @@ export interface StepProposal {
   reason: string;
   /** what a harness would check, or the browser test scenario */
   checks?: string;
+  /** browser test: how the analysis thinks the repo runs locally (only a proposal) */
+  devServer?: DevServer;
+}
+
+/** How Test trình duyệt reaches the app: the command the app runs from `dir` (inside the repo,
+ *  "" = its root) and the URL it waits for. No command = the app is already running there. */
+export interface DevServer {
+  command: string;
+  url: string;
+  dir: string;
+}
+
+/** What the AI of a step stopped to ask (question gate). */
+export interface AgentQuestionView {
+  step: StepKind;
+  question: string;
+  /** the page the AI was on */
+  url?: string;
+  /** the test's Chrome window is still open */
+  browserOpen: boolean;
 }
 
 export interface TaskDetail {
@@ -892,6 +912,12 @@ export interface TaskDetail {
   proposals: StepProposal[];
   /** optional steps this task runs (Harness, Test trình duyệt) */
   uses: StepKind[];
+  /** Test trình duyệt: the dev server the app starts (this task's, else the repo's) */
+  devServer?: DevServer;
+  /** `devServer` is the one remembered for the repo */
+  devServerFromRepo?: boolean;
+  /** at the question gate: what the AI asks */
+  agentQuestion?: AgentQuestionView;
   findings: FindingView[];
   /** docs/test judgement of the latest review of each kind */
   reviewNotes?: ReviewNote[];
@@ -951,6 +977,10 @@ export type FlowAction =
   /** turn Harness / Test trình duyệt on or off for this task, before the flow gets there */
   | { type: "setUses"; step: StepKind; on: boolean }
   | { type: "selfCodeDone" }
+  /** Test trình duyệt: the dev server the app starts (remembered for the repo); empty url = none */
+  | { type: "setDevServer"; command: string; url: string; dir: string }
+  /** question gate: the user did what the AI asked (or answers it); the step goes on */
+  | { type: "answerAgent"; answer: string }
   /** findings gate: fix the picked findings, or go on without fixing */
   | { type: "pickFindings"; fix: boolean }
   /** after-fix gate: the answer to "Review chéo lại?" */

@@ -11,6 +11,7 @@ pub mod browsertest;
 pub mod checks;
 pub mod comments;
 pub mod demo;
+pub mod devserver;
 pub mod diffview;
 pub mod flow;
 pub mod folders;
@@ -933,7 +934,26 @@ impl AppService {
             _ => None,
         };
         let reopen = matches!(action, FlowAction::Reopen { .. });
+        // the dev server the user confirms is remembered for the repo too
+        let dev_server = match &action {
+            FlowAction::SetDevServer { command, url, dir } => Some(opw_domain::view::DevServer {
+                command: command.trim().to_owned(),
+                url: url.trim().to_owned(),
+                dir: dir.trim().trim_matches(['/', '\\']).to_owned(),
+            }),
+            _ => None,
+        };
         flow.act(ctx.clone(), action)?;
+        if let (Some(server), Some(repo), Some(path)) =
+            (dev_server, ctx.row.repo.as_deref(), self.config_path.as_deref())
+        {
+            opw_config::save_dev_server(path, repo, Some(&server).filter(|s| !s.url.is_empty()))
+                .map_err(|e| ApiError::new("config.write", e.to_string()))?;
+            self.reload_config();
+            // the detail reads the repo's dev server from the config just written
+            let (fresh, flow) = self.task_ctx(wp_id)?;
+            return Ok(self.with_counts(flow.detail(&fresh)));
+        }
         let now = opw_quota::now_rfc3339();
         if let Some(forced) = forced {
             if let Some(store) = self.store.as_ref().and_then(|s| s.lock().ok()) {
