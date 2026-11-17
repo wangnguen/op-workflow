@@ -3,6 +3,7 @@
 import type {
   AgentCatalog,
   CloseChoice,
+  HarnessLib,
   AgentKind,
   AgentView,
   AppInfo,
@@ -601,7 +602,29 @@ export function mockSettings(): SettingsView {
     claudeActiveProbeSec: mockProbe.activeSec,
     claudeProbeMin: mockProbe.idleMin,
     onClose: mockClose.choice,
+    harnessLibs: mockHarnessLibs(),
   };
+}
+
+const mockHarnessDirs = new Map<string, string>();
+
+function mockHarnessLibs(): HarnessLib[] {
+  return ["~/Desktop/acme-web", "~/Desktop/acme-api", "~/Desktop/acme-mobile"].map((repo) => {
+    const custom = mockHarnessDirs.get(repo);
+    const name = repo.split("/").pop() ?? "repo";
+    return { repo, dir: custom ?? `C:\\tmp\\${name}-harness`, custom: custom !== undefined, exists: repo.endsWith("web") };
+  });
+}
+
+/** Browser preview: Settings → Repo & nhánh → Thư viện harness, in memory only. */
+export function mockSetHarnessDir(repo: string, dir?: string): SettingsView {
+  const d = dir?.trim();
+  if (d && !/^([a-zA-Z]:[\\/]|~[\\/]|\/)/.test(d)) {
+    throw { code: "harness.dir", message: "Nhập đường dẫn đầy đủ, ví dụ C:\\tmp\\web-harness" };
+  }
+  if (d) mockHarnessDirs.set(repo, d);
+  else mockHarnessDirs.delete(repo);
+  return mockSettings();
 }
 
 const mockClose: { choice: CloseChoice } = { choice: "ask" };

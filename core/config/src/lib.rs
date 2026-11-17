@@ -134,6 +134,9 @@ pub struct RepoConfig {
     /// Kiểm tra (step 4): commands the app runs after code changes (`npx tsc --noEmit -p web`,
     /// `npx eslint {files}`; `{files}` = the changed files). Empty = guessed per package.
     pub checks: Vec<String>,
+    /// Harness (step 5): this repo's own harness library (`C:\tmp\collabkeeper-harness`).
+    /// `None` = `C:\tmp\<repo name>-harness`, created the first time a task uses it.
+    pub harness_dir: Option<String>,
 }
 
 /// Limits of one workflow step (`steps.<step>` in config). Unset fields use the app's defaults.
@@ -166,6 +169,10 @@ pub struct StepsConfig {
     /// Model and effort of the final review. Its budget and timeout fall back to `reviewLocal`
     /// (both used to share that section).
     pub final_review: StepConfig,
+    /// Step 5: the AI builds and runs a throwaway harness outside the repo.
+    pub harness: StepConfig,
+    /// Step 11: the AI tries the change in Chrome (Chrome DevTools MCP).
+    pub browser_test: StepConfig,
     pub push_summary: StepConfig,
 }
 
@@ -414,6 +421,28 @@ pub fn add_allow_bash(path: &Path, repo: &str, rule: &str) -> ConfigResult<bool>
         entry.insert("allowBash".into(), Value::Array(list));
     })?;
     Ok(added)
+}
+
+/// Write `repos.<repo>.harnessDir` (the repo's key as written in config, else `repo`); `None`
+/// or blank removes it (back to the default folder). Other keys stay untouched.
+pub fn save_harness_dir(path: &Path, repo: &str, dir: Option<&str>) -> ConfigResult<()> {
+    edit_file(path, |root| {
+        let repos = object_at(root, "repos");
+        let key = repos
+            .keys()
+            .find(|k| same_path(k, repo))
+            .cloned()
+            .unwrap_or_else(|| repo.to_owned());
+        let entry = object_at(repos, &key);
+        match dir.map(str::trim).filter(|d| !d.is_empty()) {
+            Some(d) => {
+                entry.insert("harnessDir".into(), Value::String(d.to_owned()));
+            }
+            None => {
+                entry.remove("harnessDir");
+            }
+        }
+    })
 }
 
 /// Same repo path, whatever the `~`, slash direction or (on Windows) letter case.
@@ -703,6 +732,20 @@ mod tests {
         );
         save_claude_probe(&path, 5, 15).unwrap();
         assert_eq!(Config::load(&path).unwrap().quota.claude_active_probe_sec, 30);
+    }
+
+    #[test]
+    fn the_harness_library_of_a_repo_is_saved_under_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"repos":{"~/code/web":{"checks":["npx tsc"]}}}"#).unwrap();
+        save_harness_dir(&path, "~\\code\\web\\", Some(" C:/tmp/web-harness ")).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let web = &cfg.repos["~/code/web"];
+        assert_eq!(web.harness_dir.as_deref(), Some("C:/tmp/web-harness"));
+        assert_eq!(web.checks, ["npx tsc"]);
+        save_harness_dir(&path, "~/code/web", None).unwrap();
+        assert_eq!(Config::load(&path).unwrap().repos["~/code/web"].harness_dir, None);
     }
 
     #[test]

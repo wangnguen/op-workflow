@@ -13,6 +13,7 @@ pub mod demo;
 pub mod diffview;
 pub mod flow;
 pub mod folders;
+pub mod harness;
 pub mod issues;
 pub mod live;
 pub mod models;
@@ -33,10 +34,10 @@ use opw_context::BriefComment;
 use opw_domain::task::display_id;
 use opw_domain::view::{
     AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CloseChoice, CommentsView, DataMode,
-    DeleteBranchRequest, DiffView, FindingDecision, FlowAction, FlowStatus, InboxItem, IssueFetch,
-    IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, PushCheck, QuotaSnapshot, RepoState,
-    SettingsView, StartOptions, StartRequest, StartResult, StepChoiceRequest, StepRef, StepView, TaskCard,
-    TaskColumn, TaskDetail, TaskSystem, TasksDirChange, TodayStats, UpdateView,
+    DeleteBranchRequest, DiffView, FindingDecision, FlowAction, FlowStatus, HarnessLib, InboxItem,
+    IssueFetch, IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, PushCheck, QuotaSnapshot,
+    RepoState, SettingsView, StartOptions, StartRequest, StartResult, StepChoiceRequest, StepRef, StepView,
+    TaskCard, TaskColumn, TaskDetail, TaskSystem, TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
@@ -48,6 +49,40 @@ use crate::live::{ClaudeProbe, CommentsSink, Live, LiveSettings, LiveState};
 use crate::updater::Updater;
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The harness library of every repo config knows (remembered by "Bắt đầu làm việc" or written
+/// under `repos`), each repo once.
+fn harness_libs(config: &Config) -> Vec<HarnessLib> {
+    let mut repos: Vec<String> = Vec::new();
+    for r in config
+        .projects
+        .values()
+        .flat_map(|p| p.repos.iter())
+        .chain(config.repos.keys())
+    {
+        if !r.trim().is_empty() && !repos.iter().any(|k| opw_config::same_path(k, r)) {
+            repos.push(r.clone());
+        }
+    }
+    repos
+        .into_iter()
+        .map(|repo| {
+            let configured = config
+                .repos
+                .iter()
+                .find(|(k, _)| opw_config::same_path(k, &repo))
+                .and_then(|(_, c)| c.harness_dir.clone())
+                .filter(|d| !d.trim().is_empty());
+            let dir = harness::library_dir(configured.as_deref(), &opw_config::expand_home(&repo));
+            HarnessLib {
+                exists: dir.is_dir(),
+                dir: dir.to_string_lossy().into_owned(),
+                custom: configured.is_some(),
+                repo,
+            }
+        })
+        .collect()
+}
 
 const DB_FILE: &str = "opw.db";
 const NO_URL_NOTICE: &str = "Chưa có URL OpenProject cho bản này. Mở Cài đặt → OpenProject, nhập URL rồi bấm Kiểm tra & lưu (token đã lưu thì không cần dán lại).";
@@ -1583,6 +1618,7 @@ impl AppService {
             claude_active_probe_sec: config.quota.claude_active_probe_sec,
             claude_probe_min: config.quota.claude_probe_min,
             on_close: config.on_close,
+            harness_libs: harness_libs(&config),
         }
     }
 
@@ -1630,13 +1666,85 @@ impl AppService {
         Ok(self.settings())
     }
 
+    /// Settings → Repo & nhánh → Thư viện harness: the library folder of one repo (`None` = back
+    /// to `C:\tmp\<repo>-harness`). Not inside the repo, not in `%TEMP%` (the EDR locks new exes
+    /// run from there).
+    pub fn set_harness_dir(&self, repo: &str, dir: Option<&str>) -> Result<SettingsView, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
+        let config = self.config();
+        if !harness_libs(&config)
+            .iter()
+            .any(|l| opw_config::same_path(&l.repo, repo))
+        {
+            return Err(ApiError::new("harness.repo", "Repo này chưa có trong Cài đặt"));
+        }
+        let dir = dir.map(str::trim).filter(|d| !d.is_empty());
+        if let Some(d) = dir {
+            let full = opw_config::expand_home(d);
+            let repo_dir = opw_config::expand_home(repo);
+            if !full.is_absolute() {
+                return Err(ApiError::new(
+                    "harness.dir",
+                    "Nhập đường dẫn đầy đủ, ví dụ C:\\tmp\\web-harness",
+                ));
+            }
+            if full.starts_with(&repo_dir) {
+                return Err(ApiError::new(
+                    "harness.dir",
+                    "Thư viện harness phải nằm ngoài repo",
+                ));
+            }
+            if full.starts_with(std::env::temp_dir()) {
+                return Err(ApiError::new(
+                    "harness.dir",
+                    "Không đặt trong %TEMP%: phần mềm bảo mật khoá file chạy từ đó",
+                ));
+            }
+        }
+        opw_config::save_harness_dir(path, repo, dir)
+            .map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        Ok(self.settings())
+    }
+
+    /// Open a file or folder a task's Harness / Test trình duyệt result shows (scratch folder,
+    /// library folder, screenshot), or anything inside the task folder.
+    pub fn open_task_path(&self, wp_id: u64, path: &str) -> Result<(), ApiError> {
+        let (ctx, flow) = self.task_ctx(wp_id)?;
+        let detail = flow.detail(&ctx);
+        let mut known: Vec<String> = Vec::new();
+        for t in &detail.tests {
+            known.extend(t.dir.clone());
+            known.extend(t.library.clone());
+            known.extend(t.cases.iter().filter_map(|c| c.screenshot.clone()));
+        }
+        let full = PathBuf::from(path);
+        let in_task = !path.contains("..") && full.starts_with(&ctx.task_dir);
+        if !in_task && !known.iter().any(|k| opw_config::same_path(k, path)) {
+            return Err(ApiError::new(
+                "path.unknown",
+                "Chỉ mở được đường dẫn của task này",
+            ));
+        }
+        let opened = if full.is_dir() {
+            os::open_folder(&full)
+        } else {
+            os::reveal(&full)
+        };
+        opened.map_err(|e| ApiError::new("path.missing", e.to_string()))
+    }
+
     /// Show a folder or file from Settings in Explorer. Only paths Settings itself lists are
-    /// accepted (workspaces, remembered repos, data folder, config file).
+    /// accepted (workspaces, remembered repos, harness libraries, data folder, config file).
     pub fn reveal_path(&self, path: &str) -> Result<(), ApiError> {
         let config = self.config();
         let mut known: Vec<String> = config.workspaces.clone();
         known.extend(config.projects.values().flat_map(|p| p.repos.iter().cloned()));
         known.extend(config.repos.keys().cloned());
+        known.extend(harness_libs(&config).into_iter().map(|l| l.dir));
         known.extend(
             [&self.data_dir, &self.config_path, &self.tasks_root()]
                 .into_iter()

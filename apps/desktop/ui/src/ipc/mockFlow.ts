@@ -28,6 +28,7 @@ import type {
   TaskCard,
   TaskColumn,
   TaskDetail,
+  TestView,
   ToolEvent,
 } from "./types";
 import { FIX_STEPS, OPTIONAL_STEPS, STEP_ORDER } from "../shared/steps";
@@ -53,7 +54,7 @@ const LABEL: Record<StepKind, string> = {
 
 const TOOLS: Record<StepKind, string[]> = {
   checks: [],
-  harness: [],
+  harness: ["Read C:\\tmp\\acme-api-harness\\README.md", "Write org-guard/run.mjs", "Bash npx tsx run.mjs"],
   fixCross: ["Edit api/src/routes/files.ts", "Bash npx tsc --noEmit"],
   browserTest: [],
   intake: [],
@@ -73,7 +74,7 @@ const TOOLS: Record<StepKind, string[]> = {
 const COST: Record<StepKind, number> = {
   intake: 0,
   checks: 0,
-  harness: 0,
+  harness: 0.31,
   fixCross: 0.29,
   browserTest: 0,
   analyze: 0.31,
@@ -89,7 +90,7 @@ const COST: Record<StepKind, number> = {
 const MODEL: Record<StepKind, string | undefined> = {
   intake: undefined,
   checks: undefined,
-  harness: undefined,
+  harness: "claude-opus-5-5",
   fixCross: "claude-opus-5-5",
   browserTest: undefined,
   analyze: "claude-opus-5-5",
@@ -326,6 +327,8 @@ interface Flow {
   /** optional steps the task runs; `picked` = switched by the user (the AI's advice no longer changes them) */
   uses: StepKind[];
   picked: StepKind[];
+  /** Harness / Test trình duyệt results */
+  tests: TestView[];
 }
 
 type Review = "reviewLocal" | "crossReview" | "finalReview";
@@ -415,6 +418,7 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo", seeded
       proposals: [],
       uses: [],
       picked: [],
+      tests: [],
     };
     if (seeded && wpId === DEMO_ACTIVE_WP) {
       // the animated demo task: open it where the demo shows a gate, at the plan review
@@ -619,6 +623,11 @@ function enter(f: Flow, step: StepKind): void {
   }
   while (OPTIONAL_STEPS.includes(STEP_ORDER[at] as StepKind)) {
     const passed = STEP_ORDER[at] as StepKind;
+    // Harness runs when the task uses it
+    if (passed === "harness" && f.uses.includes("harness")) {
+      goTo(f, "harness");
+      return;
+    }
     f.states[passed] = "skipped";
     // turned on for this task, but this build cannot run it yet (parts 5c, 5e, 5f)
     if (f.uses.includes(passed)) log(f, "info", `${LABEL[passed]} chưa chạy được ở bản này: bỏ qua`, passed);
@@ -752,6 +761,14 @@ function complete(f: Flow): void {
       );
       return;
     }
+    case "harness": {
+      f.states.harness = "done";
+      f.tests = [harnessView(f, n)];
+      const kept = n === 1 ? `; lưu vào thư viện: ${HARNESS_LIB}\\org-guard` : "";
+      done(`PASS 3/3${kept}`);
+      enter(f, "reviewLocal");
+      return;
+    }
     case "pushSummary":
       f.push = pushView();
       f.states.pushSummary = "done";
@@ -780,6 +797,29 @@ function complete(f: Flow): void {
     default:
       return;
   }
+}
+
+const HARNESS_LIB = "C:\\tmp\\acme-api-harness";
+
+/** The harness the demo AI builds: three cases, the negative control FAILs as it should. */
+function harnessView(f: Flow, runs: number): TestView {
+  return {
+    step: "harness",
+    passed: true,
+    summary: "Gọi thẳng hàm lọc file của API với org rỗng, org có quyền và org bị khoá; bản hỏng (bỏ guard) FAIL đúng ca org rỗng.",
+    cases: [
+      { name: "user chưa có org: trả danh sách rỗng, không lỗi", ok: true },
+      { name: "org có quyền: thấy file của org", ok: true },
+      { name: "org bị khoá: không thấy file", ok: true },
+    ],
+    at: iso(Date.now()),
+    runs,
+    command: "npx tsx run.mjs",
+    dir: `C:\\Users\\me\\.op-workflow-dev\\scratch\\${f.taskId}`,
+    negative: true,
+    negativeDetail: "bỏ guard orgId: ca \"user chưa có org\" FAIL",
+    library: f.tests[0]?.library ?? (runs === 1 ? `${HARNESS_LIB}\\org-guard` : undefined),
+  };
 }
 
 /** Advance time: finish a run that is over, start the next step when auto-advance is on. */
@@ -872,6 +912,7 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     runs: f.history.map((r) => runView(f, r)),
     costUsd: Object.values(f.costs).reduce((a, b) => a + (b ?? 0), 0),
     newComments: mockNewComments(wpId),
+    tests: f.tests.map((t) => ({ ...t, cases: t.cases.map((c) => ({ ...c })) })),
   };
   if (f.phase === "running" && f.current && f.runStarted) {
     detail.running = {
@@ -1019,6 +1060,13 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
         log(f, "info", "Không review chéo lại: sang Review chốt", fix);
         startRun(f);
       }
+      break;
+    }
+    case "dropHarness": {
+      const t = f.tests.find((x) => x.step === "harness");
+      if (!t?.library) throw fail("harness.library", "Harness của task này không có trong thư viện");
+      log(f, "info", `Đã bỏ harness khỏi thư viện: ${t.library}`, "harness");
+      t.library = undefined;
       break;
     }
     case "rerunPush":

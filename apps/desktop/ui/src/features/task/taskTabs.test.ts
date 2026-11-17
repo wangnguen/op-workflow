@@ -100,6 +100,8 @@ describe("mock workflow (browser preview)", () => {
     mockFlowAction(7, { type: "answerQuestion", id: "q2", aiDecides: true });
     expect(() => mockFlowAction(7, { type: "setUses", step: "checks", on: true })).toThrow();
     mockFlowAction(7, { type: "setUses", step: "browserTest", on: true });
+    // the harness has its own test (mockFlow.test.ts): off here, straight to Tự review
+    mockFlowAction(7, { type: "setUses", step: "harness", on: false });
     mockFlowAction(7, { type: "approvePlan" });
     const plan = mockTaskDetail(7).plan ?? "";
     expect(plan).toContain("## Câu hỏi và trả lời");

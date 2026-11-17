@@ -105,6 +105,12 @@ impl StepKind {
         )
     }
 
+    /// Steps whose problems go to the findings gate: the three reviews, a harness that FAILs
+    /// and a browser test with NG cases.
+    pub fn reports_findings(self) -> bool {
+        self.is_review() || matches!(self, StepKind::Harness | StepKind::BrowserTest)
+    }
+
     /// The step after this one; `None` after the push summary.
     pub fn next(self) -> Option<StepKind> {
         StepKind::ALL.get(self.slot() + 1).copied()
@@ -115,9 +121,10 @@ impl StepKind {
     }
 }
 
-/// The Sửa lỗi step that fixes what `review` found: step 7 after Tự review, step 9 otherwise.
+/// The Sửa lỗi step that fixes what `review` found: step 7 after Harness or Tự review, step 9
+/// otherwise (Review chéo, Review chốt, Test trình duyệt).
 pub fn fix_step_of(review: StepKind) -> StepKind {
-    if review == StepKind::ReviewLocal {
+    if matches!(review, StepKind::ReviewLocal | StepKind::Harness) {
         StepKind::Fix
     } else {
         StepKind::FixCross
@@ -368,12 +375,20 @@ impl Workflow {
         }
     }
 
+    /// The step whose findings are being picked, fixed or checked again (`None` outside that
+    /// loop). While Harness runs it is `Some(Harness)` right after a fix of what it found.
+    pub fn fixing(&self) -> Option<StepKind> {
+        self.fix_for
+    }
+
     /// Where the gate's "go on" answer leads: past the findings gate without fixing, or "No" at
-    /// the after-fix gate (the final review, again when it was the one fixed).
+    /// the after-fix gate (the final review, again when it was the one fixed; the browser test
+    /// again after a fix of what it found).
     pub fn skip_target(&self) -> Option<StepKind> {
         let review = self.gate_review()?;
         match self.phase {
             Phase::Gate(GateKind::Findings) => Some(self.after_review_target(review)),
+            Phase::Gate(GateKind::AfterFix) if review == StepKind::BrowserTest => Some(StepKind::BrowserTest),
             Phase::Gate(GateKind::AfterFix) => Some(StepKind::FinalReview),
             _ => None,
         }
@@ -425,7 +440,7 @@ impl Workflow {
                 self.run(StepKind::Checks)
             }
 
-            (Phase::Running(review), E::ReviewFinished { open }) if review.is_review() => {
+            (Phase::Running(review), E::ReviewFinished { open }) if review.reports_findings() => {
                 if open == 0 {
                     self.set(review, StepState::Done);
                     self.after_review(review)
@@ -456,6 +471,8 @@ impl Workflow {
                         self.findings_gate(review);
                         Ok(())
                     }
+                    // the browser test runs again on the fixed code
+                    AfterFix::Next if review == StepKind::BrowserTest => self.run(StepKind::BrowserTest),
                     AfterFix::Next => {
                         self.fix_for = None;
                         // the cross review that was not wanted is "bỏ qua", not "chưa tới"
@@ -533,7 +550,8 @@ impl Workflow {
                 }
             }
             // Every fix waits for the user: review it again, or go on. A fix saved before the
-            // findings gate existed answers Tự review (step 7) or Codex (step 9).
+            // findings gate existed answers Tự review (step 7) or Codex (step 9). A fix of what
+            // the harness found runs the harness again (no review has looked at the code yet).
             StepKind::Fix | StepKind::FixCross => {
                 let review = self.fix_for.unwrap_or(if step == StepKind::Fix {
                     StepKind::ReviewLocal
@@ -541,6 +559,10 @@ impl Workflow {
                     StepKind::CrossReview
                 });
                 self.fix_for = Some(review);
+                if review == StepKind::Harness {
+                    self.set(step, StepState::Done);
+                    return self.run(StepKind::Harness);
+                }
                 self.set(step, StepState::WaitingUser);
                 self.phase = Phase::Gate(GateKind::AfterFix);
                 Ok(())
@@ -567,12 +589,13 @@ impl Workflow {
         self.phase = Phase::Gate(GateKind::Findings);
     }
 
-    /// The step after a review that leaves nothing to fix.
+    /// The step after a review (or harness, browser test) that leaves nothing to fix.
     fn after_review_target(&self, review: StepKind) -> StepKind {
         match review {
+            StepKind::Harness => StepKind::ReviewLocal,
             StepKind::ReviewLocal => StepKind::CrossReview,
             StepKind::CrossReview => StepKind::FinalReview,
-            _ if self.uses(StepKind::BrowserTest) => StepKind::BrowserTest,
+            StepKind::FinalReview if self.uses(StepKind::BrowserTest) => StepKind::BrowserTest,
             _ => StepKind::PushSummary,
         }
     }
@@ -581,6 +604,8 @@ impl Workflow {
     fn after_review(&mut self, review: StepKind) -> DomainResult<()> {
         self.fix_for = None;
         match review {
+            // Sửa lỗi (step 7) may still be needed by Tự review
+            StepKind::Harness => self.run(StepKind::ReviewLocal),
             StepKind::ReviewLocal => {
                 self.pass(StepKind::Fix);
                 self.start_cross_review()
@@ -588,6 +613,10 @@ impl Workflow {
             StepKind::CrossReview => {
                 self.pass(StepKind::FixCross);
                 self.run(StepKind::FinalReview)
+            }
+            StepKind::BrowserTest => {
+                self.pass(StepKind::FixCross);
+                self.run(StepKind::PushSummary)
             }
             _ => {
                 self.pass(StepKind::FixCross);
@@ -947,6 +976,56 @@ mod tests {
         assert_eq!(again.phase(), Phase::Running(StepKind::ReviewLocal));
         assert_eq!(again.state_of(StepKind::Harness), StepState::Skipped);
         assert!(again.apply(E::StepSkipped(StepKind::ReviewLocal)).is_err());
+    }
+
+    /// A harness that FAILs and a browser test with NG cases stop at the findings gate like a
+    /// review; what they found is fixed in step 7 / step 9 and the same step runs again.
+    #[test]
+    fn harness_and_browser_test_failures_go_through_the_findings_gate() {
+        let mut wf = Workflow::default();
+        wf.set_uses(StepKind::Harness, true);
+        wf.set_uses(StepKind::BrowserTest, true);
+        wf.apply(E::Start).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Intake)).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Analyze)).unwrap();
+        wf.apply(E::PlanApproved).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Implement)).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::Harness));
+        wf.apply(E::ReviewFinished { open: 2 }).unwrap();
+        assert_eq!(wf.phase(), Phase::Gate(GateKind::Findings));
+        assert_eq!(wf.current_step(), Some(StepKind::Harness));
+        assert_eq!(wf.skip_target(), Some(StepKind::ReviewLocal));
+        // left as they are: Tự review next, step 7 still free for it
+        let mut skip = wf.clone();
+        skip.apply(E::FindingsPicked { fix: 0 }).unwrap();
+        assert_eq!(skip.phase(), Phase::Running(StepKind::ReviewLocal));
+        assert_eq!(skip.state_of(StepKind::Fix), StepState::Pending);
+        // fixed in step 7, then the harness runs again (no "Review chéo lại?")
+        wf.apply(E::FindingsPicked { fix: 2 }).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::Fix));
+        wf.apply(E::StepSucceeded(StepKind::Fix)).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::Harness));
+        wf.apply(CLEAN).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::ReviewLocal));
+        assert_eq!(wf.state_of(StepKind::Harness), StepState::Done);
+        // the reviews pass; the browser test finds a problem, fixed in step 9
+        wf.apply(CLEAN).unwrap();
+        wf.apply(CLEAN).unwrap();
+        wf.apply(CLEAN).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::BrowserTest));
+        wf.apply(E::ReviewFinished { open: 1 }).unwrap();
+        assert_eq!(wf.skip_target(), Some(StepKind::PushSummary));
+        wf.apply(E::FindingsPicked { fix: 1 }).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
+        wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+        assert_eq!(wf.phase(), Phase::Gate(GateKind::AfterFix));
+        assert_eq!(wf.skip_target(), Some(StepKind::BrowserTest));
+        // "No" runs the browser test again; clean → push summary
+        wf.apply(E::AfterFix(AfterFix::Next)).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::BrowserTest));
+        assert_eq!(wf.state_of(StepKind::FinalReview), StepState::Done);
+        wf.apply(CLEAN).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::PushSummary));
     }
 
     fn legacy(states: &str, phase: &str, round: u8) -> String {

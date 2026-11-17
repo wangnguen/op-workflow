@@ -18,7 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::checks::{self, CheckResult, CheckRunner, ProcessRunner};
+use crate::checks::{self, Check, CheckKind, CheckResult, CheckRunner, ProcessRunner};
+use crate::harness;
 use opw_agents::ModelChoice;
 use opw_agents::claude::{self, ClaudeEvent, Denial, RunResult};
 use opw_agents::codex::{self, CodexEvent};
@@ -34,7 +35,7 @@ use opw_domain::view::{
     AgentKind, AgentView, AlertKind, ApiError, CarryOn, ChatItem, ChatKind, ChatView, Decision,
     FindingDecision, FindingView, FlowAction, FlowError, FlowStatus, GateKind, GateView, LogLine,
     PlanQuestion, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote, RunState, RunSummary, RunView,
-    SessionStatus, StepProposal, StepRef, StepView, TaskColumn, TaskDetail, ToolEvent,
+    SessionStatus, StepProposal, StepRef, StepView, TaskColumn, TaskDetail, TestCase, TestView, ToolEvent,
 };
 use opw_domain::workflow::{AfterFix, Phase, StepKind, StepState, Workflow, WorkflowEvent};
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
@@ -61,8 +62,8 @@ const NOTE_CHARS: usize = 400;
 const RUN_LOG_DAYS: u64 = 14;
 /// Optional steps the user turns on or off per task (the analysis proposes them).
 const SWITCHABLE: [StepKind; 2] = [StepKind::Harness, StepKind::BrowserTest];
-/// Steps this build cannot run yet (parts 5e, 5f): turned on, they are passed as "bỏ qua".
-const NOT_YET: [StepKind; 2] = [StepKind::Harness, StepKind::BrowserTest];
+/// Steps this build cannot run yet (part 5f): turned on, they are passed as "bỏ qua".
+const NOT_YET: [StepKind; 1] = [StepKind::BrowserTest];
 /// Times Claude may fix what Kiểm tra reports before the step stops for the user.
 const CHECK_FIX_ROUNDS: usize = 2;
 /// What a question left to the AI says in plan.md.
@@ -172,6 +173,65 @@ struct Saved {
     picked: Vec<StepKind>,
     /// "Tôi code xong" asked for the review: run it after Kiểm tra even without "Tự chạy".
     review_after_checks: bool,
+    /// Harness (step 5): what the AI built and how it ran last.
+    harness: Option<HarnessState>,
+}
+
+/// The task's harness: the command the app runs again after each fix, and its last result.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct HarnessState {
+    /// Program and arguments, run from `dir` (the task's scratch folder).
+    run: Vec<String>,
+    dir: String,
+    passed: bool,
+    /// What the AI said about it.
+    summary: String,
+    /// Failed cases first.
+    cases: Vec<harness::Case>,
+    at: String,
+    runs: u32,
+    /// The broken copy made it FAIL (`None` = not reported).
+    negative: Option<bool>,
+    negative_detail: String,
+    /// Case name → repository file, for the findings.
+    files: Vec<(String, String)>,
+    /// Kept in the repo's library: that folder, and the library itself.
+    library: Option<String>,
+    library_root: Option<String>,
+    /// The AI found it worth keeping, but it did not PASS yet: kept once it does.
+    pending: Option<harness::LibraryPick>,
+}
+
+impl HarnessState {
+    fn command(&self) -> String {
+        self.run.join(" ")
+    }
+
+    fn view(&self) -> TestView {
+        TestView {
+            step: StepKind::Harness,
+            passed: self.passed,
+            summary: self.summary.clone(),
+            cases: self
+                .cases
+                .iter()
+                .map(|c| TestCase {
+                    name: c.name.clone(),
+                    ok: c.ok,
+                    detail: c.detail.clone(),
+                    screenshot: None,
+                })
+                .collect(),
+            at: self.at.clone(),
+            runs: self.runs,
+            command: Some(self.command()).filter(|c| !c.is_empty()),
+            dir: Some(self.dir.clone()).filter(|d| !d.is_empty()),
+            negative: self.negative,
+            negative_detail: self.negative_detail.clone(),
+            library: self.library.clone(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -298,8 +358,10 @@ pub fn step_label(step: StepKind) -> &'static str {
 /// The `steps.<step>` section of a step (intake has none).
 pub fn step_config(step: StepKind, steps: &StepsConfig) -> Option<&StepConfig> {
     Some(match step {
-        // Kiểm tra runs no AI; Harness and Test trình duyệt get their settings when they run
-        StepKind::Intake | StepKind::Checks | StepKind::Harness | StepKind::BrowserTest => return None,
+        // Kiểm tra runs no AI
+        StepKind::Intake | StepKind::Checks => return None,
+        StepKind::Harness => &steps.harness,
+        StepKind::BrowserTest => &steps.browser_test,
         StepKind::Analyze => &steps.analyze,
         StepKind::Implement => &steps.implement,
         StepKind::ReviewLocal => &steps.review_local,
@@ -383,9 +445,8 @@ fn limits(step: StepKind, config: &Config) -> (f64, Duration, &'static str) {
         StepKind::Intake => (&steps.analyze, 0.0, 1, "intake"),
         // each command and each AI fix round of Kiểm tra gets this much
         StepKind::Checks => return (2.0, Duration::from_secs(15 * 60), "checks"),
-        // not run yet (later parts): the app's defaults
-        StepKind::Harness => return (2.0, Duration::from_secs(30 * 60), "harness"),
-        StepKind::BrowserTest => return (3.0, Duration::from_secs(30 * 60), "browserTest"),
+        StepKind::Harness => (&steps.harness, 2.0, 30, "harness"),
+        StepKind::BrowserTest => (&steps.browser_test, 3.0, 30, "browserTest"),
     };
     // the final review used to share `reviewLocal`; its limits still apply when unset
     let shared = (step == StepKind::FinalReview).then_some(&steps.review_local);
@@ -540,8 +601,17 @@ fn merge_findings(
             seen_at: Some(at.to_owned()),
         })?;
     }
+    // a harness or browser test settles only what it found itself; a review leaves theirs
+    let test_step = |key: Option<&str>| matches!(key, Some("harness" | "browserTest"));
+    let ours = |old: &FindingRow| {
+        if test_step(Some(step_key(step))) {
+            old.step.as_deref() == Some(step_key(step))
+        } else {
+            !test_step(old.step.as_deref())
+        }
+    };
     for old in existing.values() {
-        if old.state == "fixing" && !seen.contains(&old.fingerprint) {
+        if old.state == "fixing" && ours(old) && !seen.contains(&old.fingerprint) {
             store.upsert_finding(&FindingRow {
                 state: "fixed".into(),
                 ..old.clone()
@@ -1128,6 +1198,7 @@ impl Flow {
             cost_usd: runs.iter().filter_map(|r| r.cost_usd).sum(),
             // the facade fills this from OpenProject and the last issue read
             new_comments: 0,
+            tests: entry.saved.harness.iter().map(HarnessState::view).collect(),
         }
     }
 
@@ -1612,6 +1683,31 @@ fn apply_action(
                     .filter(|a| !a.is_empty())
                     .map(str::to_owned)
             };
+            Ok(false)
+        }
+        FlowAction::DropHarness => {
+            let kept = entry
+                .saved
+                .harness
+                .as_ref()
+                .and_then(|h| Some((h.library.clone()?, h.library_root.clone()?)));
+            let Some((saved, root)) = kept else {
+                return Err(ApiError::new(
+                    "harness.library",
+                    "Harness của task này không có trong thư viện",
+                ));
+            };
+            harness::drop_saved(Path::new(&root), Path::new(&saved))
+                .map_err(|e| ApiError::new("harness.library", format!("Không bỏ được khỏi thư viện: {e}")))?;
+            if let Some(h) = entry.saved.harness.as_mut() {
+                h.library = None;
+            }
+            push_log(
+                entry,
+                Some(StepKind::Harness),
+                "info",
+                &format!("Đã bỏ harness khỏi thư viện: {saved}"),
+            );
             Ok(false)
         }
         FlowAction::SetUses { step, on } => {
@@ -2435,9 +2531,13 @@ impl Inner {
         self.persist(wp_id, entry);
         // Kiểm tra costs no tokens: it follows Viết code even without "Tự chạy"
         let after_checks = step == StepKind::Checks && std::mem::take(&mut entry.saved.review_after_checks);
+        let rerun_harness = entry.saved.workflow.fixing() == Some(StepKind::Harness)
+            && entry.saved.harness.as_ref().is_some_and(|h| !h.run.is_empty());
         let go_on = kind == "ok"
             && match entry.saved.workflow.phase() {
                 Phase::Running(StepKind::Checks) => true,
+                // after a fix of what the harness found, the app runs it again: no tokens either
+                Phase::Running(StepKind::Harness) if rerun_harness => true,
                 Phase::Running(_) => after_checks || ctx.auto(&entry.saved),
                 _ => false,
             };
@@ -3094,6 +3194,247 @@ fn run_checks(
     }
 }
 
+/// The task's scratch folder (`<data dir>/scratch/<task>`): outside the repo and outside
+/// `%TEMP%`. Without a data dir (tests) it sits in the task folder.
+fn scratch_dir(inner: &Inner, ctx: &TaskCtx) -> PathBuf {
+    match inner.runs_dir.as_deref().and_then(Path::parent) {
+        Some(data) => data.join("scratch").join(&ctx.row.display_id),
+        None => ctx.task_dir.join("harness").join("scratch"),
+    }
+}
+
+/// Run the harness command once (the app, no tokens); its output goes to `<task>/harness/`.
+fn harness_command(
+    inner: &Inner,
+    ctx: &TaskCtx,
+    claim: &Claim,
+    repo: &Path,
+    state: &HarnessState,
+) -> Result<(harness::Outcome, Vec<RawFinding>), FlowError> {
+    let (_, timeout, _) = limits(StepKind::Harness, &ctx.config);
+    let checker = inner
+        .checker
+        .lock()
+        .map(|c| c.clone())
+        .map_err(|_| flow_error("harness.run", "Không chạy được harness"))?;
+    let (program, args) = state
+        .run
+        .split_first()
+        .ok_or_else(|| flow_error("harness.run", "Harness không có lệnh để chạy"))?;
+    let check = Check {
+        label: "harness".into(),
+        program: program.clone(),
+        args: args.to_vec(),
+        kind: CheckKind::Harness,
+        dir: state.dir.clone(),
+    };
+    inner.on_tool(ctx.row.wp_id, StepKind::Harness, "Harness", &state.command());
+    let (code, output) = checker.run(repo, &check, timeout, &claim.stop).map_err(|why| {
+        flow_error(
+            "harness.run",
+            format!("Không chạy được harness (`{}`): {}", state.command(), short(&why)),
+        )
+    })?;
+    if claim.stop.load(Ordering::Relaxed) {
+        return Err(flow_error(
+            "step.stopped",
+            "Bạn đã dừng bước này. Bấm Thử lại để chạy lại.",
+        ));
+    }
+    let dir = ctx.task_dir.join("harness");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(
+        dir.join(format!("run-{}.log", state.runs + 1)),
+        format!("$ {}\n{output}", state.command()),
+    );
+    let outcome = harness::read(code, &output);
+    let raw = harness::findings(&outcome, &state.files, &output);
+    inner.merge(ctx, StepKind::Harness, 0, "harness", &raw)?;
+    Ok((outcome, raw))
+}
+
+/// Keep a run's result on the task: "PASS 5/5" / "FAIL 2/5".
+fn keep_harness(inner: &Inner, wp_id: u64, mut state: HarnessState, outcome: &harness::Outcome) -> String {
+    state.passed = outcome.passed;
+    state.cases = harness::shown(outcome);
+    state.at = now();
+    state.runs += 1;
+    let tally = harness::tally(outcome);
+    inner.with_saved(wp_id, |s| s.harness = Some(state));
+    if outcome.silent {
+        format!("{tally} (harness không in dòng PASS/FAIL nào: chỉ theo mã thoát)")
+    } else {
+        tally
+    }
+}
+
+/// After a Sửa lỗi: run the task's harness again when it has one. `None` = nothing to run.
+fn harness_again(
+    inner: &Inner,
+    ctx: &TaskCtx,
+    claim: &Claim,
+    repo: &Path,
+) -> Result<Option<String>, FlowError> {
+    let wp_id = ctx.row.wp_id;
+    let state = inner
+        .with_saved(wp_id, |s| {
+            s.harness.clone().filter(|_| s.workflow.uses(StepKind::Harness))
+        })
+        .flatten()
+        .filter(|h| !h.run.is_empty() && Path::new(&h.dir).is_dir());
+    let Some(state) = state else { return Ok(None) };
+    let (outcome, _) = harness_command(inner, ctx, claim, repo, &state)?;
+    let mut note = keep_harness(inner, wp_id, state, &outcome);
+    if !outcome.passed {
+        note.push_str(" (lỗi mới ở tab Lỗi review: Chọn thêm lỗi để sửa)");
+    }
+    inner.log(
+        wp_id,
+        Some(StepKind::Harness),
+        "info",
+        &format!("Harness lại: {note}"),
+        false,
+    );
+    Ok(Some(note))
+}
+
+/// Step 5. The first time the AI builds the harness in the scratch folder (reusing the repo's
+/// library), then the app runs it itself; after a fix of what it found only the app runs it
+/// again. A FAIL stops at the findings gate like a review; a harness worth keeping goes to the
+/// library.
+fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<Done, FlowError> {
+    let wp_id = ctx.row.wp_id;
+    let (budget, timeout, _) = limits(StepKind::Harness, &ctx.config);
+    let (saved, after_fix, checks) = inner
+        .with_saved(wp_id, |s| {
+            let checks: Vec<String> = s
+                .proposals
+                .iter()
+                .filter(|p| p.step == StepKind::Harness)
+                // the analysis's list comes as "- a\n- b"
+                .flat_map(|p| {
+                    p.checks
+                        .lines()
+                        .map(|l| l.trim().trim_start_matches("- ").to_owned())
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            (
+                s.harness.clone(),
+                s.workflow.fixing() == Some(StepKind::Harness),
+                checks,
+            )
+        })
+        .unwrap_or_default();
+    let finish = |state: HarnessState,
+                  (outcome, raw): (harness::Outcome, Vec<RawFinding>),
+                  cost: Option<f64>,
+                  extra: String| {
+        let negative = match state.negative {
+            Some(false) => "; negative control không FAIL: harness có thể không bắt được lỗi".to_owned(),
+            _ => String::new(),
+        };
+        let mut state = state;
+        let mut extra = extra;
+        // a harness worth keeping goes to the library once it PASSes
+        if let (true, Some(pick), Some(root)) =
+            (outcome.passed, state.pending.clone(), state.library_root.clone())
+        {
+            let date = now().chars().take(10).collect::<String>();
+            match harness::save(
+                Path::new(&root),
+                Path::new(&state.dir),
+                &pick,
+                &ctx.row.display_id,
+                &date,
+            ) {
+                Ok(dest) => {
+                    extra.push_str(&format!("; lưu vào thư viện: {}", dest.display()));
+                    state.library = Some(dest.to_string_lossy().into_owned());
+                }
+                Err(e) => extra.push_str(&format!("; không lưu được vào thư viện: {e}")),
+            }
+            state.pending = None;
+        }
+        let tally = keep_harness(inner, wp_id, state, &outcome);
+        // FAIL cases the user has not accepted or deferred stop at the findings gate
+        let (event, _) = review_event(&inner.findings(wp_id), &raw);
+        Done {
+            event,
+            note: format!("{tally}{negative}{extra}"),
+            cost,
+        }
+    };
+    // after a fix of what it found: the app runs the same harness again (no tokens)
+    let again = saved
+        .clone()
+        .filter(|h| after_fix && !h.run.is_empty() && Path::new(&h.dir).is_dir());
+    if let Some(state) = again {
+        let ran = harness_command(inner, ctx, claim, repo, &state)?;
+        return Ok(finish(
+            state,
+            ran,
+            None,
+            " (app chạy lại, không tốn token)".into(),
+        ));
+    }
+    let repo_config = ctx.repo_config();
+    let library = harness::library_dir(repo_config.harness_dir.as_deref(), repo);
+    let repo_name = repo
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    harness::ensure_library(&library, &repo_name).map_err(|e| {
+        flow_error(
+            "harness.library",
+            format!(
+                "Không tạo được thư viện harness {}: {e}. Đổi thư mục ở Cài đặt → Repo rồi bấm Thử lại.",
+                library.display()
+            ),
+        )
+    })?;
+    let scratch = scratch_dir(inner, ctx);
+    std::fs::create_dir_all(&scratch).map_err(|e| flow_error("harness.scratch", e.to_string()))?;
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    let mut allowed: Vec<String> = claude::HARNESS_BASH.iter().map(|s| (*s).to_owned()).collect();
+    allowed.extend(repo_config.allow_bash.iter().cloned());
+    let plan = ctx.read(PLAN_FILE).unwrap_or_default();
+    let prompt = prompts::harness(&plan, &checks, &path(&scratch), &path(&library), &allowed);
+    let args = claude::with_model(
+        claude::harness_args(budget, &repo_config.allow_bash, &[path(&scratch), path(&library)]),
+        &claim.choice,
+    );
+    let job = Job {
+        agent: Provider::Claude,
+        args,
+        cwd: repo.to_path_buf(),
+        stdin: Some(prompt),
+        timeout,
+    };
+    let r = inner.run_claude(ctx, StepKind::Harness, &job, claim)?;
+    let answer = harness::answer(&r.text).ok_or_else(|| {
+        flow_error(
+            "harness.parse",
+            "AI không trả về kết quả harness (khối ```json có `result` và `run`). Xem tab Chat rồi bấm Thử lại.",
+        )
+    })?;
+    let state = HarnessState {
+        run: answer.run.clone(),
+        dir: path(&scratch),
+        summary: answer.summary.clone(),
+        negative: answer.negative.as_ref().map(|(ok, _)| *ok),
+        negative_detail: answer.negative.clone().map(|(_, d)| d).unwrap_or_default(),
+        files: answer.files.clone(),
+        library_root: Some(path(&library)),
+        pending: answer.library.clone(),
+        runs: saved.map_or(0, |s| s.runs),
+        ..HarnessState::default()
+    };
+    // the app runs it itself: its result counts, and the command is known to work for later
+    let ran = harness_command(inner, ctx, claim, repo, &state)?;
+    Ok(finish(state, ran, Some(r.cost_usd), String::new()))
+}
+
 fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<Done, FlowError> {
     use WorkflowEvent as E;
     let step = claim.step;
@@ -3304,11 +3645,20 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .unwrap_or(fixes + 1);
             // Kiểm tra again on what the fix changed; it belongs to this step (no own row)
             let again = run_checks(inner, ctx, claim, repo, &base, step)?;
-            let again_note = if again.ran {
+            let mut again_note = if again.ran {
                 format!("; Kiểm tra lại: {}", again.note)
             } else {
                 String::new()
             };
+            // and the task's harness (no tokens), unless the harness step itself runs next
+            let harness_next = inner
+                .with_saved(wp_id, |s| s.workflow.fixing() == Some(StepKind::Harness))
+                .unwrap_or_default();
+            if !harness_next {
+                if let Some(h) = harness_again(inner, ctx, claim, repo)? {
+                    again_note.push_str(&format!("; Harness lại: {h}"));
+                }
+            }
             Ok(Done {
                 event: E::StepSucceeded(step),
                 note: format!(
@@ -3335,8 +3685,9 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 cost: (c.cost > 0.0).then_some(c.cost),
             })
         }
-        // turned on by later parts; until then the workflow skips them
-        StepKind::Harness | StepKind::BrowserTest => Err(flow_error(
+        StepKind::Harness => run_harness(inner, ctx, claim, repo),
+        // turned on by a later part; until then the workflow skips it
+        StepKind::BrowserTest => Err(flow_error(
             "step.notYet",
             format!("{} chưa chạy được ở bản này", step_label(step)),
         )),
@@ -3513,6 +3864,8 @@ mod tests {
             "codex"
         } else if has("--restricted") {
             "analyze"
+        } else if has("--add-dir") {
+            "harness"
         } else if has("acceptEdits") {
             "code"
         } else if has("--no-session-persistence") {
@@ -4655,6 +5008,154 @@ mod tests {
         );
     }
 
+    /// Harness: the AI builds it outside the repo, the app runs it; a FAIL goes through the
+    /// findings gate, the fix is followed by the app running it again (no tokens), a PASS keeps
+    /// it in the repo's library, and every later Sửa lỗi runs it again too.
+    #[test]
+    fn the_harness_is_built_once_then_run_by_the_app_after_each_fix() {
+        let Some(s) = setup() else { return };
+        let (flow, fake) = flow_with(&s, false, move |job, stop, out| match kind(job) {
+            "analyze" => {
+                out(&result_line(
+                    "## Nguyên nhân\nx\n```json\n{\"harness\":{\"recommend\":true,\"reason\":\"có logic\",\"checks\":[\"org rỗng\"]}}\n```",
+                ));
+                ok()
+            }
+            "harness" => {
+                let at = job.args.iter().position(|a| a == "--add-dir").unwrap();
+                let scratch = PathBuf::from(&job.args[at + 1]);
+                std::fs::write(scratch.join("run.js"), "// harness").unwrap();
+                out(&result_line(
+                    "Đã dựng.\n```json\n{\"result\":\"fail\",\"summary\":\"2 ca\",\"run\":[\"node\",\"run.js\"],\
+                         \"cases\":[{\"name\":\"empty org\",\"ok\":false,\"file\":\"a.ts\"}],\
+                         \"negativeControl\":{\"ok\":true,\"detail\":\"bản hỏng FAIL\"},\
+                         \"library\":{\"save\":true,\"name\":\"org guard\",\"summary\":\"org rỗng\",\"files\":[\"run.js\"]}}\n```",
+                ));
+                ok()
+            }
+            _ => (happy(CLEAN))(job, stop, out),
+        });
+        let runs = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = runs.clone();
+        flow.set_check_runner(Arc::new(FakeChecks {
+            calls: AtomicUsize::new(0),
+            answer: move |n, check: &checks::Check| {
+                assert_eq!(check.kind, CheckKind::Harness);
+                assert_eq!(
+                    (check.program.as_str(), check.args.clone()),
+                    ("node", vec!["run.js".to_owned()])
+                );
+                seen.lock().unwrap().push(check.dir.clone());
+                Ok(if n == 0 {
+                    (Some(1), "PASS: owner\nFAIL: empty org — TypeError\n".to_owned())
+                } else {
+                    (Some(0), "PASS: owner\nPASS: empty org\n".to_owned())
+                })
+            },
+        }));
+        let mut config = Config::default();
+        let library = s.tasks.parent().unwrap().join("web-harness");
+        config.repos.insert(
+            s.repo.to_string_lossy().into_owned(),
+            RepoConfig {
+                harness_dir: Some(library.to_string_lossy().into_owned()),
+                ..RepoConfig::default()
+            },
+        );
+        let ctx = s.ctx(1, &config);
+        flow.started(&ctx, None).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(d.current, Some(StepKind::Harness));
+
+        // built by the AI, run by the app: one case FAILs → the findings gate
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::Findings),
+            "{:?}",
+            d.error
+        );
+        assert_eq!(d.current, Some(StepKind::Harness));
+        let test = &d.tests[0];
+        assert!(!test.passed && test.runs == 1);
+        assert_eq!(test.command.as_deref(), Some("node run.js"));
+        assert_eq!(test.negative, Some(true));
+        assert_eq!(test.cases[0].name, "empty org");
+        assert!(test.library.is_none(), "kept only once it passes");
+        let f = d
+            .findings
+            .iter()
+            .find(|f| f.title == "Harness FAIL: empty org")
+            .unwrap();
+        assert_eq!((f.file.as_str(), f.source.as_str()), ("a.ts", "harness"));
+        let note = d
+            .runs
+            .iter()
+            .find(|r| r.step == StepKind::Harness)
+            .and_then(|r| r.note.clone());
+        assert_eq!(note.as_deref(), Some("FAIL 1/2"));
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let prompt = jobs.last().unwrap().stdin.clone().unwrap();
+        assert!(prompt.contains(&library.to_string_lossy().into_owned()) && prompt.contains("- org rỗng"));
+        let scratch = PathBuf::from(&runs.lock().unwrap()[0]);
+        assert!(!scratch.starts_with(&s.repo) && scratch.join("run.js").is_file());
+        assert!(library.join(harness::README).is_file());
+        assert!(s.tasks.join("WP-1").join("harness").join("run-1.log").is_file());
+
+        // fixed in step 7, then the app runs the harness again by itself: PASS, kept
+        pick_all(&flow, &ctx);
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        assert_eq!(
+            (d.current, d.status),
+            (Some(StepKind::ReviewLocal), FlowStatus::Ready),
+            "{:?}",
+            d.error
+        );
+        let test = &d.tests[0];
+        assert!(test.passed && test.runs == 2);
+        let kept = PathBuf::from(test.library.clone().unwrap());
+        assert_eq!(kept, library.join("org-guard"));
+        assert!(kept.join("run.js").is_file());
+        let harness_runs: Vec<&RunSummary> = d.runs.iter().filter(|r| r.step == StepKind::Harness).collect();
+        assert_eq!(harness_runs.len(), 1, "the app's own run adds no AI run");
+        assert!(
+            d.findings
+                .iter()
+                .all(|f| f.state == opw_domain::finding::FindingState::Fixed)
+        );
+        assert_eq!(
+            fake.jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|j| kind(j) == "harness")
+                .count(),
+            1
+        );
+
+        // a fix of what a review found runs the harness again too
+        run(&flow, &ctx, FlowAction::Run);
+        pick_all(&flow, &ctx);
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        let fix = d.runs.iter().rev().find(|r| r.step == StepKind::Fix).unwrap();
+        assert!(
+            fix.note.as_deref().unwrap().ends_with("; Harness lại: PASS 2/2"),
+            "{:?}",
+            fix.note
+        );
+        assert_eq!(d.tests[0].runs, 3);
+
+        // "Bỏ khỏi thư viện"
+        flow.act(ctx.clone(), FlowAction::DropHarness).unwrap();
+        assert!(!kept.exists());
+        assert!(flow.detail(&ctx).tests[0].library.is_none());
+        assert_eq!(
+            flow.act(ctx.clone(), FlowAction::DropHarness).unwrap_err().code,
+            "harness.library"
+        );
+    }
+
     #[test]
     fn checks_that_cannot_run_stop_the_step() {
         let Some(s) = setup() else { return };
@@ -4766,20 +5267,13 @@ mod tests {
         // the user's "off" holds; Harness follows the new advice
         assert_eq!(d.uses, vec![StepKind::Harness]);
 
-        // approved: Harness is on but cannot run in this build, so it is passed as "bỏ qua"
+        // approved: Viết code, Kiểm tra (nothing to check here), then Harness waits for Chạy
         let d = run(&flow, &ctx, FlowAction::ApprovePlan);
         assert_eq!(
             (d.current, d.status),
-            (Some(StepKind::ReviewLocal), FlowStatus::Ready),
+            (Some(StepKind::Harness), FlowStatus::Ready),
             "{:?}",
             d.error
-        );
-        let harness = d.steps.iter().find(|v| v.kind == StepKind::Harness).unwrap();
-        assert_eq!(harness.state, StepState::Skipped);
-        assert!(
-            d.log
-                .iter()
-                .any(|l| l.text == "Harness chưa chạy được ở bản này: bỏ qua")
         );
         assert!(
             d.plan

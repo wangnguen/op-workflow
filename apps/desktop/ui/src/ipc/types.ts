@@ -230,6 +230,8 @@ export interface SettingsView {
   claudeProbeMin?: number;
   /** what the window's X does */
   onClose?: CloseChoice;
+  /** harness library of every known repo */
+  harnessLibs?: HarnessLib[];
 }
 
 /** Models and effort levels the Claude / Codex CLIs on this machine offer (`step_models`). */
@@ -319,6 +321,17 @@ export interface ProjectMemory {
   name: string;
   repos: string[];
   branch?: string;
+}
+
+/** Harness library of one repo (Settings → Repo & nhánh). */
+export interface HarnessLib {
+  /** the repo as written in config */
+  repo: string;
+  dir: string;
+  /** set by the user (otherwise `C:\tmp\<repo>-harness`) */
+  custom: boolean;
+  /** made the first time a task of the repo uses Harness */
+  exists: boolean;
 }
 
 /** Error shape of failing commands (`{code, message}`). */
@@ -863,6 +876,36 @@ export interface TaskDetail {
   costUsd: number;
   /** comments not seen in the Comment tab yet (OpenProject + last issue read) */
   newComments?: number;
+  /** the last result of Harness and Test trình duyệt, when they ran */
+  tests?: TestView[];
+}
+
+/** What Harness (step 5) or Test trình duyệt (step 11) found the last time it ran. */
+export interface TestView {
+  step: StepKind;
+  passed: boolean;
+  summary: string;
+  /** failed cases first */
+  cases: TestCase[];
+  at: string;
+  /** runs so far (the AI's build and the app's runs after each fix) */
+  runs: number;
+  /** harness: the command the app runs again after each fix, and its folder */
+  command?: string;
+  dir?: string;
+  /** harness: the broken copy made it FAIL (absent = the AI did not say) */
+  negative?: boolean;
+  negativeDetail?: string;
+  /** harness: the folder it was kept in, in the repo's harness library */
+  library?: string;
+}
+
+export interface TestCase {
+  name: string;
+  ok: boolean;
+  detail?: string;
+  /** browser test: the screenshot of the case */
+  screenshot?: string;
 }
 
 export type FlowAction =
@@ -881,6 +924,8 @@ export type FlowAction =
   | { type: "pickFindings"; fix: boolean }
   /** after-fix gate: the answer to "Review chéo lại?" */
   | { type: "afterFix"; choice: AfterFixChoice }
+  /** take the harness this task kept out of the repo's harness library */
+  | { type: "dropHarness" }
   | { type: "rerunPush"; issue?: number }
   /** the task moves to "Đã xong"; also before the push summary (the steps left are skipped).
    *  `forced`: the push check said "not pushed" and the user marks it done anyway */
@@ -948,6 +993,8 @@ export interface Commands {
   push_check: PushCheck;
   close_window: null;
   set_on_close: SettingsView;
+  set_harness_dir: SettingsView;
+  open_task_path: null;
 }
 
 export interface CommandArgs {
@@ -984,4 +1031,6 @@ export interface CommandArgs {
   push_check: { wpId: number };
   close_window: { choice: CloseChoice; remember: boolean };
   set_on_close: { choice: CloseChoice };
+  set_harness_dir: { repo: string; dir?: string };
+  open_task_path: { wpId: number; path: string };
 }

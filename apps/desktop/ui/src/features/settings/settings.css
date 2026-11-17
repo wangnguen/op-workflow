@@ -588,3 +588,32 @@
   align-self: flex-start;
   margin: 7px 0;
 }
+
+/* Repo & nhánh → Thư viện harness: the folder, changed in place */
+.set-harness {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+/* the path and the input in its place are the same height: changing it moves nothing */
+.set-harness > .set-path-link,
+.set-harness-path,
+.set-harness-input {
+  flex: 1;
+  min-width: 220px;
+  min-height: 32px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+}
+.set-harness-path {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.set-harness-input {
+  height: 32px;
+  font-size: 12px;
+}

@@ -229,6 +229,69 @@ pub fn fix_checks(report: &str, allowed: &[String]) -> String {
     p
 }
 
+/// The json block that ends the harness step (read by `opw_orchestrator::harness::answer`).
+const HARNESS_JSON: &str = "End with one fenced ```json block (nothing after it):\n\
+{\"result\": \"pass\", \"summary\": \"...\", \"run\": [\"node\", \"run.js\"],\n \
+\"cases\": [{\"name\": \"...\", \"ok\": true, \"detail\": \"...\", \"file\": \"src/...\"}],\n \
+\"negativeControl\": {\"ok\": true, \"detail\": \"...\"},\n \
+\"library\": {\"save\": false, \"name\": \"...\", \"summary\": \"...\", \"files\": [\"run.js\"]}}\n\
+- result: `fail` when any case fails on the real code.\n\
+- run: the command (program and arguments) that runs the harness from the scratch folder.\n\
+- cases: every case the harness prints; `file` = the repository file the case is about.\n\
+- negativeControl.ok: the broken copy made the harness FAIL.\n\
+- library.save: true only when the harness is general enough to reuse for later tasks of this \
+repository; `files` are relative to the scratch folder.\n\
+Write summary, detail and library.summary in Vietnamese.";
+
+/// [5] Harness: build and run a throwaway test harness for the change, outside the repository.
+/// `checks` = what the analysis said it would check; `allowed` = every shell command the step
+/// may run (the app's harness commands plus the repo's `allowBash`).
+pub fn harness(plan: &str, checks: &[String], scratch: &str, library: &str, allowed: &[String]) -> String {
+    let mut p = format!(
+        "Build and run a throwaway test harness for the change of this task, outside the repository.\n\n\
+         Folders:\n\
+         - Scratch folder of this task: `{scratch}`. Write every harness file there, with absolute \
+         paths. Never create or change a file inside the repository: the app compares the working \
+         tree before and after this step and stops the flow if it changed.\n\
+         - Harness library of this repository: `{library}`. Its README.md lists the harnesses kept \
+         from earlier tasks: read it first and reuse one when it fits (copy it into the scratch \
+         folder and adapt it there). Never read or reuse the harness library or the memory of \
+         another repository.\n\n\
+         How:\n\
+         - Exercise the code this task changed, imported from the repository by absolute path. For \
+         TypeScript run it with `npx tsx <file>` or compile it with `npx tsc --outDir <scratch \
+         folder>/build`; never write build output inside the repository.\n\
+         - The harness must run again without you: one command, started from the scratch folder \
+         (for example `node run.js`), that prints one line per case, `PASS: <case>` or \
+         `FAIL: <case> — <what went wrong>`, and exits with a non-zero code when a case fails. The \
+         app runs it again after every fix.\n\
+         - Negative control: make a broken copy of the changed code inside the scratch folder, point \
+         the harness at it and confirm the harness FAILs; then run it on the real code.\n\
+         {}\n\
+         - Run each shell command on its own, with absolute paths instead of `cd … &&`.\n\n",
+        shell_rule(allowed)
+    );
+    let list: Vec<String> = checks
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .map(|c| format!("- {c}"))
+        .collect();
+    p.push_str("What to check:\n");
+    if list.is_empty() {
+        p.push_str("- the behaviour the plan changes, its edge cases, and what must stay as it was\n");
+    } else {
+        p.push_str(&list.join("\n"));
+        p.push('\n');
+    }
+    p.push('\n');
+    p.push_str(HARNESS_JSON);
+    p.push_str("\n\n");
+    p.push_str(&tagged("plan", plan));
+    p.push('\n');
+    p
+}
+
 fn review_body(base: &str, brief: &str) -> String {
     format!(
         "Review the change of this task against the base branch `{base}`.\n{}\n\n{RUBRIC}\n\n\
@@ -365,5 +428,22 @@ mod tests {
         let s = push_summary("main", Some(279));
         assert!(s.contains("(#279)") && s.contains("###deploy###") && s.contains("### PR description"));
         assert!(push_summary("main", None).contains("do not invent"));
+    }
+
+    #[test]
+    fn the_harness_stays_outside_the_repo_and_can_run_again() {
+        let p = harness(
+            "## Đề xuất\nguard",
+            &["org rỗng".into(), " ".into()],
+            "C:/data/scratch/WP-1",
+            "C:/tmp/web-harness",
+            &["node *".into()],
+        );
+        assert!(p.contains("`C:/data/scratch/WP-1`") && p.contains("`C:/tmp/web-harness`"));
+        assert!(p.contains("another repository") && p.contains("Negative control"));
+        assert!(p.contains("`PASS: <case>`") && p.contains("\"negativeControl\""));
+        assert!(p.contains("What to check:\n- org rỗng\n\n"));
+        assert!(p.contains("`node *`") && p.contains("<plan>\n## Đề xuất"));
+        assert!(harness("x", &[], "s", "l", &[]).contains("its edge cases"));
     }
 }

@@ -13,6 +13,7 @@ import {
   mockRepoState,
   mockSaveToken,
   mockSetTasksDir,
+  mockSetHarnessDir,
   mockSetOnClose,
   mockSetQuotaProbe,
   mockSetStepChoice,
@@ -198,6 +199,13 @@ export async function pushCheck(wpId: number): Promise<PushCheck> {
   if (!isTauri()) await new Promise((r) => window.setTimeout(r, 700));
   return check;
 }
+/** Opens the scratch folder, library folder or screenshot a Harness / Test trình duyệt result
+ *  shows. */
+export const openTaskPath = (wpId: number, path: string): Promise<null> =>
+  call("open_task_path", () => null, { wpId, path });
+/** Settings → Repo & nhánh: the harness library of one repo (`dir` absent = the default). */
+export const setHarnessDir = (repo: string, dir?: string): Promise<SettingsView> =>
+  call("set_harness_dir", () => mockSetHarnessDir(repo, dir), { repo, dir });
 /** Continues a finished run's AI session in a console window in the task's repo. */
 export const openResume = (wpId: number, runId: number): Promise<null> =>
   call("open_resume", () => null, { wpId, runId });

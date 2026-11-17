@@ -20,6 +20,7 @@ import {
   openResume,
   openTaskFolder,
   openTaskLink,
+  openTaskPath,
   saveBrief,
 } from "../../ipc/client";
 import type { Decision, FindingView, FlowAction, TaskDetail } from "../../ipc/types";
@@ -254,6 +255,8 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
                   onChat={showChat}
                   onAllow={allow}
                   onResume={resume}
+                  onAction={act}
+                  onOpenPath={(path) => void openTaskPath(wpId, path).catch((e: unknown) => setError(errorMessage(e)))}
                 />
               )}
               {tab === "chat" && (

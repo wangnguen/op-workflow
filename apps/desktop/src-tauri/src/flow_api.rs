@@ -33,6 +33,13 @@ pub fn decide_finding(
     service.decide_finding(&decision)
 }
 
+/// Open the scratch folder, library folder or screenshot a Harness / Test trình duyệt result
+/// shows (or anything in the task folder).
+#[tauri::command]
+pub fn open_task_path(wp_id: u64, path: String, service: State<'_, AppService>) -> Result<(), ApiError> {
+    service.open_task_path(wp_id, &path)
+}
+
 /// Save the brief the user edited before the AI reads it.
 #[tauri::command(async)]
 pub fn save_brief(wp_id: u64, text: String, service: State<'_, AppService>) -> Result<TaskDetail, ApiError> {

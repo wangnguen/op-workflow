@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { agentLabel, stepLabel, vi } from "../../i18n/vi";
-import type { DeniedCall, RuleOption, RunSummary, StepState, TaskDetail } from "../../ipc/types";
+import type { DeniedCall, FlowAction, RuleOption, RunSummary, StepState, TaskDetail } from "../../ipc/types";
 import { formatClock, formatDuration, formatHourMinute, formatTokens, formatUsd } from "../../shared/format";
 import { useNow } from "../../shared/hooks";
 import { modelText } from "../../shared/models";
 import { Icon } from "../../shared/ui/Icon";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
 import { runMs } from "./runs";
+import { TestsSection } from "./TestsSection";
 
 const t = vi.flow.progress;
 
@@ -17,13 +18,16 @@ interface Props {
   /** resolves to whether the rule went into config */
   onAllow: (rule: string) => Promise<boolean>;
   onResume: (runId: number) => void;
+  onAction: (action: FlowAction) => void;
+  /** opens a harness / library folder or a screenshot */
+  onOpenPath: (path: string) => void;
 }
 
 const ICON: Record<RunSummary["state"], StepState> = { running: "running", done: "done", failed: "failed" };
 
 /** Tiến trình: one row per run of a step (time, duration, cost, model, result in one line), the
  *  commands the CLI refused with "Cho phép lệnh này", and the detailed log folded below. */
-export function ProgressTab({ detail: d, busy, onChat, onAllow, onResume }: Props) {
+export function ProgressTab({ detail: d, busy, onChat, onAllow, onResume, onAction, onOpenPath }: Props) {
   const running = d.runs.some((r) => r.state === "running");
   const now = useNow(running ? 1000 : 30_000);
   const [logOpen, setLogOpen] = useState(false);
@@ -31,6 +35,7 @@ export function ProgressTab({ detail: d, busy, onChat, onAllow, onResume }: Prop
   const index = (step: RunSummary["step"]) => d.steps.find((s) => s.kind === step)?.index;
   return (
     <div className="task-pane">
+      <TestsSection tests={d.tests ?? []} busy={busy} onAction={onAction} onOpenPath={onOpenPath} />
       <ol className="timeline" aria-label={t.label}>
         {intake?.startedAt && (
           <li className="tl-row tl-row--done">

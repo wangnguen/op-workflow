@@ -72,6 +72,16 @@ pub fn set_quota_probe(
     service.set_claude_probe(active_sec, idle_min)
 }
 
+/// Settings → Repo & nhánh → Thư viện harness of one repo (`None` = the default folder).
+#[tauri::command]
+pub fn set_harness_dir(
+    service: State<'_, AppService>,
+    repo: String,
+    dir: Option<String>,
+) -> Result<SettingsView, ApiError> {
+    service.set_harness_dir(&repo, dir.as_deref())
+}
+
 /// Settings → Các bước AI: models and effort levels of the Claude / Codex CLIs on this machine.
 /// Starts both CLIs (no prompt, no tokens, about 2 s), so off the UI thread.
 #[tauri::command(async)]

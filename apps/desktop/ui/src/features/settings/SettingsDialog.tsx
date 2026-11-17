@@ -15,11 +15,21 @@ import {
   revealPath,
   saveNxToken,
   setNotify,
+  setHarnessDir,
   setOnClose,
   setQuotaProbe,
   setTasksDir,
 } from "../../ipc/client";
-import type { CloseChoice, NotifyKind, Provider, ProviderLink, SettingsView, StepModels, UpdateView } from "../../ipc/types";
+import type {
+  CloseChoice,
+  HarnessLib,
+  NotifyKind,
+  Provider,
+  ProviderLink,
+  SettingsView,
+  StepModels,
+  UpdateView,
+} from "../../ipc/types";
 import { LinkActions } from "../quota/QuotaPopover";
 import { linkProblem } from "../quota/quota";
 import { formatRelative } from "../../shared/format";
@@ -134,6 +144,84 @@ function PathLink({ path, onError }: { path: string; onError: (e: string | null)
       <span>{path}</span>
       <Icon name="folder" size={12} />
     </button>
+  );
+}
+
+/** One repo's harness library: the folder (opens in Explorer), changed in place. */
+function HarnessLibRow({
+  lib,
+  busy,
+  onSave,
+  onError,
+}: {
+  lib: HarnessLib;
+  busy: boolean;
+  onSave: (dir?: string) => Promise<boolean>;
+  onError: (e: string | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [dir, setDir] = useState(lib.dir);
+  const save = (value?: string) => void onSave(value).then((ok) => ok && setEditing(false));
+  const state = [lib.custom ? t.harnessCustom : t.harnessDefault, lib.exists ? undefined : t.harnessMissing]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <Row id={`harness:${lib.repo}`} label={lib.repo} hint={state} stacked>
+      <div className="set-harness">
+        {editing ? (
+          <input
+            className="input mono set-harness-input"
+            value={dir}
+            autoFocus
+            spellCheck={false}
+            aria-label={`${t.harnessLibs} · ${lib.repo}`}
+            placeholder={t.harnessPlaceholder}
+            onChange={(e) => setDir(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") save(dir.trim() || undefined);
+              if (e.key === "Escape") {
+                e.stopPropagation();
+                setEditing(false);
+              }
+            }}
+          />
+        ) : lib.exists ? (
+          <PathLink path={lib.dir} onError={onError} />
+        ) : (
+          <span className="mono set-harness-path">{lib.dir}</span>
+        )}
+        <span className="set-actions">
+          {editing ? (
+            <>
+              <button className="btn btn--ghost btn--sm" disabled={busy} onClick={() => setEditing(false)}>
+                {t.harnessCancel}
+              </button>
+              <button className="btn btn--sm" disabled={busy || !dir.trim()} onClick={() => save(dir.trim())}>
+                {t.harnessSave}
+              </button>
+            </>
+          ) : (
+            <>
+              {lib.custom && (
+                <button className="btn btn--ghost btn--sm" disabled={busy} onClick={() => save(undefined)}>
+                  {t.harnessReset}
+                </button>
+              )}
+              <button
+                className="btn btn--sm"
+                disabled={busy}
+                onClick={() => {
+                  setDir(lib.dir);
+                  setEditing(true);
+                }}
+              >
+                {t.harnessChange}
+              </button>
+            </>
+          )}
+        </span>
+      </div>
+    </Row>
   );
 }
 
@@ -296,6 +384,22 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
         onChanged();
       })
       .catch((e: unknown) => setError(errorMessage(e)))
+      .finally(() => setBusy(false));
+  };
+
+  /** Thư viện harness of one repo; resolves to whether it was saved. */
+  const saveHarness = (repo: string, dir?: string): Promise<boolean> => {
+    setBusy(true);
+    setError(null);
+    return setHarnessDir(repo, dir)
+      .then((v) => {
+        setView(v);
+        return true;
+      })
+      .catch((e: unknown) => {
+        setError(errorMessage(e));
+        return false;
+      })
       .finally(() => setBusy(false));
   };
 
@@ -552,6 +656,23 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                       ))}
                     </Group>
                     <p className="set-note">{t.rememberedHint}</p>
+                    <Group title={t.harnessLibs}>
+                      {view && (view.harnessLibs ?? []).length === 0 && (
+                        <div className="set-row">
+                          <span className="dim">{t.harnessLibsEmpty}</span>
+                        </div>
+                      )}
+                      {(view?.harnessLibs ?? []).map((lib) => (
+                        <HarnessLibRow
+                          key={lib.repo}
+                          lib={lib}
+                          busy={busy}
+                          onSave={(dir) => saveHarness(lib.repo, dir)}
+                          onError={setPathError}
+                        />
+                      ))}
+                    </Group>
+                    <p className="set-note">{t.harnessLibsHint}</p>
                     <Row id="config" label={t.editConfig}>
                       <button className="btn btn--sm" disabled={isMockMode()} onClick={() => void openConfig()}>
                         {t.openConfig}

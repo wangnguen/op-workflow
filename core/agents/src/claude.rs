@@ -373,6 +373,47 @@ pub fn code_args(resume: Option<&str>, budget_usd: f64, allowed_bash: &[String])
     stream_json(args)
 }
 
+/// Commands a harness may run besides the repo's `allowBash`: build and run TypeScript /
+/// JavaScript outside the repo.
+pub const HARNESS_BASH: [&str; 5] = [
+    "node *",
+    "npx tsc *",
+    "npx tsx *",
+    "npx ts-node *",
+    "npx vitest *",
+];
+
+/// [5] Harness, headless: like a code step (edits accepted, Bash only from the allow list, git
+/// writes refused) but its files go to `dirs` (the task's scratch folder and the repo's harness
+/// library), added with `--add-dir`. The repo itself must stay as it was; the app checks.
+pub fn harness_args(budget_usd: f64, allowed_bash: &[String], dirs: &[String]) -> Vec<String> {
+    let mut args = strings(&["-p", "--strict-mcp-config", "--tools", CODE_TOOLS]);
+    let dirs: Vec<&String> = dirs.iter().filter(|d| !d.trim().is_empty()).collect();
+    if !dirs.is_empty() {
+        args.push("--add-dir".into());
+        args.extend(dirs.into_iter().cloned());
+    }
+    args.extend(strings(&["--permission-mode", "acceptEdits"]));
+    let mut allowed: Vec<String> = HARNESS_BASH.iter().map(|e| bash_rule(e)).collect();
+    for e in allowed_bash.iter().filter(|e| !e.trim().is_empty()) {
+        let rule = bash_rule(e);
+        if !allowed.contains(&rule) {
+            allowed.push(rule);
+        }
+    }
+    args.push("--allowedTools".into());
+    args.push(allowed.join(" "));
+    args.extend(strings(&[
+        "--permission-prompts",
+        "none",
+        "--disallowedTools",
+        DISALLOWED_GIT,
+        "--max-budget-usd",
+        &budget(budget_usd),
+    ]));
+    stream_json(args)
+}
+
 /// `/review-local` run headless. The repo command hard-codes `development`, so the real base
 /// of the task is passed in; `Skill` is blocked so it cannot chain into `/push-summary`.
 pub fn review_local_args(base: &str, budget_usd: f64) -> Vec<String> {
@@ -556,6 +597,31 @@ mod tests {
                 .windows(2)
                 .any(|w| w[0] == "--max-budget-usd" && w[1] == "1.5")
         );
+    }
+
+    #[test]
+    fn a_harness_writes_only_in_its_own_folders() {
+        let args = harness_args(
+            2.0,
+            &["npx tsc *".into(), "npm test *".into()],
+            &["C:/data/scratch/WP-1".into(), "C:/tmp/web-harness".into()],
+        );
+        let at = args.iter().position(|a| a == "--add-dir").unwrap();
+        assert_eq!(
+            args[at + 1..at + 3],
+            ["C:/data/scratch/WP-1", "C:/tmp/web-harness"]
+        );
+        assert_eq!(args[at + 3], "--permission-mode");
+        let allowed = &args[args.iter().position(|a| a == "--allowedTools").unwrap() + 1];
+        assert!(allowed.starts_with("Bash(node *) Bash(npx tsc *)"), "{allowed}");
+        // the repo's own rules are added once
+        assert_eq!(allowed.matches("Bash(npx tsc *)").count(), 1);
+        assert!(allowed.ends_with("Bash(npm test *)"));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--disallowedTools" && w[1].contains("git push"))
+        );
+        assert!(!harness_args(1.0, &[], &[]).contains(&"--add-dir".to_owned()));
     }
 
     #[test]

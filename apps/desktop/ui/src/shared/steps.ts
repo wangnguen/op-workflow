@@ -29,7 +29,17 @@ export const OPTIONAL_STEPS: readonly StepKind[] = ["checks", "harness", "browse
 export const FIX_STEPS: readonly StepKind[] = ["fix", "fixCross"];
 
 /** Steps an AI runs, as Settings → Các bước AI lists them; "fix" stands for both Sửa lỗi. */
-export const AI_STEPS: readonly StepKind[] = ["analyze", "implement", "reviewLocal", "fix", "crossReview", "finalReview", "pushSummary"];
+export const AI_STEPS: readonly StepKind[] = [
+  "analyze",
+  "implement",
+  "harness",
+  "reviewLocal",
+  "fix",
+  "crossReview",
+  "finalReview",
+  "browserTest",
+  "pushSummary",
+];
 
 /** "8" for Review chéo, "7 · 9" for Sửa lỗi (one setting covers both fix steps). */
 export function stepNumber(kind: StepKind): string {

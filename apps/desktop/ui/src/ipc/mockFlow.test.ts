@@ -42,12 +42,21 @@ describe("12-step flow in the preview", () => {
     answerAll(9);
     mockFlowAction(9, { type: "approvePlan" });
 
-    // Viết code → Kiểm tra runs at once (the app's commands), Harness is passed ("bỏ qua") → Tự review
+    // Viết code → Kiểm tra runs at once (the app's commands) → Harness (advised by the analysis)
     let d = finishStep(9);
-    expect([d.status, d.current]).toEqual(["ready", "reviewLocal"]);
-    expect([stateOf(d, "checks"), stateOf(d, "harness")]).toEqual(["done", "skipped"]);
+    expect([d.status, d.current]).toEqual(["ready", "harness"]);
+    expect(stateOf(d, "checks")).toBe("done");
     expect(d.runs.find((r) => r.step === "checks")).toMatchObject({ agent: "shell", state: "done" });
     expect(stateOf(d, "browserTest")).toBe("pending");
+    // Harness PASSes and is kept in the library → Tự review; "Bỏ khỏi thư viện" works once
+    mockFlowAction(9, { type: "run" });
+    d = finishStep(9);
+    expect([d.status, d.current, stateOf(d, "harness")]).toEqual(["ready", "reviewLocal", "done"]);
+    expect(d.tests?.[0]).toMatchObject({ step: "harness", passed: true, runs: 1, command: "npx tsx run.mjs" });
+    expect(d.tests?.[0]?.library).toMatch(/org-guard$/);
+    d = mockFlowAction(9, { type: "dropHarness" });
+    expect(d.tests?.[0]?.library).toBeUndefined();
+    expect(() => mockFlowAction(9, { type: "dropHarness" })).toThrow(/không có trong thư viện/);
 
     // Tự review finds a high → the user picks it → the first Sửa lỗi (7) → "Review chéo?"
     mockFlowAction(9, { type: "run" });
@@ -89,6 +98,8 @@ describe("12-step flow in the preview", () => {
     mockFlowAction(9, { type: "run" });
     finishStep(9);
     answerAll(9);
+    // no harness for this one: straight to Tự review
+    mockFlowAction(9, { type: "setUses", step: "harness", on: false });
     mockFlowAction(9, { type: "approvePlan" });
     finishStep(9);
     mockFlowAction(9, { type: "run" });

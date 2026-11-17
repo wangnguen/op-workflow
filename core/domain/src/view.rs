@@ -350,6 +350,9 @@ pub struct SettingsView {
     /// What the window's X does (`onClose`).
     #[serde(default)]
     pub on_close: CloseChoice,
+    /// Harness library of every known repo.
+    #[serde(default)]
+    pub harness_libs: Vec<HarnessLib>,
 }
 
 /// What closing the main window does (`onClose` in config): ask each time, go to the tray (the AI
@@ -502,6 +505,19 @@ pub struct TasksDirChange {
     pub moved: u32,
     /// Folders that stayed behind, and why.
     pub warnings: Vec<String>,
+}
+
+/// Harness library of one repo (Settings → Repo & nhánh).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessLib {
+    /// The repo as written in config (`~/Desktop/web`).
+    pub repo: String,
+    pub dir: String,
+    /// Set in `repos.<repo>.harnessDir` (otherwise the default `C:\tmp\<repo>-harness`).
+    pub custom: bool,
+    /// The folder exists (made the first time a task of the repo uses Harness).
+    pub exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1293,6 +1309,52 @@ pub struct TaskDetail {
     /// Comments the user has not seen in the Comment tab (OpenProject + last issue read).
     #[serde(default)]
     pub new_comments: u32,
+    /// The last result of Harness and Test trình duyệt, when they ran.
+    #[serde(default)]
+    pub tests: Vec<TestView>,
+}
+
+/// What Harness (step 5) or Test trình duyệt (step 11) found the last time it ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestView {
+    pub step: StepKind,
+    pub passed: bool,
+    #[serde(default)]
+    pub summary: String,
+    /// Failed cases first.
+    #[serde(default)]
+    pub cases: Vec<TestCase>,
+    /// When it last ran.
+    pub at: String,
+    /// Runs so far (the AI's build and the app's runs after each fix).
+    pub runs: u32,
+    /// Harness: the command the app runs again after each fix, and the folder it runs in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// Harness: the broken copy made it FAIL (`None` = the AI did not say).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative: Option<bool>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub negative_detail: String,
+    /// Harness: the folder it was kept in, in the repo's harness library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<String>,
+}
+
+/// One case of a harness or browser test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestCase {
+    pub name: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// Browser test: the screenshot of the case (a file in the task folder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<String>,
 }
 
 /// A button in the task window or on the card.
@@ -1329,6 +1391,8 @@ pub enum FlowAction {
     PickFindings { fix: bool },
     /// After-fix gate: the answer to "Review chéo lại?".
     AfterFix { choice: AfterFix },
+    /// "Bỏ khỏi thư viện": take the harness this task kept out of the repo's harness library.
+    DropHarness,
     /// Write the push summary again (optionally for another issue number).
     RerunPush {
         #[serde(default)]

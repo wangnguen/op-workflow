@@ -13,8 +13,7 @@ use crate::flow::{agent_for, default_effort, step_config, step_key};
 use crate::models::check_effort;
 
 /// The AI steps with a setting of their own, in workflow order. Nhận task and Kiểm tra run no
-/// AI; the second Sửa lỗi shares the first one's setting; Harness and Test trình duyệt get
-/// theirs when they can run.
+/// AI; the second Sửa lỗi shares the first one's setting.
 pub fn ai_steps() -> impl Iterator<Item = StepKind> {
     StepKind::ALL.into_iter().filter(|s| has_setting(*s))
 }
@@ -193,7 +192,10 @@ mod tests {
             run("analyze", None, "2026-11-14T07:00:00Z", "bad", None),
         ];
         let rows = settings(&config, &runs);
-        assert_eq!(rows.len(), 7);
+        // Harness and Test trình duyệt have their own row; Nhận task, Kiểm tra and step 9 not
+        let steps: Vec<StepKind> = rows.iter().map(|r| r.step).collect();
+        assert_eq!(steps.len(), 9);
+        assert!(steps.contains(&StepKind::Harness) && steps.contains(&StepKind::BrowserTest));
         assert_eq!(rows[0].step, StepKind::Analyze);
         let fix = rows.iter().find(|r| r.step == StepKind::Fix).unwrap();
         assert_eq!(fix.model.as_deref(), Some("claude-sonnet-5-5"));

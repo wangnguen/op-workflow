@@ -22,6 +22,8 @@ pub enum CheckKind {
     Prettier,
     /// A configured command the app does not know: its exit code decides.
     Other,
+    /// The task's harness (step 5), run from its scratch folder (`dir` is absolute).
+    Harness,
 }
 
 /// One command to run.
@@ -97,8 +99,8 @@ impl CheckRunner for ProcessRunner {
             ],
             account: Account::Subscription,
             timeout,
-            // tsc / eslint / prettier start nothing that outlives them
-            sweep: false,
+            // tsc / eslint / prettier start nothing that outlives them; a harness may
+            sweep: check.kind == CheckKind::Harness,
         };
         let mut out = String::new();
         let outcome = run(&spec, stop, &mut |line| {
@@ -465,7 +467,7 @@ pub fn read(repo: &Path, check: &Check, code: Option<i32>, output: &str, changed
                 }
             }
         }
-        CheckKind::Other => {
+        CheckKind::Other | CheckKind::Harness => {
             if code != Some(0) {
                 r.errors = tail(&output);
                 if r.errors.is_empty() {

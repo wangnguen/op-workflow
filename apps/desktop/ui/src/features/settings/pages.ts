@@ -24,6 +24,7 @@ export const ENTRIES: SettingEntry[] = [
   { page: "connection", id: "github", label: t.githubSection, keywords: "github issue chrome đọc remote debugging allow trình duyệt browser" },
   { page: "repos", id: "workspaces", label: t.workspaces, keywords: "workspace thư mục folder desktop quét scan" },
   { page: "repos", id: "config", label: t.editConfig, keywords: "config json cấu hình repo branch mẫu template" },
+  { page: "repos", id: "harnessLibs", label: t.harnessLibs, keywords: "harness thư viện library scratch test tmp" },
   ...AI_STEPS.map(
     (step): SettingEntry => ({
       page: "steps",
