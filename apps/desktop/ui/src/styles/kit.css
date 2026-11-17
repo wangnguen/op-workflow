@@ -186,7 +186,9 @@ select.input {
   inset: 0;
   z-index: 50;
   display: flex;
-  align-items: flex-start;
+  /* in the middle, like the start and settings dialogs; a sheet that grows or shrinks after it
+     opens glides to its new place (shared/sheetMotion.ts) */
+  align-items: center;
   justify-content: center;
   padding: var(--sheet-gap) 16px;
   background: var(--scrim);
