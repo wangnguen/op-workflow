@@ -1,6 +1,6 @@
 # op-workflow
 
-App desktop (Tauri v2) điều phối Claude Code và Codex theo luồng 12 bước: nhận task OpenProject → phân tích → bạn duyệt plan → code → kiểm tra → harness → review và sửa lỗi bạn chọn → test trình duyệt → Push summary. App chạy trên máy bạn, **không bao giờ tự commit hay push**.
+App desktop (Tauri v2) điều phối Claude Code và Codex theo luồng 12 bước: nhận task OpenProject → phân tích → bạn duyệt plan → code → kiểm tra → harness → review và sửa lỗi bạn chọn → test trình duyệt → review chốt → Push summary. App chạy trên máy bạn, **không bao giờ tự commit hay push**.
 
 Kiến trúc: [docs/architecture.md](docs/architecture.md). Muốn sửa phần nào thì xem [docs/backend-guide.md](docs/backend-guide.md).
 
@@ -36,7 +36,7 @@ Lần đầu mở app: bấm biểu tượng bánh răng → **Cài đặt** →
 | Viết code, Sửa lỗi | Claude, tiếp phiên của bước Phân tích | Sửa file trong working tree. Bash chỉ chạy lệnh trong allowlist (`repos.<repo>.allowBash` và `.claude/settings.json` của repo); `git commit/push/merge/rebase/reset/clean/tag` bị chặn |
 | Tự review, Review chốt | Claude | `/review-local` của repo nếu có (`.claude/commands/review-local.md`), không thì prompt review của app (dải trạng thái ghi rõ cái nào đang chạy); kết quả về dạng lỗi review, viết bằng tiếng Việt. Phần reviewer đánh giá có cần cập nhật docs / test hiện ở cuối tab *Lỗi review* |
 | Review chéo | Codex (`--sandbox read-only`) | Review diff so với base; lỗi chờ bạn chọn. Sau Sửa lỗi bạn quyết có review lại không, không giới hạn số vòng |
-| Test trình duyệt | Claude + Chrome DevTools MCP | Thử kịch bản trong plan bằng Chrome riêng, ghi OK / NG và ảnh; NG chờ bạn chọn có sửa không |
+| Test trình duyệt | Claude + Chrome DevTools MCP | Chạy trước Review chốt, để lần review cuối xem cả phần sửa sau test. Thử kịch bản trong plan bằng Chrome riêng, ghi OK / NG và ảnh; NG chờ bạn chọn có sửa không. Sửa lỗi của Review chốt xong có thể *Chạy lại Test trình duyệt* rồi Review chốt lại |
 | Push summary | Claude | `/push-summary` của repo nếu có, không thì prompt của app: commit message + mô tả PR (giữ ngôn ngữ repo yêu cầu). App không push. Nút *Copy commit* / *Copy PR* trên thẻ và trong cửa sổ task copy thẳng vào clipboard |
 
 Bấm **Mở task** để xem cửa sổ task: các bước, nút cho bước kế tiếp, và các tab *Brief* (sửa được trước khi AI đọc), *Comment*, *Plan*, *Lỗi review* (mỗi lỗi: Sửa / Chấp nhận + lý do / Để sau), *Diff*, *Tiến trình*, *Chat*, *Push summary*, *Log*. Dưới tên mỗi bước là model · effort của lần chạy gần nhất. Mặc định app **dừng sau mỗi bước** để bạn xem kết quả rồi bấm chạy bước tiếp; bật *Tự chạy* trong cửa sổ task (công tắc riêng của từng task; mặc định lấy từ `"steps": { "autoAdvance": true }`) thì app chạy liền tới chỗ cần bạn quyết, rồi dừng và báo (chuông + thông báo Windows). Mỗi lần review (Tự review, Review chéo, Review chốt) báo lỗi, app dừng để bạn chọn lỗi nào cho AI sửa (mỗi lỗi ghi nguồn: /review-local, prompt của app hay Codex, bước và vòng); app không tự sửa lỗi nào chỉ vì mức độ. Sau mỗi lần Sửa lỗi app hỏi *Review chéo lại?*: có thì Codex review thêm một vòng, không thì sang Review chốt (chạy lại Review chốt / Test trình duyệt nếu vừa sửa lỗi của bước đó), hoặc chọn thêm lỗi để sửa. Không giới hạn số vòng. Bước lỗi có nút *Thử lại*, và *Đăng nhập* khi Claude/Codex bị đăng xuất; *Dừng* kill cả cây tiến trình.

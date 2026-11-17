@@ -557,11 +557,12 @@ function reviewNote(found: Omit<FindingView, "state">[], decided: number): strin
 /** Where "go on" leads from the gate the task waits at (`skip_target` in the workflow). */
 function skipTarget(f: Flow): StepKind | undefined {
   if (f.phase !== "gate" || !f.fixFor) return undefined;
-  if (f.gate === "afterFix") return "finalReview";
+  const afterCross: StepKind = f.uses.includes("browserTest") ? "browserTest" : "finalReview";
+  if (f.gate === "afterFix") return f.fixFor === "finalReview" ? "finalReview" : afterCross;
   if (f.gate !== "findings") return undefined;
   if (f.fixFor === "reviewLocal") return "crossReview";
-  if (f.fixFor === "crossReview") return "finalReview";
-  return f.uses.includes("browserTest") ? "browserTest" : "pushSummary";
+  if (f.fixFor === "crossReview") return afterCross;
+  return "pushSummary";
 }
 
 /** Nothing (more) to fix after `review`: on to the next step of the flow. */
@@ -572,11 +573,12 @@ function afterReview(f: Flow, review: Review): void {
     f.round += 1;
     goTo(f, "crossReview");
   } else if (review === "crossReview") {
-    passFix(f, "fixCross");
-    goTo(f, "finalReview");
-  } else {
+    // Test trình duyệt (when the task uses it) comes before Review chốt
     passFix(f, "fixCross");
     enter(f, "browserTest");
+  } else {
+    passFix(f, "fixCross");
+    goTo(f, "pushSummary");
   }
 }
 
@@ -779,7 +781,7 @@ function complete(f: Flow): void {
       f.states.browserTest = "done";
       f.tests = [...f.tests.filter((x) => x.step !== "browserTest"), browserView(n)];
       done("OK 2/2, 1 ảnh");
-      enter(f, "pushSummary");
+      enter(f, "finalReview");
       return;
     }
     case "pushSummary":
@@ -1125,12 +1127,26 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       } else if (action.choice === "pickMore") {
         findingsGate(f, review);
         log(f, "info", "Bạn chọn thêm lỗi để sửa", fix);
+      } else if (action.choice === "browserTest") {
+        if (review !== "finalReview" || !f.uses.includes("browserTest")) {
+          f.states[fix] = "waitingUser";
+          throw fail("flow.notNow", "Chỉ chạy lại Test trình duyệt sau khi sửa lỗi Review chốt, khi task bật bước này");
+        }
+        f.fixFor = undefined;
+        goTo(f, "browserTest");
+        log(f, "info", "Bạn chọn chạy lại Test trình duyệt, sau đó Review chốt lại", fix);
+        startRun(f);
+      } else if (review === "finalReview") {
+        f.fixFor = undefined;
+        goTo(f, "finalReview");
+        log(f, "info", "Không review chéo lại: chạy lại Review chốt", fix);
+        startRun(f);
       } else {
         f.fixFor = undefined;
         passFix(f, "crossReview");
         passFix(f, "fixCross");
-        goTo(f, "finalReview");
-        log(f, "info", "Không review chéo lại: sang Review chốt", fix);
+        enter(f, "browserTest");
+        log(f, "info", `Không review chéo lại: sang ${LABEL[f.current ?? "finalReview"]}`, fix);
         startRun(f);
       }
       break;

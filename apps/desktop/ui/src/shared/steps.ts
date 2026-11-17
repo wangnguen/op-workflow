@@ -11,8 +11,8 @@ export const STEP_ORDER: readonly StepKind[] = [
   "fix",
   "crossReview",
   "fixCross",
-  "finalReview",
   "browserTest",
+  "finalReview",
   "pushSummary",
 ];
 
@@ -25,7 +25,7 @@ export const stepIndex = (kind: StepKind): number => STEP_ORDER.indexOf(kind) + 
  *  then the flow passes them as "bỏ qua". */
 export const OPTIONAL_STEPS: readonly StepKind[] = ["checks", "harness", "browserTest"];
 
-/** The two "Sửa lỗi" steps (7 after Tự review, 9 after Review chéo / Review chốt). */
+/** The two "Sửa lỗi" steps (7 after Tự review, 9 after Review chéo / Test trình duyệt / Review chốt). */
 export const FIX_STEPS: readonly StepKind[] = ["fix", "fixCross"];
 
 /** Steps an AI runs, as Settings → Các bước AI lists them; "fix" stands for both Sửa lỗi. */
@@ -36,8 +36,8 @@ export const AI_STEPS: readonly StepKind[] = [
   "reviewLocal",
   "fix",
   "crossReview",
-  "finalReview",
   "browserTest",
+  "finalReview",
   "pushSummary",
 ];
 

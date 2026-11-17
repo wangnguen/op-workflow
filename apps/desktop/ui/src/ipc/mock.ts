@@ -61,8 +61,8 @@ const FIRST_FRAME: Record<StepKind, number> = {
   fix: 8,
   crossReview: 9,
   fixCross: 11,
+  browserTest: 13,
   finalReview: 13,
-  browserTest: 15,
   pushSummary: 15,
 };
 

@@ -319,7 +319,7 @@ const BROWSER_JSON: &str = "End with one fenced ```json block (nothing after it)
 `file` = the repository file an NG case points to, when you know it.\n\
 Write summary and detail in Vietnamese.";
 
-/// [11] Test trình duyệt: try the change in Chrome through the Chrome DevTools MCP tools.
+/// [10] Test trình duyệt: try the change in Chrome through the Chrome DevTools MCP tools.
 /// `scenario` = what the analysis proposed; `shots` = where screenshots go (the task folder);
 /// `allowed` = every shell command the step may run.
 pub fn browser_test(plan: &str, brief: &str, scenario: &[String], shots: &str, allowed: &[String]) -> String {

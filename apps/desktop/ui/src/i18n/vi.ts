@@ -443,6 +443,8 @@ export const vi = {
       again
         ? `Bỏ qua Review chéo, chạy lại ${step} (bước đã tìm ra các lỗi vừa sửa)`
         : `Bỏ qua Review chéo, chạy ${step}`,
+    retest: "Chạy lại Test trình duyệt",
+    retestHint: "Thử lại phần vừa sửa trong trình duyệt trước, rồi Review chốt lại",
     pickMore: (n: number) => `Chọn thêm lỗi (${n})`,
     pickMoreHint: "Quay lại các lỗi chưa sửa của lần review vừa rồi để chọn sửa thêm",
     showFindings: "Xem lỗi",
@@ -869,10 +871,10 @@ export const stepHint: Record<StepKind, string> = {
   reviewLocal: "/review-local lần đầu, ngay sau khi code",
   fix: "AI sửa các lỗi của Tự review",
   crossReview: "AI còn lại (Codex) review chéo phần đã sửa, chỉ đọc",
-  fixCross: "AI sửa các lỗi của Review chéo / Review chốt",
-  finalReview: "/review-local lần chốt; lỗi nào cũng chờ bạn chọn có cho AI sửa không",
+  fixCross: "AI sửa các lỗi của Review chéo / Test trình duyệt / Review chốt",
+  finalReview: "/review-local lần chốt, sau Test trình duyệt nên xem cả phần sửa sau test; lỗi nào cũng chờ bạn chọn có cho AI sửa không",
   browserTest:
-    "Không bắt buộc (bật/tắt ở cổng Duyệt plan): AI mở app như repo vẫn chạy ở máy rồi thử kịch bản của plan trong Chrome (chỉ Chrome DevTools MCP, không sửa file). Ca NG có ảnh trong thư mục task, vào cổng chọn lỗi; sửa ở bước 9 rồi test lại. Dev server và Chrome nó bật được tắt khi bước xong.",
+    "Không bắt buộc (bật/tắt ở cổng Duyệt plan): AI mở app như repo vẫn chạy ở máy rồi thử kịch bản của plan trong Chrome (chỉ Chrome DevTools MCP, không sửa file). Ca NG có ảnh trong thư mục task, vào cổng chọn lỗi; sửa ở bước 9 rồi test lại. Chạy trước Review chốt. Dev server và Chrome nó bật được tắt khi bước xong.",
   pushSummary: "Soạn commit message và mô tả PR. App không push: bạn tự commit và push",
 };
 

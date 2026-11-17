@@ -5,9 +5,13 @@
 //! intake -> analyze -> <plan review gate> -> implement -> checks -> harness
 //!   -> reviewLocal -> <findings gate> -> fix -> <"Review chéo lại?"> -> crossReview
 //!   -> <findings gate> -> fixCross -> <"Review chéo lại?"> -> crossReview (again) …
-//!   -> finalReview -> <findings gate> -> fixCross -> <"Review chéo lại?"> -> finalReview (again) …
-//!   -> browserTest -> pushSummary
+//!   -> browserTest -> <findings gate> -> fixCross -> <"Review chéo lại?"> -> browserTest (again) …
+//!   -> finalReview -> <findings gate> -> fixCross -> <"Review chéo lại?"> -> finalReview (again)
+//!      (or browserTest again, then finalReview) …
+//!   -> pushSummary
 //! ```
+//! Test trình duyệt runs before Review chốt (the user moved it on 2026-11-17), so the last
+//! review also sees what was fixed after the browser test.
 //! Every review that reports something stops at the findings gate: the user picks what the AI
 //! fixes (or goes on without fixing). Every fix stops at the after-fix gate: the user decides
 //! whether the other AI reviews it again. There is no cap on rounds or fixes.
@@ -44,12 +48,12 @@ pub enum StepKind {
     Fix,
     /// The other AI (Codex by default) reviews the fixed code.
     CrossReview,
-    /// Fixes what the cross review or the final review found.
+    /// Fixes what the cross review, the browser test or the final review found.
     FixCross,
-    /// `/review-local` again before the push summary.
-    FinalReview,
     /// Chrome DevTools MCP test of the app. Optional.
     BrowserTest,
+    /// `/review-local` again before the push summary: the last look at the code.
+    FinalReview,
     PushSummary,
 }
 
@@ -64,8 +68,8 @@ impl StepKind {
         StepKind::Fix,
         StepKind::CrossReview,
         StepKind::FixCross,
-        StepKind::FinalReview,
         StepKind::BrowserTest,
+        StepKind::FinalReview,
         StepKind::PushSummary,
     ];
 
@@ -81,8 +85,8 @@ impl StepKind {
             StepKind::Fix => 7,
             StepKind::CrossReview => 8,
             StepKind::FixCross => 9,
-            StepKind::FinalReview => 10,
-            StepKind::BrowserTest => 11,
+            StepKind::BrowserTest => 10,
+            StepKind::FinalReview => 11,
             StepKind::PushSummary => 12,
         }
     }
@@ -122,7 +126,7 @@ impl StepKind {
 }
 
 /// The Sửa lỗi step that fixes what `review` found: step 7 after Harness or Tự review, step 9
-/// otherwise (Review chéo, Review chốt, Test trình duyệt).
+/// otherwise (Review chéo, Test trình duyệt, Review chốt).
 pub fn fix_step_of(review: StepKind) -> StepKind {
     if matches!(review, StepKind::ReviewLocal | StepKind::Harness) {
         StepKind::Fix
@@ -160,11 +164,14 @@ pub enum Phase {
 pub enum AfterFix {
     /// Yes: the other AI reviews the change again (a new cross-review round).
     CrossReview,
-    /// No: on to the final review; after a fix of the final review, that review runs again
-    /// (the step that found the problems).
+    /// No: on to the next step (Test trình duyệt when the task uses it, else Review chốt);
+    /// after a fix of what the browser test or the final review found, that step runs again.
     Next,
     /// Back to the findings of the review that was just fixed, to pick more of them.
     PickMore,
+    /// After a fix of the final review's findings: try the fixed code in the browser again,
+    /// then the final review runs again. Only when the task uses Test trình duyệt.
+    BrowserTest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,7 +226,13 @@ pub struct Workflow {
     /// Optional steps this task runs; the other optional steps are skipped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     uses: Vec<StepKind>,
+    /// Order of `states` on disk ([`LAYOUT`]).
+    layout: u8,
 }
+
+/// Order of the saved `states`: 2 = Test trình duyệt (slot 10) before Review chốt (slot 11).
+/// Saves without it (1) have Review chốt in slot 10 and Test trình duyệt in slot 11.
+const LAYOUT: u8 = 2;
 
 /// What a saved workflow looks like on disk: 12 states now, 8 before the 12-step flow. Older
 /// saves also carry `maxRounds` (the cap on cross-review rounds is gone; serde ignores it).
@@ -234,6 +247,8 @@ struct SavedWorkflow {
     fix_for: Option<StepKind>,
     #[serde(default)]
     uses: Vec<StepKind>,
+    #[serde(default)]
+    layout: u8,
 }
 
 impl TryFrom<SavedWorkflow> for Workflow {
@@ -241,13 +256,17 @@ impl TryFrom<SavedWorkflow> for Workflow {
 
     fn try_from(s: SavedWorkflow) -> Result<Self, Self::Error> {
         let legacy = s.states.len() == LEGACY_STEP_COUNT;
-        let states = if legacy {
+        let mut states = if legacy {
             upgrade_states(&s.states, s.round)
         } else {
             s.states
                 .try_into()
                 .map_err(|v: Vec<StepState>| format!("{} step states, expected {STEP_COUNT}", v.len()))?
         };
+        // saved (or upgraded) with Review chốt before Test trình duyệt
+        if s.layout < LAYOUT {
+            states.swap(9, 10);
+        }
         // before the 12-step flow one "fix" served every review: after Codex had reviewed (round
         // > 0) it was the fix that is now step 9
         let phase = |p: Phase| match p {
@@ -261,11 +280,13 @@ impl TryFrom<SavedWorkflow> for Workflow {
             round: s.round,
             fix_for: s.fix_for,
             uses: s.uses,
+            layout: LAYOUT,
         })
     }
 }
 
-/// The 8 states of a task saved before the 12-step flow, in the 12-step layout. Steps it already
+/// The 8 states of a task saved before the 12-step flow, in the first 12-step layout (Review
+/// chốt in slot 10, Test trình duyệt in slot 11; the caller swaps them). Steps it already
 /// went past without them (Kiểm tra, Harness, Test trình duyệt) show as skipped, the ones ahead
 /// stay pending. Its one "fix" becomes step 9 once Codex had reviewed (`round` > 0); step 7 then
 /// shows as skipped (the old data cannot tell whether the first review needed a fix).
@@ -313,6 +334,7 @@ impl Workflow {
             round: 0,
             fix_for: None,
             uses: Vec::new(),
+            layout: LAYOUT,
         }
     }
 
@@ -382,16 +404,28 @@ impl Workflow {
     }
 
     /// Where the gate's "go on" answer leads: past the findings gate without fixing, or "No" at
-    /// the after-fix gate (the final review, again when it was the one fixed; the browser test
-    /// again after a fix of what it found).
+    /// the after-fix gate (the browser test or the final review again when it was the one
+    /// fixed; otherwise the step after the cross review).
     pub fn skip_target(&self) -> Option<StepKind> {
         let review = self.gate_review()?;
         match self.phase {
             Phase::Gate(GateKind::Findings) => Some(self.after_review_target(review)),
-            Phase::Gate(GateKind::AfterFix) if review == StepKind::BrowserTest => Some(StepKind::BrowserTest),
-            Phase::Gate(GateKind::AfterFix) => Some(StepKind::FinalReview),
+            Phase::Gate(GateKind::AfterFix)
+                if matches!(review, StepKind::BrowserTest | StepKind::FinalReview) =>
+            {
+                Some(review)
+            }
+            Phase::Gate(GateKind::AfterFix) => Some(self.after_review_target(StepKind::CrossReview)),
             _ => None,
         }
+    }
+
+    /// The after-fix gate may offer Test trình duyệt again: the final review's findings were
+    /// fixed and the task uses the browser test.
+    pub fn can_retest(&self) -> bool {
+        self.phase == Phase::Gate(GateKind::AfterFix)
+            && self.gate_review() == Some(StepKind::FinalReview)
+            && self.uses(StepKind::BrowserTest)
     }
 
     pub fn apply(&mut self, event: WorkflowEvent) -> DomainResult<()> {
@@ -471,15 +505,25 @@ impl Workflow {
                         self.findings_gate(review);
                         Ok(())
                     }
-                    // the browser test runs again on the fixed code
-                    AfterFix::Next if review == StepKind::BrowserTest => self.run(StepKind::BrowserTest),
+                    // the step that found the problems runs again on the fixed code
+                    AfterFix::Next if review == StepKind::BrowserTest => self.run(review),
+                    AfterFix::Next if review == StepKind::FinalReview => {
+                        self.fix_for = None;
+                        self.run(review)
+                    }
                     AfterFix::Next => {
                         self.fix_for = None;
                         // the cross review that was not wanted is "bỏ qua", not "chưa tới"
                         self.pass(StepKind::CrossReview);
                         self.pass(StepKind::FixCross);
-                        self.run(StepKind::FinalReview)
+                        self.run(StepKind::BrowserTest)
                     }
+                    // the fixed code in the browser again; Review chốt follows it
+                    AfterFix::BrowserTest if self.can_retest() => {
+                        self.fix_for = None;
+                        self.run(StepKind::BrowserTest)
+                    }
+                    AfterFix::BrowserTest => Err(DomainError::NotCurrentStep(StepKind::BrowserTest)),
                 }
             }
 
@@ -594,10 +638,16 @@ impl Workflow {
         match review {
             StepKind::Harness => StepKind::ReviewLocal,
             StepKind::ReviewLocal => StepKind::CrossReview,
-            StepKind::CrossReview => StepKind::FinalReview,
-            StepKind::FinalReview if self.uses(StepKind::BrowserTest) => StepKind::BrowserTest,
+            StepKind::CrossReview if self.uses(StepKind::BrowserTest) => StepKind::BrowserTest,
+            StepKind::CrossReview | StepKind::BrowserTest => StepKind::FinalReview,
+            _ if self.browser_test_left() => StepKind::BrowserTest,
             _ => StepKind::PushSummary,
         }
+    }
+
+    /// A task saved in the old order may finish Review chốt with Test trình duyệt still ahead.
+    fn browser_test_left(&self) -> bool {
+        self.uses(StepKind::BrowserTest) && self.state_of(StepKind::BrowserTest) == StepState::Pending
     }
 
     /// Nothing (more) to fix after `review`: on to the next step of the flow.
@@ -610,17 +660,19 @@ impl Workflow {
                 self.pass(StepKind::Fix);
                 self.start_cross_review()
             }
+            // Test trình duyệt (skipped when the task does not use it), then Review chốt
             StepKind::CrossReview => {
                 self.pass(StepKind::FixCross);
-                self.run(StepKind::FinalReview)
+                self.run(StepKind::BrowserTest)
             }
             StepKind::BrowserTest => {
                 self.pass(StepKind::FixCross);
-                self.run(StepKind::PushSummary)
+                self.run(StepKind::FinalReview)
             }
             _ => {
                 self.pass(StepKind::FixCross);
-                self.run(StepKind::BrowserTest)
+                let next = self.after_review_target(review);
+                self.run(next)
             }
         }
     }
@@ -692,7 +744,10 @@ mod tests {
     fn steps_are_numbered_in_order() {
         let indexes: Vec<u8> = StepKind::ALL.iter().map(|s| s.index()).collect();
         assert_eq!(indexes, (1..=12).collect::<Vec<u8>>());
-        assert_eq!(StepKind::BrowserTest.next(), Some(StepKind::PushSummary));
+        // Test trình duyệt (10) before Review chốt (11)
+        assert_eq!(StepKind::FixCross.next(), Some(StepKind::BrowserTest));
+        assert_eq!(StepKind::BrowserTest.next(), Some(StepKind::FinalReview));
+        assert_eq!(StepKind::FinalReview.next(), Some(StepKind::PushSummary));
         assert_eq!(StepKind::PushSummary.next(), None);
         assert_eq!(fix_step_of(StepKind::ReviewLocal), StepKind::Fix);
         assert_eq!(fix_step_of(StepKind::FinalReview), StepKind::FixCross);
@@ -749,21 +804,26 @@ mod tests {
         assert_eq!(skip.state_of(StepKind::Fix), StepState::Skipped);
         assert_eq!(skip.state_of(StepKind::ReviewLocal), StepState::Done);
 
-        // Codex reports too: its gate, then the final review's
+        // Codex reports too: its gate, then Test trình duyệt when the task uses it, else the
+        // final review
         skip.apply(E::ReviewFinished { open: 1 }).unwrap();
         assert_eq!(skip.gate_review(), Some(StepKind::CrossReview));
         assert_eq!(skip.skip_target(), Some(StepKind::FinalReview));
+        let mut browser = skip.clone();
+        browser.set_uses(StepKind::BrowserTest, true);
+        assert_eq!(browser.skip_target(), Some(StepKind::BrowserTest));
+        browser.apply(E::FindingsPicked { fix: 0 }).unwrap();
+        assert_eq!(browser.phase(), Phase::Running(StepKind::BrowserTest));
         skip.apply(E::FindingsPicked { fix: 0 }).unwrap();
         assert_eq!(skip.phase(), Phase::Running(StepKind::FinalReview));
+        assert_eq!(skip.state_of(StepKind::BrowserTest), StepState::Skipped);
         // the final review no longer fixes critical/high by itself
         skip.apply(E::ReviewFinished { open: 3 }).unwrap();
         assert_eq!(skip.phase(), Phase::Gate(GateKind::Findings));
         assert_eq!(skip.current_step(), Some(StepKind::FinalReview));
         assert_eq!(skip.skip_target(), Some(StepKind::PushSummary));
-        skip.set_uses(StepKind::BrowserTest, true);
-        assert_eq!(skip.skip_target(), Some(StepKind::BrowserTest));
         skip.apply(E::FindingsPicked { fix: 0 }).unwrap();
-        assert_eq!(skip.phase(), Phase::Running(StepKind::BrowserTest));
+        assert_eq!(skip.phase(), Phase::Running(StepKind::PushSummary));
     }
 
     /// After every fix the user is asked whether the other AI reviews again.
@@ -1008,24 +1068,90 @@ mod tests {
         wf.apply(CLEAN).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::ReviewLocal));
         assert_eq!(wf.state_of(StepKind::Harness), StepState::Done);
-        // the reviews pass; the browser test finds a problem, fixed in step 9
-        wf.apply(CLEAN).unwrap();
+        // Tự review and Review chéo pass; the browser test (before Review chốt) finds a
+        // problem, fixed in step 9
         wf.apply(CLEAN).unwrap();
         wf.apply(CLEAN).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::BrowserTest));
+        assert_eq!(wf.state_of(StepKind::FinalReview), StepState::Pending);
         wf.apply(E::ReviewFinished { open: 1 }).unwrap();
-        assert_eq!(wf.skip_target(), Some(StepKind::PushSummary));
+        assert_eq!(wf.skip_target(), Some(StepKind::FinalReview));
         wf.apply(E::FindingsPicked { fix: 1 }).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
         wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
         assert_eq!(wf.phase(), Phase::Gate(GateKind::AfterFix));
         assert_eq!(wf.skip_target(), Some(StepKind::BrowserTest));
-        // "No" runs the browser test again; clean → push summary
+        assert!(!wf.can_retest(), "only after a fix of Review chốt");
+        // "No" runs the browser test again; clean → Review chốt reviews the fix too
         wf.apply(E::AfterFix(AfterFix::Next)).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::BrowserTest));
-        assert_eq!(wf.state_of(StepKind::FinalReview), StepState::Done);
+        wf.apply(CLEAN).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
+        // Review chốt finds something; after its fix the browser test can run again, and
+        // Review chốt follows it
+        wf.apply(E::ReviewFinished { open: 1 }).unwrap();
+        wf.apply(E::FindingsPicked { fix: 1 }).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+        assert_eq!(wf.gate_review(), Some(StepKind::FinalReview));
+        assert_eq!(wf.skip_target(), Some(StepKind::FinalReview));
+        assert!(wf.can_retest());
+        let mut again = wf.clone();
+        again.apply(E::AfterFix(AfterFix::Next)).unwrap();
+        assert_eq!(again.phase(), Phase::Running(StepKind::FinalReview));
+        wf.apply(E::AfterFix(AfterFix::BrowserTest)).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::BrowserTest));
+        assert_eq!(wf.state_of(StepKind::FixCross), StepState::Done);
+        wf.apply(CLEAN).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
         wf.apply(CLEAN).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::PushSummary));
+        // a task without the browser test cannot ask for it
+        let mut off = again.clone();
+        off.apply(E::ReviewFinished { open: 1 }).unwrap();
+        off.apply(E::FindingsPicked { fix: 1 }).unwrap();
+        off.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+        off.set_uses(StepKind::BrowserTest, false);
+        assert!(!off.can_retest());
+        assert!(off.apply(E::AfterFix(AfterFix::BrowserTest)).is_err());
+    }
+
+    /// Tasks saved while Review chốt came before Test trình duyệt read in the new order; one that
+    /// finished Review chốt with the browser test still ahead runs it, then Review chốt again.
+    #[test]
+    fn tasks_saved_in_the_old_order_are_read_in_the_new_one() {
+        let old = |states: &str, phase: &str| {
+            format!(
+                r#"{{"states":[{states}],"phase":{phase},"pausedFrom":null,"round":1,"uses":["browserTest"]}}"#
+            )
+        };
+        // old slots: … 9 fixCross, 10 finalReview (done), 11 browserTest (running), 12 push
+        let mut wf: Workflow = serde_json::from_str(&old(
+            r#""done","done","done","skipped","skipped","done","skipped","done","skipped","done","running","pending""#,
+            r#"{"running":"browserTest"}"#,
+        ))
+        .unwrap();
+        assert_eq!(wf.state_of(StepKind::FinalReview), StepState::Done);
+        assert_eq!(wf.state_of(StepKind::BrowserTest), StepState::Running);
+        wf.apply(CLEAN).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
+        // written back in the new layout, read back unchanged
+        let json = serde_json::to_string(&wf).unwrap();
+        assert!(json.contains(r#""layout":2"#), "{json}");
+        let back: Workflow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, wf);
+        // old order, at Review chốt with the browser test not run yet: it runs after
+        let mut fin: Workflow = serde_json::from_str(&old(
+            r#""done","done","done","skipped","skipped","done","skipped","done","skipped","running","pending","pending""#,
+            r#"{"running":"finalReview"}"#,
+        ))
+        .unwrap();
+        assert_eq!(fin.state_of(StepKind::BrowserTest), StepState::Pending);
+        fin.apply(CLEAN).unwrap();
+        assert_eq!(fin.phase(), Phase::Running(StepKind::BrowserTest));
+        fin.apply(CLEAN).unwrap();
+        assert_eq!(fin.phase(), Phase::Running(StepKind::FinalReview));
+        fin.apply(CLEAN).unwrap();
+        assert_eq!(fin.phase(), Phase::Running(StepKind::PushSummary));
     }
 
     fn legacy(states: &str, phase: &str, round: u8) -> String {

@@ -442,7 +442,7 @@ pub const BROWSER_BASH: [&str; 7] = [
     "curl *",
 ];
 
-/// [11] Test trình duyệt, headless: read the repo, start the app (Bash from the allow list), drive
+/// [10] Test trình duyệt, headless: read the repo, start the app (Bash from the allow list), drive
 /// Chrome through the MCP server in `mcp_config` (a file) and nothing else. No edits.
 pub fn browser_test_args(budget_usd: f64, allowed_bash: &[String], mcp_config: &str) -> Vec<String> {
     let mut args = strings(&[

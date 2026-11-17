@@ -118,26 +118,29 @@ describe("mock workflow (browser preview)", () => {
     mockDecideFinding({ wpId: 7, fingerprint: high.fingerprint, decision: "fix" });
     expect(mockFlowAction(7, { type: "pickFindings", fix: true })).toMatchObject({ status: "running", current: "fix" });
     expect(mockTaskDetail(7).findings.find((f) => f.severity === "high")?.state).toBe("fixing");
-    // the fix asks: Review chéo?
-    expect(step(7)).toMatchObject({ status: "gate", current: "fix", gate: { kind: "afterFix", next: "finalReview" } });
+    // the fix asks: Review chéo? ("Không" would go to Test trình duyệt, turned on above)
+    expect(step(7)).toMatchObject({ status: "gate", current: "fix", gate: { kind: "afterFix", next: "browserTest" } });
+    expect(() => mockFlowAction(7, { type: "afterFix", choice: "browserTest" })).toThrow(/Review chốt/);
     expect(mockFlowAction(7, { type: "afterFix", choice: "crossReview" })).toMatchObject({ status: "running", round: 1 });
     const cross = step(7);
-    expect(cross.current).toBe("finalReview");
+    // Test trình duyệt comes before Review chốt now
+    expect(cross.current).toBe("browserTest");
+    expect(cross.steps.map((s) => s.kind).slice(9, 11)).toEqual(["browserTest", "finalReview"]);
     expect(cross.findings.find((f) => f.severity === "high")?.state).toBe("fixed");
-    // Review chốt reports a medium: its own gate, leading to Test trình duyệt (turned on above)
+    // the browser test: OK, with its result card; then Review chốt
+    mockFlowAction(7, { type: "run" });
+    const tried = step(7);
+    expect([tried.status, tried.current]).toEqual(["ready", "finalReview"]);
+    expect(tried.tests?.find((x) => x.step === "browserTest")).toMatchObject({ passed: true, url: "http://localhost:5173/files" });
+    // Review chốt reports a medium: its own gate, leading to the push summary
     mockFlowAction(7, { type: "run" });
     const last = step(7);
-    expect(last.gate).toMatchObject({ kind: "findings", review: "finalReview", next: "browserTest" });
+    expect(last.gate).toMatchObject({ kind: "findings", review: "finalReview", next: "pushSummary" });
     expect(last.gate?.message).toContain("Đã review chéo 1 vòng.");
     const medium = last.findings.find((f) => f.severity === "medium")!;
     expect(() => mockDecideFinding({ wpId: 7, fingerprint: medium.fingerprint, decision: "accept" })).toThrow();
     mockDecideFinding({ wpId: 7, fingerprint: medium.fingerprint, decision: "accept", reason: "ok" });
-    mockFlowAction(7, { type: "pickFindings", fix: false });
-    // the browser test runs at once: OK, with its result card; then the push summary
-    const tried = step(7);
-    expect([tried.status, tried.current]).toEqual(["ready", "pushSummary"]);
-    expect(tried.tests?.find((x) => x.step === "browserTest")).toMatchObject({ passed: true, url: "http://localhost:5173/files" });
-    mockFlowAction(7, { type: "run" });
+    expect(mockFlowAction(7, { type: "pickFindings", fix: false })).toMatchObject({ current: "pushSummary" });
     const push = step(7);
     expect(push.status).toBe("awaitingPush");
     expect(push.push?.blocks.map((b) => b.label)).toEqual(["Commit message", "PR description"]);

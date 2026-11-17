@@ -15,8 +15,8 @@ export type StepKind =
   | "fix"
   | "crossReview"
   | "fixCross"
-  | "finalReview"
   | "browserTest"
+  | "finalReview"
   | "pushSummary";
 
 export type StepState = "pending" | "running" | "waitingUser" | "done" | "failed" | "skipped";
@@ -35,7 +35,8 @@ export type GateKind = "planReview" | "findings" | "afterFix" | "agentQuestion" 
 
 /** The answer at the after-fix gate: Codex reviews again, go on (the final review; again after
  *  its own fix), or pick more findings of the review that was fixed. */
-export type AfterFixChoice = "crossReview" | "next" | "pickMore";
+/** `browserTest`: after a fix of Review chốt's findings, test in the browser again, then Review chốt again. */
+export type AfterFixChoice = "crossReview" | "next" | "pickMore" | "browserTest";
 
 export interface AppInfo {
   version: string;

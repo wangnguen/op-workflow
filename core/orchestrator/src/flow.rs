@@ -175,7 +175,7 @@ struct Saved {
     review_after_checks: bool,
     /// Harness (step 5): what the AI built and how it ran last.
     harness: Option<HarnessState>,
-    /// Test trình duyệt (step 11): how it went last.
+    /// Test trình duyệt (step 10): how it went last.
     browser: Option<BrowserState>,
     /// The usage limit ended a run in the middle: which, and when it can go on.
     cut: Option<CutRun>,
@@ -230,7 +230,7 @@ struct HarnessState {
     pending: Option<harness::LibraryPick>,
 }
 
-/// The task's browser test (step 11): its last result.
+/// The task's browser test (step 10): its last result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct BrowserState {
@@ -1997,6 +1997,9 @@ fn apply_action(
                     "Không review chéo lại: sang {}",
                     wf.current_step().map_or("bước sau", step_label)
                 ),
+                AfterFix::BrowserTest => {
+                    "Bạn chọn chạy lại Test trình duyệt, sau đó Review chốt lại".to_owned()
+                }
             };
             push_log(entry, fix, "info", &text);
             Ok(matches!(entry.saved.workflow.phase(), Phase::Running(_)))
@@ -5721,7 +5724,13 @@ mod tests {
             d = run(&flow, &ctx, action);
         }
         assert_eq!(d.current, Some(StepKind::BrowserTest), "{:?}", d.error);
-        // "Không sửa" at Review chốt's gate already started it
+        // Test trình duyệt comes before Review chốt now
+        assert!(
+            d.steps
+                .iter()
+                .any(|s| s.kind == StepKind::FinalReview && s.state == StepState::Pending)
+        );
+        // "Không sửa" at Review chéo's gate already started it
         let d = if d.status == FlowStatus::Ready {
             run(&flow, &ctx, FlowAction::Run)
         } else {
@@ -5778,12 +5787,20 @@ mod tests {
                 choice: AfterFix::Next,
             },
         );
-        // answering the gate starts the browser test at once; this time it is OK
+        // answering the gate starts the browser test at once; this time it is OK, and Review
+        // chốt (step 11) comes next to look at the fix too
         assert_eq!(
             (d.current, d.status),
-            (Some(StepKind::PushSummary), FlowStatus::Ready),
+            (Some(StepKind::FinalReview), FlowStatus::Ready),
             "{:?}",
             d.error
+        );
+        assert_eq!(
+            d.steps
+                .iter()
+                .find(|s| s.kind == StepKind::BrowserTest)
+                .map(|s| s.index),
+            Some(10)
         );
         let view = d.tests.iter().find(|t| t.step == StepKind::BrowserTest).unwrap();
         assert!(view.passed && view.runs == 2);

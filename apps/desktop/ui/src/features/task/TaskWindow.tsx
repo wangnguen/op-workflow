@@ -499,9 +499,21 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
       const more = unpicked(d.findings);
       // after a fix of Review chốt / Test trình duyệt, "Không" runs that step again
       const again = d.gate.review === "finalReview" || d.gate.review === "browserTest";
+      // Review chốt's fix can be tried in the browser again first (Review chốt follows)
+      const retest = d.gate.review === "finalReview" && d.uses.includes("browserTest");
       actions = (
         <>
           <AutoToggle detail={d} disabled={disabled} onAction={onAction} />
+          {retest && (
+            <button
+              className="btn btn--ghost btn--sm"
+              disabled={disabled}
+              title={t.retestHint}
+              onClick={() => onAction({ type: "afterFix", choice: "browserTest" })}
+            >
+              {t.retest}
+            </button>
+          )}
           {more > 0 && (
             <button
               className="btn btn--ghost btn--sm"
