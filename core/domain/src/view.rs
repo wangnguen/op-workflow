@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::finding::{FindingState, Severity};
-use crate::workflow::{StepKind, StepState};
+use crate::workflow::{AfterFix, StepKind, StepState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -53,7 +53,12 @@ pub enum TaskColumn {
 #[serde(rename_all = "camelCase")]
 pub enum GateKind {
     PlanReview,
-    MediumTriage,
+    /// A review reported findings: the user picks which ones the AI fixes. Saved tasks from
+    /// before call it `mediumTriage` (the final review's medium findings only).
+    #[serde(alias = "mediumTriage")]
+    Findings,
+    /// A Sửa lỗi finished: run the cross review again, or go on.
+    AfterFix,
     AgentQuestion,
     Error,
     /// The user chose to code this task by hand at the plan gate.
@@ -930,6 +935,12 @@ pub struct GateView {
     pub kind: GateKind,
     pub since: String,
     pub message: String,
+    /// Findings and after-fix gates: the review whose findings they are about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<StepKind>,
+    /// Where "go on" leads: past the findings gate without fixing, or "No" after a fix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<StepKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1195,9 +1206,10 @@ pub struct TaskDetail {
     pub error: Option<FlowError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running: Option<RunView>,
+    /// Cross-review rounds so far (no cap).
     pub round: u8,
-    pub max_rounds: u8,
-    /// Run the next step by itself after one finishes (off: stop after each step).
+    /// "Tự chạy": run the next step by itself after one finishes, stopping at every decision or
+    /// error (off: stop after each step).
     pub auto_advance: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brief: Option<String>,
@@ -1238,8 +1250,10 @@ pub enum FlowAction {
     SelfCode,
     /// The user finished coding by hand.
     SelfCodeDone,
-    /// Every medium finding is decided: continue.
-    FinishTriage,
+    /// Findings gate: fix the picked findings (`fix`), or go on without fixing.
+    PickFindings { fix: bool },
+    /// After-fix gate: the answer to "Review chéo lại?".
+    AfterFix { choice: AfterFix },
     /// Write the push summary again (optionally for another issue number).
     RerunPush {
         #[serde(default)]
@@ -1426,9 +1440,12 @@ mod tests {
     #[test]
     fn enums_match_ts_literals() {
         let s = |v: Value| v.as_str().unwrap().to_owned();
+        assert_eq!(s(serde_json::to_value(GateKind::Findings).unwrap()), "findings");
+        assert_eq!(s(serde_json::to_value(GateKind::AfterFix).unwrap()), "afterFix");
+        // saved before every review had a findings gate
         assert_eq!(
-            s(serde_json::to_value(GateKind::MediumTriage).unwrap()),
-            "mediumTriage"
+            serde_json::from_value::<GateKind>(json!("mediumTriage")).unwrap(),
+            GateKind::Findings
         );
         assert_eq!(
             s(serde_json::to_value(QuotaWindowKind::FiveHour).unwrap()),
@@ -1462,6 +1479,16 @@ mod tests {
         assert_eq!(a, FlowAction::RerunPush { issue: None });
         let a: FlowAction = serde_json::from_value(json!({"type": "setAuto", "on": true})).unwrap();
         assert_eq!(a, FlowAction::SetAuto { on: true });
+        let a: FlowAction = serde_json::from_value(json!({"type": "pickFindings", "fix": true})).unwrap();
+        assert_eq!(a, FlowAction::PickFindings { fix: true });
+        let a: FlowAction =
+            serde_json::from_value(json!({"type": "afterFix", "choice": "crossReview"})).unwrap();
+        assert_eq!(
+            a,
+            FlowAction::AfterFix {
+                choice: AfterFix::CrossReview
+            }
+        );
         // the old button sends no `forced`; "Làm tiếp" may leave out the step and the note
         let a: FlowAction = serde_json::from_value(json!({"type": "finish"})).unwrap();
         assert_eq!(a, FlowAction::Finish { forced: false });

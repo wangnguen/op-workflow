@@ -161,8 +161,19 @@ function primaryAction(props: TaskCardProps) {
         </>
       );
     }
-    const tab: TaskTab = card.gate === "mediumTriage" ? "findings" : "plan";
-    const label = card.gate === "mediumTriage" ? f.triage : b.reviewPlan;
+    if (card.gate === "afterFix") {
+      // the answers ("Review chéo lại", "Không", "Chọn thêm lỗi") are in the task window
+      return (
+        <>
+          {pause}
+          <button className="btn btn--primary btn--sm" title={f.crossAgainHint} onClick={() => onOpen(card, "progress")}>
+            {f.afterFixCard}
+          </button>
+        </>
+      );
+    }
+    const tab: TaskTab = card.gate === "findings" ? "findings" : "plan";
+    const label = card.gate === "findings" ? f.triage : b.reviewPlan;
     return (
       <>
         {pause}

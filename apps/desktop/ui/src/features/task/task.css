@@ -108,8 +108,12 @@
 .task-status-actions {
   display: flex;
   flex-shrink: 0;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
+  /* the gates with three answers wrap instead of squeezing the message */
+  max-width: min(640px, 64%);
 }
 .task-auto {
   display: inline-flex;
@@ -235,11 +239,16 @@
 
 .task-findings-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
   font-size: 12.5px;
 }
-.task-findings-head .btn {
+.task-findings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
   margin-left: auto;
 }
 .task-findings {

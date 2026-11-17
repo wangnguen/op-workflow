@@ -14,9 +14,9 @@ export const asTab = (s: string | undefined): TaskTab | undefined =>
  *  first step, otherwise the Tiến trình timeline. */
 export function defaultTab(d: TaskDetail): TaskTab {
   if (d.gate?.kind === "planReview" || d.gate?.kind === "selfCode") return "plan";
-  if (d.gate?.kind === "mediumTriage") return "findings";
+  if (d.gate?.kind === "findings") return "findings";
   if (d.status === "awaitingPush" || d.status === "done") return "push";
-  if (d.status === "running" || d.gate?.kind === "error") return "progress";
+  if (d.status === "running" || d.gate?.kind === "error" || d.gate?.kind === "afterFix") return "progress";
   if (
     d.findings.length > 0 &&
     (d.current === "fix" || d.current === "fixCross" || d.current === "crossReview" || d.current === "finalReview")
@@ -27,14 +27,15 @@ export function defaultTab(d: TaskDetail): TaskTab {
   return "progress";
 }
 
-/** Where a gate's work is: the plan for the plan gate, the findings for triage, … */
+/** Where a gate's work is: the plan for the plan gate, the findings to pick, what the fix did… */
 export function gateTab(kind: GateKind): TaskTab {
   switch (kind) {
     case "planReview":
       return "plan";
-    case "mediumTriage":
+    case "findings":
       return "findings";
     case "error":
+    case "afterFix":
       return "progress";
     default:
       return "brief";
@@ -57,18 +58,22 @@ export function sortFindings(list: FindingView[]): FindingView[] {
   );
 }
 
-/** Findings still open, and those the next fix step will take: picked ones, high and up, and
- *  mediums too unless they wait for the user's decision (`triage`). */
-export function findingCounts(list: FindingView[], triage = false): { open: number; fix: number } {
-  const open = list.filter((f) => !isSettled(f));
-  const takes = (f: FindingView) =>
-    f.chosen === true || f.severity === "critical" || f.severity === "high" || (f.severity === "medium" && !triage);
-  return { open: open.length, fix: open.filter(takes).length };
+/** Picked for the next Sửa lỗi: the user pressed Sửa and it is still open (one already fixed and
+ *  waiting for a review is not taken twice). Mirrors `to_fix` in flow.rs. */
+export const isPicked = (f: FindingView): boolean => f.chosen === true && f.state === "open";
+
+/** Findings nobody handled yet (`open`), and how many of them are picked for the AI. */
+export function findingCounts(list: FindingView[]): { open: number; fix: number } {
+  const open = list.filter((f) => f.state === "open");
+  return { open: open.length, fix: open.filter(isPicked).length };
 }
 
-/** Mediums of the final review nobody decided on yet (the triage gate waits for them). */
-export const undecidedMediums = (list: FindingView[]): number =>
-  list.filter((f) => !isSettled(f) && f.chosen !== true && f.severity === "medium").length;
+/** Open critical / high findings not picked yet (the "pick them all" shortcut). */
+export const unpickedSevere = (list: FindingView[]): FindingView[] =>
+  list.filter((f) => f.state === "open" && f.chosen !== true && (f.severity === "critical" || f.severity === "high"));
+
+/** Open findings not picked yet ("Chọn thêm lỗi" after a fix). */
+export const unpicked = (list: FindingView[]): number => list.filter((f) => f.state === "open" && f.chosen !== true).length;
 
 /** `api/a.ts:42` */
 export const findingPlace = (f: FindingView): string => (f.line ? `${f.file}:${f.line}` : f.file);

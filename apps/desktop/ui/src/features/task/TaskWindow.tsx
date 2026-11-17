@@ -45,7 +45,8 @@ import {
   findingPlace,
   isSettled,
   sortFindings,
-  undecidedMediums,
+  unpicked,
+  unpickedSevere,
   type TaskTab,
 } from "./taskTabs";
 import "./task.css";
@@ -132,6 +133,13 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
   }, [refresh, onChanged]);
   const decide = (f: FindingView, decision: Decision, reason?: string) =>
     run(`decide:${f.fingerprint}`, () => decideFinding({ wpId, fingerprint: f.fingerprint, decision, reason }));
+  /** "Chọn N lỗi critical / high": press Sửa on each of them, one after the other */
+  const pickSevere = (list: FindingView[]) =>
+    run("pickSevere", async () => {
+      let next: TaskDetail | null = null;
+      for (const f of list) next = await decideFinding({ wpId, fingerprint: f.fingerprint, decision: "fix" });
+      return next;
+    });
   const allow = (rule: string) => run("allow", () => allowBash(wpId, rule));
   const resume = (runId: number) => run("resume", () => openResume(wpId, runId));
   const showChat = (runId: number) => {
@@ -213,6 +221,7 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
             <StepBar detail={d} />
             <StatusStrip
               detail={d}
+              tab={tab}
               busy={busy}
               onError={setError}
               onAction={act}
@@ -265,7 +274,9 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
                 />
               )}
               {tab === "comments" && <CommentsTab detail={d} onChanged={countsChanged} />}
-              {tab === "findings" && <FindingsTab detail={d} busy={busy} onDecide={decide} onAction={act} />}
+              {tab === "findings" && (
+                <FindingsTab detail={d} busy={busy} onDecide={decide} onPickSevere={pickSevere} onAction={act} />
+              )}
               {tab === "diff" && <DiffTab detail={d} />}
               {tab === "push" && <PushTab detail={d} busy={busy} onAction={act} />}
             </div>
@@ -334,6 +345,8 @@ function StepBar({ detail: d }: { detail: TaskDetail }) {
 
 interface StripProps {
   detail: TaskDetail;
+  /** the tab on screen (the findings gate offers "Xem lỗi" from the other tabs) */
+  tab?: TaskTab;
   busy?: string;
   onError: (message: string) => void;
   onAction: (a: FlowAction) => void;
@@ -346,7 +359,7 @@ interface StripProps {
   onContinue: () => void;
 }
 
-function StatusStrip({ detail: d, busy, onError, onAction, onLogin, onShow, onFeedback, onFinish, onContinue }: StripProps) {
+function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow, onFeedback, onFinish, onContinue }: StripProps) {
   const now = useNow(1000);
   const step = d.current ? stepLabel[d.current] : "";
   const disabled = busy !== undefined;
@@ -459,20 +472,45 @@ function StatusStrip({ detail: d, busy, onError, onAction, onLogin, onShow, onFe
           </button>
         </>
       );
-    } else if (kind === "mediumTriage") {
-      const open = undecidedMediums(d.findings);
+    } else if (kind === "findings") {
       actions = (
         <>
-          <button className="btn btn--sm" onClick={() => onShow("findings")}>
-            {t.triage}
+          <AutoToggle detail={d} disabled={disabled} onAction={onAction} />
+          <FindingsButtons detail={d} disabled={disabled} onAction={onAction} onShow={tab === "findings" ? undefined : onShow} />
+        </>
+      );
+    } else if (kind === "afterFix") {
+      const more = unpicked(d.findings);
+      const again = d.gate.review === "finalReview";
+      actions = (
+        <>
+          <AutoToggle detail={d} disabled={disabled} onAction={onAction} />
+          {more > 0 && (
+            <button
+              className="btn btn--ghost btn--sm"
+              disabled={disabled}
+              title={t.pickMoreHint}
+              onClick={() => onAction({ type: "afterFix", choice: "pickMore" })}
+            >
+              {t.pickMore(more)}
+            </button>
+          )}
+          <button
+            className="btn btn--sm"
+            disabled={disabled}
+            title={t.noCrossHint(again)}
+            onClick={() => onAction({ type: "afterFix", choice: "next" })}
+          >
+            {t.noCross(stepLabel.finalReview, again)}
           </button>
           <button
             className="btn btn--primary btn--sm"
-            disabled={disabled || open > 0}
-            title={t.finishTriageHint}
-            onClick={() => onAction({ type: "finishTriage" })}
+            disabled={disabled}
+            title={t.crossAgainHint}
+            onClick={() => onAction({ type: "afterFix", choice: "crossReview" })}
           >
-            {t.finishTriage}
+            <Icon name="refresh" size={12} />
+            {t.crossAgain(d.round)}
           </button>
         </>
       );
@@ -523,6 +561,48 @@ function StatusStrip({ detail: d, busy, onError, onAction, onLogin, onShow, onFe
       <span className="task-status-text">{text}</span>
       <span className="task-status-actions">{actions}</span>
     </div>
+  );
+}
+
+/** The findings gate's answers: go on without fixing, or fix what the user picked. */
+function FindingsButtons({
+  detail: d,
+  disabled,
+  onAction,
+  onShow,
+}: {
+  detail: TaskDetail;
+  disabled: boolean;
+  onAction: (a: FlowAction) => void;
+  onShow?: (tab: TaskTab) => void;
+}) {
+  const picked = findingCounts(d.findings).fix;
+  const next = d.gate?.next ? stepLabel[d.gate.next] : "";
+  return (
+    <>
+      {onShow && (
+        <button className="btn btn--ghost btn--sm" onClick={() => onShow("findings")}>
+          {t.showFindings}
+        </button>
+      )}
+      <button
+        className="btn btn--sm"
+        disabled={disabled}
+        title={t.skipHint}
+        onClick={() => onAction({ type: "pickFindings", fix: false })}
+      >
+        {t.skipTo(next)}
+      </button>
+      <button
+        className="btn btn--primary btn--sm"
+        disabled={disabled || picked === 0}
+        title={picked > 0 ? t.pickFixHint : t.pickNoneHint}
+        onClick={() => onAction({ type: "pickFindings", fix: true })}
+      >
+        <Icon name="check" size={12} />
+        {t.pickFix(picked)}
+      </button>
+    </>
   );
 }
 
@@ -641,7 +721,16 @@ interface FindingsProps {
   detail: TaskDetail;
   busy?: string;
   onDecide: (f: FindingView, decision: Decision, reason?: string) => void;
+  /** press Sửa on all these findings */
+  onPickSevere: (list: FindingView[]) => void;
   onAction: (a: FlowAction) => void;
+}
+
+/** "Codex · Review chéo · vòng 2", "/review-local · Review chốt": who reported it, where. */
+function sourceText(f: FindingView): string {
+  return [t.source[f.source] ?? f.source, f.step ? stepLabel[f.step] : "", f.round ? t.findingRound(f.round) : ""]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 function ReviewNotes({ detail: d }: { detail: TaskDetail }) {
@@ -660,7 +749,7 @@ function ReviewNotes({ detail: d }: { detail: TaskDetail }) {
   );
 }
 
-function FindingsTab({ detail: d, busy, onDecide, onAction }: FindingsProps) {
+function FindingsTab({ detail: d, busy, onDecide, onPickSevere, onAction }: FindingsProps) {
   const [accepting, setAccepting] = useState<string>();
   const [reason, setReason] = useState("");
   if (d.findings.length === 0) {
@@ -671,29 +760,36 @@ function FindingsTab({ detail: d, busy, onDecide, onAction }: FindingsProps) {
       </div>
     );
   }
-  const triage = d.gate?.kind === "mediumTriage";
-  const counts = findingCounts(d.findings, triage);
+  const atGate = d.gate?.kind === "findings";
+  const counts = findingCounts(d.findings);
+  const severe = unpickedSevere(d.findings);
   const locked = d.status === "running";
   return (
     <div className="task-pane">
       <div className="task-findings-head">
         <span className="dim">{t.findingsSummary(counts.open, counts.fix)}</span>
-        {d.round > 0 && <span className="faint">{t.round(d.round, d.maxRounds)}</span>}
-        {triage && (
-          <button
-            className="btn btn--primary btn--sm"
-            disabled={busy !== undefined || undecidedMediums(d.findings) > 0}
-            title={t.finishTriageHint}
-            onClick={() => onAction({ type: "finishTriage" })}
-          >
-            {t.finishTriage}
-          </button>
+        {d.round > 0 && <span className="faint">{t.round(d.round)}</span>}
+        {atGate && (
+          <span className="task-findings-actions">
+            {severe.length > 0 && (
+              <button
+                className="btn btn--ghost btn--sm"
+                disabled={busy !== undefined}
+                title={t.pickSevereHint}
+                onClick={() => onPickSevere(severe)}
+              >
+                {t.pickSevere(severe.length)}
+              </button>
+            )}
+            <FindingsButtons detail={d} disabled={busy !== undefined} onAction={onAction} />
+          </span>
         )}
       </div>
       <ul className="task-findings">
         {sortFindings(d.findings).map((f) => {
           const settled = isSettled(f);
-          const asked = triage && !settled && f.chosen !== true && f.severity === "medium";
+          const asked = atGate && f.state === "open" && f.chosen !== true;
+          const picked = f.chosen === true && f.state === "open";
           return (
             <li key={f.fingerprint} className={`finding finding--${f.severity} finding--${f.state}${asked ? " is-asked" : ""}`}>
               <span className={`sev sev--${f.severity}`}>{severityLabel[f.severity]}</span>
@@ -701,10 +797,11 @@ function FindingsTab({ detail: d, busy, onDecide, onAction }: FindingsProps) {
                 <div className="finding-title">{f.title}</div>
                 <div className="finding-meta">
                   <span className="mono">{findingPlace(f)}</span>
-                  <span>{f.source}</span>
-                  {f.round ? <span>{t.findingRound(f.round)}</span> : null}
-                  <span className={`finding-state finding-state--${f.state}`}>{findingStateLabel[f.state]}</span>
-                  {f.chosen && !settled && <span className="finding-state finding-state--chosen">{t.chosen}</span>}
+                  <span title={t.sourceHint}>{sourceText(f)}</span>
+                  <span className={`finding-state finding-state--${f.state}`}>
+                    {f.state === "fixing" && d.status !== "running" ? t.fixingWaiting : findingStateLabel[f.state]}
+                  </span>
+                  {picked && <span className="finding-state finding-state--chosen">{t.chosen}</span>}
                 </div>
                 {f.detail && <p className="finding-detail">{f.detail}</p>}
                 {f.suggestion && (

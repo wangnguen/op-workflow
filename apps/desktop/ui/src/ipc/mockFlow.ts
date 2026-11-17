@@ -1,5 +1,7 @@
-// Browser preview of steps 2-8: a small in-memory workflow per task, each step "runs" for a few
-// seconds. Mirrors core/orchestrator/src/flow.rs closely enough to try every button.
+// Browser preview of the steps: a small in-memory workflow per task, each step "runs" for a few
+// seconds. Mirrors core/orchestrator/src/flow.rs closely enough to try every button: every review
+// that reports something waits for the user to pick what gets fixed, every fix asks "Review chéo
+// lại?", no cap on rounds.
 // `?flowError` in the URL makes the first Analyze fail with "not signed in".
 import type {
   AgentKind,
@@ -31,7 +33,6 @@ import { mockNewComments } from "./mockTask";
 
 /** How long a mock step "runs". */
 export const MOCK_STEP_MS = 2600;
-const MAX_ROUNDS = 3;
 
 const LABEL: Record<StepKind, string> = {
   intake: "Nhận task",
@@ -286,9 +287,15 @@ interface Flow {
   /** push checks made so far, and the last one */
   checks: number;
   check?: PushCheck;
-  /** the review whose findings the second Sửa lỗi (fixCross) is fixing: it runs again after */
-  fixFor?: "crossReview" | "finalReview";
+  /** the review whose findings are being picked or fixed (findings gate, Sửa lỗi, after-fix gate) */
+  fixFor?: Review;
+  /** Sửa lỗi runs so far */
+  fixes: number;
+  /** findings the running Sửa lỗi took */
+  taking?: number;
 }
+
+type Review = "reviewLocal" | "crossReview" | "finalReview";
 
 const flows = new Map<number, Flow>();
 let runSeq = 1;
@@ -331,7 +338,8 @@ const branchOf = (f: { wpId: number; taskId: string }) =>
   f.wpId === DEMO_ACTIVE_WP ? "feature/187716" : f.wpId === DEMO_PUSH_WP ? "feature/186196" : `f/${f.taskId}`;
 const agentOf = (step: StepKind): AgentKind => (step === "crossReview" ? "codex" : "claude");
 const settled = (f: FindingView) => f.state === "fixed" || f.state === "accepted" || f.state === "deferred";
-const toFix = (f: FindingView) => !settled(f) && (f.chosen === true || f.severity !== "low");
+/** Picked by the user and still open, like `to_fix` in flow.rs. */
+const toFix = (f: FindingView) => f.chosen === true && f.state === "open";
 
 function wantsError(): boolean {
   return typeof location !== "undefined" && new URLSearchParams(location.search).has("flowError");
@@ -366,6 +374,7 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo", seeded
       started: iso(Date.now()),
       allow: [],
       checks: 0,
+      fixes: 0,
     };
     if (seeded && wpId === DEMO_ACTIVE_WP) {
       // the animated demo task: open it where the demo shows a gate, at the plan review
@@ -396,8 +405,8 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo", seeded
         chained: true,
         rules: DENIED_RULES,
       });
-      seedRun(f, "reviewLocal", 42, 95, "báo 2 lỗi (1 high, 1 low), cần sửa 1");
-      seedRun(f, "fix", 38, 70, "xử lý 1 lỗi; 2 file thay đổi (+41 −6)");
+      seedRun(f, "reviewLocal", 42, 95, "báo 2 lỗi (1 high, 1 low)");
+      seedRun(f, "fix", 38, 70, "lần sửa thứ 1: xử lý 1 lỗi; 2 file thay đổi (+41 −6)");
       seedRun(f, "crossReview", 33, 160, "vòng 1: không thấy lỗi").round = 1;
       seedRun(f, "finalReview", 26, 126, "không thấy lỗi");
       seedRun(f, "pushSummary", 21, 14, "đã viết commit message + PR description");
@@ -488,15 +497,45 @@ function runView(f: Flow, r: MockRun): RunSummary {
   };
 }
 
-/** "báo 2 lỗi (1 high, 1 low), cần sửa 1", like `review_event` in flow.rs. */
-function reviewNote(found: Omit<FindingView, "state">[], blocking: number, open: number): string {
+/** "báo 2 lỗi (1 high, 1 low)", like `review_event` in flow.rs. */
+function reviewNote(found: Omit<FindingView, "state">[], decided: number): string {
   const bySeverity = (["critical", "high", "medium", "low"] as const)
     .map((sev) => [sev, found.filter((x) => x.severity === sev).length] as const)
     .filter(([, n]) => n > 0)
     .map(([sev, n]) => `${n} ${sev}`);
   const base = found.length === 0 ? "không thấy lỗi" : `báo ${found.length} lỗi (${bySeverity.join(", ")})`;
-  if (blocking > 0) return `${base}, cần sửa ${blocking}`;
-  return open > 0 ? `${base}, còn mở ${open}` : base;
+  return decided > 0 ? `${base}, ${decided} lỗi bạn đã chấp nhận / để sau từ trước` : base;
+}
+
+/** Where "go on" leads from the gate the task waits at (`skip_target` in the workflow). */
+function skipTarget(f: Flow): StepKind | undefined {
+  if (f.phase !== "gate" || !f.fixFor) return undefined;
+  if (f.gate === "afterFix") return "finalReview";
+  if (f.gate !== "findings") return undefined;
+  return f.fixFor === "reviewLocal" ? "crossReview" : f.fixFor === "crossReview" ? "finalReview" : "pushSummary";
+}
+
+/** Nothing (more) to fix after `review`: on to the next step of the flow. */
+function afterReview(f: Flow, review: Review): void {
+  f.fixFor = undefined;
+  if (review === "reviewLocal") {
+    passFix(f, "fix");
+    f.round += 1;
+    goTo(f, "crossReview");
+  } else if (review === "crossReview") {
+    passFix(f, "fixCross");
+    goTo(f, "finalReview");
+  } else {
+    passFix(f, "fixCross");
+    enter(f, "browserTest");
+  }
+}
+
+/** Stop so the user picks which findings of `review` the AI fixes. */
+function findingsGate(f: Flow, review: Review): void {
+  f.fixFor = review;
+  f.states[review] = "waitingUser";
+  toGate(f, "findings", review);
 }
 
 /** A whole round already behind the task: steps done, the optional ones and `unneeded` passed. */
@@ -542,7 +581,11 @@ function startRun(f: Flow): void {
   f.runStarted = iso(Date.now());
   f.runEnds = Date.now() + MOCK_STEP_MS;
   // like the engine: what the fix takes is "being fixed" until the next review
-  if (FIX_STEPS.includes(f.current)) for (const x of f.findings) if (toFix(x)) x.state = "fixing";
+  if (FIX_STEPS.includes(f.current)) {
+    const taken = f.findings.filter(toFix);
+    for (const x of taken) x.state = "fixing";
+    f.taking = taken.length;
+  }
   const how = [agentOf(f.current) === "codex" ? "Codex" : "Claude", MODEL[f.current], EFFORT[f.current], COMMAND[f.current]];
   log(f, "info", `Bắt đầu ${LABEL[f.current]} (${how.filter(Boolean).join(" · ")})`, f.current);
   if (f.current === "implement" && f.note) {
@@ -611,22 +654,14 @@ function complete(f: Flow): void {
       return;
     }
     case "fix":
-      f.states.fix = "done";
-      f.round += 1;
-      goTo(f, "crossReview");
-      done(`xử lý ${f.findings.filter((x) => x.state === "fixing").length} lỗi; 2 file thay đổi (+41 −6)`);
-      return;
     case "fixCross": {
-      const fixing = f.findings.filter((x) => x.state === "fixing").length;
-      f.states.fixCross = "done";
-      // fixes of Review chốt go back to Review chốt; those of Review chéo to another round
-      if (f.fixFor === "finalReview") goTo(f, "finalReview");
-      else {
-        f.round += 1;
-        goTo(f, "crossReview");
-      }
-      f.fixFor = undefined;
-      done(`xử lý ${fixing} lỗi; 1 file thay đổi (+4 −1)`);
+      // every fix waits for the user: Review chéo lại?
+      const fixing = f.taking ?? 0;
+      f.fixes += 1;
+      f.fixFor ??= step === "fix" ? "reviewLocal" : "crossReview";
+      f.states[step] = "waitingUser";
+      toGate(f, "afterFix", step);
+      done(`lần sửa thứ ${f.fixes}: xử lý ${fixing} lỗi; ${step === "fix" ? "2 file thay đổi (+41 −6)" : "1 file thay đổi (+4 −1)"}`);
       return;
     }
     case "pushSummary":
@@ -642,36 +677,15 @@ function complete(f: Flow): void {
       const found = REVIEWS[step][Math.min(n - 1, REVIEWS[step].length - 1)] ?? [];
       merge(f, step, found);
       if (NOTES[step]) f.notes[step] = NOTES[step];
-      const blocking = f.findings.filter(toFix).length;
-      const open = f.findings.filter((x) => !settled(x)).length;
-      f.states[step] = "done";
-      const note = reviewNote(found, blocking, open);
+      // what it reported and the user has not accepted / deferred waits for them
+      const reported = new Set(found.map((x) => x.fingerprint));
+      const open = f.findings.filter((x) => reported.has(x.fingerprint) && !settled(x)).length;
+      const note = reviewNote(found, reported.size - open);
       done(step === "crossReview" ? `vòng ${f.round}: ${note}` : note);
-      if (step === "reviewLocal") {
-        if (blocking > 0) goTo(f, "fix");
-        else {
-          passFix(f, "fix");
-          f.round += 1;
-          goTo(f, "crossReview");
-        }
-      } else if (step === "crossReview") {
-        if (blocking > 0 && f.round < MAX_ROUNDS) {
-          f.fixFor = "crossReview";
-          goTo(f, "fixCross");
-        } else goTo(f, "finalReview");
-      } else {
-        const high = f.findings.filter((x) => !settled(x) && (x.chosen || x.severity === "high" || x.severity === "critical")).length;
-        const medium = f.findings.filter((x) => !settled(x) && !x.chosen && x.severity === "medium").length;
-        if (high > 0) {
-          f.fixFor = "finalReview";
-          goTo(f, "fixCross");
-        } else if (medium > 0) {
-          f.states.finalReview = "waitingUser";
-          toGate(f, "mediumTriage", "finalReview");
-        } else {
-          passFix(f, "fixCross");
-          enter(f, "browserTest");
-        }
+      if (open > 0) findingsGate(f, step);
+      else {
+        f.states[step] = "done";
+        afterReview(f, step);
       }
       return;
     }
@@ -718,15 +732,21 @@ function status(f: Flow): FlowStatus {
 
 function gateView(f: Flow): GateView | undefined {
   if (f.phase !== "gate" || !f.gate) return undefined;
-  const medium = f.findings.filter((x) => !settled(x) && !x.chosen && x.severity === "medium").length;
+  const open = f.findings.filter((x) => x.state === "open").length;
+  const picked = f.findings.filter(toFix).length;
+  const rounds = f.round > 0 ? ` Đã review chéo ${f.round} vòng.` : "";
+  const next = skipTarget(f);
+  const ask = f.round === 0 ? "Chạy Review chéo (vòng 1)?" : `Chạy Review chéo lại (vòng ${f.round + 1})?`;
   const message: Record<GateKind, string> = {
     planReview: "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.",
-    mediumTriage: `${medium} lỗi medium cần bạn quyết: sửa, chấp nhận kèm lý do, hoặc để sau.`,
+    findings: `${LABEL[f.fixFor ?? "finalReview"]} báo lỗi: ${open} lỗi đang mở, đã chọn ${picked} cho AI sửa. Chọn lỗi cần sửa, hoặc sang ${next ? LABEL[next] : "bước sau"} mà không sửa.${rounds}`,
+    afterFix: `Sửa lỗi xong. ${ask}${rounds}`,
     selfCode: 'Bạn đang tự code trên nhánh này. Xong thì bấm "Tôi code xong" để app review.',
     agentQuestion: "AI đang hỏi bạn.",
     error: f.error?.message ?? "Bước vừa chạy bị lỗi.",
   };
-  return { kind: f.gate, since: f.gateSince, message: message[f.gate] };
+  const review = f.gate === "findings" || f.gate === "afterFix" ? f.fixFor : undefined;
+  return { kind: f.gate, since: f.gateSince, message: message[f.gate], review, next };
 }
 
 export function mockTaskDetail(wpId: number): TaskDetail {
@@ -747,7 +767,6 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     gate: gateView(f),
     error: f.error,
     round: f.round,
-    maxRounds: MAX_ROUNDS,
     autoAdvance: f.auto,
     brief: f.brief,
     plan: f.plan,
@@ -842,18 +861,44 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       enter(f, "checks");
       startRun(f);
       break;
-    case "finishTriage": {
-      const open = f.findings.filter((x) => !settled(x) && !x.chosen && x.severity === "medium").length;
-      if (open > 0) throw fail("triage.open", `Còn ${open} lỗi medium chưa quyết (sửa, chấp nhận hoặc để sau)`);
-      f.states.finalReview = "done";
-      if (f.findings.some(toFix)) {
-        f.fixFor = "finalReview";
-        goTo(f, "fixCross");
+    case "pickFindings": {
+      if (f.gate !== "findings" || f.phase !== "gate") throw fail("flow.notNow", "Lúc này chưa chọn lỗi để sửa được");
+      const review = f.fixFor ?? "finalReview";
+      const picked = f.findings.filter(toFix).length;
+      if (action.fix && picked === 0) throw fail("findings.none", "Chưa chọn lỗi nào: bấm Sửa ở lỗi cần AI sửa trước");
+      f.states[review] = "done";
+      if (action.fix) {
+        log(f, "info", `Bạn chọn ${picked} lỗi của ${LABEL[review]} cho AI sửa`, review);
+        goTo(f, review === "reviewLocal" ? "fix" : "fixCross");
       } else {
-        passFix(f, "fixCross");
-        enter(f, "browserTest");
+        afterReview(f, review);
+        log(f, "info", `Bạn không sửa lỗi nào của ${LABEL[review]}: sang ${LABEL[f.current ?? "pushSummary"]}`, review);
       }
       startRun(f);
+      break;
+    }
+    case "afterFix": {
+      if (f.gate !== "afterFix" || f.phase !== "gate" || !f.current) throw fail("flow.notNow", "Lúc này chưa trả lời câu này được");
+      const fix = f.current;
+      const review = f.fixFor ?? "crossReview";
+      f.states[fix] = "done";
+      if (action.choice === "crossReview") {
+        f.fixFor = undefined;
+        f.round += 1;
+        goTo(f, "crossReview");
+        log(f, "info", `Bạn chọn Review chéo lại (vòng ${f.round})`, fix);
+        startRun(f);
+      } else if (action.choice === "pickMore") {
+        findingsGate(f, review);
+        log(f, "info", "Bạn chọn thêm lỗi để sửa", fix);
+      } else {
+        f.fixFor = undefined;
+        passFix(f, "crossReview");
+        passFix(f, "fixCross");
+        goTo(f, "finalReview");
+        log(f, "info", "Không review chéo lại: sang Review chốt", fix);
+        startRun(f);
+      }
       break;
     }
     case "rerunPush":
@@ -908,7 +953,8 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
         if (from < STEP_ORDER.indexOf("crossReview")) f.round = 0;
         else if (step === "crossReview") f.round = 1;
         f.error = undefined;
-        f.fixFor = step === "fixCross" ? "finalReview" : undefined;
+        f.fixFor = step === "fix" ? "reviewLocal" : step === "fixCross" ? "crossReview" : undefined;
+        if (from <= STEP_ORDER.indexOf("crossReview")) f.fixes = 0;
         enter(f, step);
       }
       const text = step ? `Làm tiếp: chạy lại từ ${LABEL[step]}` : `Làm tiếp ở ${LABEL[f.current ?? "pushSummary"]}`;

@@ -145,8 +145,6 @@ pub struct StepConfig {
     /// `low` … `max` (Claude `--effort`) or Codex `model_reasoning_effort`. `None` = the machine's.
     pub effort: Option<String>,
     pub max_budget_usd: Option<f64>,
-    /// Cross-review ⇄ fix rounds before the final review.
-    pub max_rounds: Option<u8>,
     pub timeout_min: Option<u32>,
 }
 
@@ -572,7 +570,8 @@ mod tests {
         assert!(cfg.steps.auto_advance);
         assert_eq!(cfg.steps.analyze.max_budget_usd, Some(2.5));
         assert_eq!(cfg.steps.cross_review.agent.as_deref(), Some("claude"));
-        assert_eq!(cfg.steps.cross_review.max_rounds, Some(2));
+        // the old cap on cross-review rounds is gone; a config that still has it reads fine
+        assert_eq!(cfg.steps.cross_review.timeout_min, None);
         assert_eq!(cfg.steps.fix, StepConfig::default());
         assert_eq!(cfg.repos["~/code/web"].allow_bash, ["npm run lint *"]);
         assert!(!Config::from_value(&Value::Null).steps.auto_advance);

@@ -8,7 +8,9 @@
 //!   read-only steps (analyze, reviews, push summary) must also leave the working tree as it
 //!   was; anything unexpected stops the flow with an error the user has to look at;
 //! - by default the flow stops after each step (`steps.autoAdvance`), so the user sees every
-//!   result before the next step starts.
+//!   result before the next step starts; with "Tự chạy" on it still stops at every decision
+//!   (plan, findings to fix, "Review chéo lại?") and every error, and says so (bell + toast);
+//! - the user picks every finding the AI fixes; nothing is fixed by severity alone.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -25,14 +27,14 @@ use opw_agents::text::{self, RawFinding};
 use opw_agents::transcript;
 use opw_config::{Config, RepoConfig, StepConfig, StepsConfig};
 use opw_context::prompts::{self, FixItem};
-use opw_domain::finding::{GateAction, GatePolicy, Severity, fingerprint};
+use opw_domain::finding::{Severity, fingerprint};
 use opw_domain::view::{
     AgentKind, AgentView, AlertKind, ApiError, CarryOn, ChatItem, ChatKind, ChatView, Decision,
     FindingDecision, FindingView, FlowAction, FlowError, FlowStatus, GateKind, GateView, LogLine, Provider,
     PushBlock, PushView, QuotaSnapshot, ReviewNote, RunState, RunSummary, RunView, SessionStatus, StepRef,
     StepView, TaskColumn, TaskDetail, ToolEvent,
 };
-use opw_domain::workflow::{Phase, StepKind, StepState, Workflow, WorkflowEvent};
+use opw_domain::workflow::{AfterFix, Phase, StepKind, StepState, Workflow, WorkflowEvent};
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
 use opw_vcs::Git;
 use serde::{Deserialize, Serialize};
@@ -139,7 +141,7 @@ struct Saved {
     error: Option<FlowError>,
     /// Per-task auto-advance; `None` = `steps.autoAdvance`.
     auto: Option<bool>,
-    /// Fix runs so far (a cap stops endless review ⇄ fix).
+    /// Sửa lỗi runs so far (no cap: the user decides after each one).
     fixes: u32,
     /// Feedback on the plan for the next analyze.
     feedback: Option<String>,
@@ -214,14 +216,6 @@ impl TaskCtx {
 
     fn auto(&self, saved: &Saved) -> bool {
         saved.auto.unwrap_or(self.config.steps.auto_advance)
-    }
-
-    fn max_rounds(&self) -> u8 {
-        self.config
-            .steps
-            .cross_review
-            .max_rounds
-            .unwrap_or(opw_domain::workflow::DEFAULT_MAX_REVIEW_ROUNDS)
     }
 
     fn agent_for(&self, step: StepKind) -> AgentKind {
@@ -454,9 +448,10 @@ fn settled(state: &str) -> bool {
     matches!(state, "fixed" | "accepted" | "deferred")
 }
 
-/// Unsettled and either blocking/asked by the gate policy, or picked by the user.
-fn to_fix(f: &FindingRow, policy: &GatePolicy) -> bool {
-    !settled(&f.state) && (f.chosen || policy.action(severity_of(&f.severity)) != GateAction::Info)
+/// Picked by the user and still open (one being fixed, or fixed and not reviewed again, is not
+/// taken twice).
+fn to_fix(f: &FindingRow) -> bool {
+    f.chosen && f.state == "open"
 }
 
 fn finding_view(f: &FindingRow) -> FindingView {
@@ -758,7 +753,7 @@ impl Flow {
             let mut tasks = self.inner.lock_tasks();
             let entry = tasks.entry(ctx.row.wp_id).or_default();
             if entry.saved.workflow.phase() == Phase::NotStarted {
-                entry.saved = new_saved(ctx);
+                entry.saved = new_saved();
                 push_log(entry, None, "info", "Đã nhận task: tạo nhánh và brief xong");
                 self.inner.persist(ctx.row.wp_id, entry);
                 return Ok(());
@@ -790,7 +785,7 @@ impl Flow {
         let mut tasks = self.inner.lock_tasks();
         if !tasks.contains_key(&ctx.row.wp_id) {
             let entry = tasks.entry(ctx.row.wp_id).or_default();
-            entry.saved = new_saved(ctx);
+            entry.saved = new_saved();
             self.inner.persist(ctx.row.wp_id, entry);
         }
     }
@@ -909,7 +904,7 @@ impl Flow {
         let note = match (status, &entry.saved.error) {
             (FlowStatus::Gate, Some(e)) if gate == Some(GateKind::Error) => Some(short(&e.message)),
             (FlowStatus::Gate, _) => {
-                gate.map(|g| gate_message(g, entry, &self.inner.findings(ctx.row.wp_id), &ctx.config))
+                gate.map(|g| gate_message(g, entry, &self.inner.findings(ctx.row.wp_id)))
             }
             _ => None,
         };
@@ -989,7 +984,7 @@ impl Flow {
             steps: step_views(entry, &runs, &ctx.row.updated_at),
             agents,
             findings: findings.iter().map(finding_view).collect(),
-            gate: gate_view(entry, &findings, &ctx.config),
+            gate: gate_view(entry, &findings),
         })
     }
 
@@ -1017,7 +1012,7 @@ impl Flow {
             status: status_of(entry),
             current: current_step(entry),
             steps: step_views(entry, &runs, &ctx.row.updated_at),
-            gate: gate_view(entry, &findings, &ctx.config),
+            gate: gate_view(entry, &findings),
             error: entry.saved.error.clone(),
             running: entry.run.as_ref().map(|r| RunView {
                 step: r.step,
@@ -1030,7 +1025,6 @@ impl Flow {
                 command: r.command.clone(),
             }),
             round: entry.saved.workflow.round(),
-            max_rounds: entry.saved.workflow.max_rounds(),
             auto_advance: ctx.auto(&entry.saved),
             brief: ctx.read(BRIEF_FILE),
             plan: ctx.read(PLAN_FILE),
@@ -1144,8 +1138,8 @@ impl Flow {
     }
 }
 
-fn new_saved(ctx: &TaskCtx) -> Saved {
-    let mut workflow = Workflow::new(ctx.max_rounds());
+fn new_saved() -> Saved {
+    let mut workflow = Workflow::new();
     let _ = workflow.apply(WorkflowEvent::Start);
     let _ = workflow.apply(WorkflowEvent::StepSucceeded(StepKind::Intake));
     Saved {
@@ -1506,30 +1500,62 @@ fn apply_action(
             );
             Ok(true)
         }
-        FlowAction::FinishTriage => {
-            let policy = &ctx.config.gate;
-            let findings = store
-                .lock()
-                .ok()
-                .and_then(|s| s.findings(ctx.row.wp_id).ok())
-                .unwrap_or_default();
-            let undecided = findings
-                .iter()
-                .filter(|f| {
-                    !settled(&f.state)
-                        && !f.chosen
-                        && policy.action(severity_of(&f.severity)) == GateAction::Ask
-                })
-                .count();
-            if undecided > 0 {
-                return Err(ApiError::new(
-                    "triage.open",
-                    format!("Còn {undecided} lỗi medium chưa quyết (sửa, chấp nhận hoặc để sau)"),
-                ));
+        FlowAction::PickFindings { fix } => {
+            if phase != Phase::Gate(GateKind::Findings) {
+                return Err(not_now("chọn lỗi để sửa"));
             }
-            let fix = findings.iter().filter(|f| to_fix(f, policy)).count();
-            event(entry, E::MediumTriaged { fix })?;
-            Ok(true)
+            let review = entry
+                .saved
+                .workflow
+                .gate_review()
+                .unwrap_or(StepKind::FinalReview);
+            let picked = if *fix {
+                let findings = store
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.findings(ctx.row.wp_id).ok())
+                    .unwrap_or_default();
+                let n = findings.iter().filter(|f| to_fix(f)).count();
+                if n == 0 {
+                    return Err(ApiError::new(
+                        "findings.none",
+                        "Chưa chọn lỗi nào: bấm Sửa ở lỗi cần AI sửa trước",
+                    ));
+                }
+                n
+            } else {
+                0
+            };
+            event(entry, E::FindingsPicked { fix: picked })?;
+            let text = if picked > 0 {
+                format!("Bạn chọn {picked} lỗi của {} cho AI sửa", step_label(review))
+            } else {
+                format!(
+                    "Bạn không sửa lỗi nào của {}: sang {}",
+                    step_label(review),
+                    current_step(entry).map_or("bước sau", step_label)
+                )
+            };
+            push_log(entry, Some(review), "info", &text);
+            Ok(matches!(entry.saved.workflow.phase(), Phase::Running(_)))
+        }
+        FlowAction::AfterFix { choice } => {
+            if phase != Phase::Gate(GateKind::AfterFix) {
+                return Err(not_now("trả lời câu này"));
+            }
+            let fix = current_step(entry);
+            event(entry, E::AfterFix(*choice))?;
+            let wf = &entry.saved.workflow;
+            let text = match choice {
+                AfterFix::CrossReview => format!("Bạn chọn Review chéo lại (vòng {})", wf.round()),
+                AfterFix::PickMore => "Bạn chọn thêm lỗi để sửa".to_owned(),
+                AfterFix::Next => format!(
+                    "Không review chéo lại: sang {}",
+                    wf.current_step().map_or("bước sau", step_label)
+                ),
+            };
+            push_log(entry, fix, "info", &text);
+            Ok(matches!(entry.saved.workflow.phase(), Phase::Running(_)))
         }
         FlowAction::RerunPush { issue } => {
             if running {
@@ -1577,7 +1603,7 @@ fn apply_action(
             }
             if let Some(step) = *step {
                 event(entry, E::Reopen(step))?;
-                // a fresh start of the review loop gets its full number of fixes again
+                // the Sửa lỗi count starts over with the review loop
                 if step.index() <= StepKind::CrossReview.index() {
                     entry.saved.fixes = 0;
                 }
@@ -1654,11 +1680,20 @@ fn stop_alert(ctx: &TaskCtx, step: StepKind, entry: &Entry, text: &str) -> Optio
             ctx.row.title.clone(),
             "plan",
         ),
-        Phase::Gate(GateKind::MediumTriage) => (
+        Phase::Gate(GateKind::Findings) => (
             AlertKind::Gate,
-            title_of("lỗi medium chờ bạn quyết"),
+            title_of(&format!(
+                "{} báo lỗi: chọn lỗi cần sửa",
+                step_label(entry.saved.workflow.gate_review().unwrap_or(step))
+            )),
             ctx.row.title.clone(),
             "findings",
+        ),
+        Phase::Gate(GateKind::AfterFix) => (
+            AlertKind::Gate,
+            title_of("sửa lỗi xong: Review chéo lại?"),
+            ctx.row.title.clone(),
+            "progress",
         ),
         Phase::Gate(_) => (
             AlertKind::Gate,
@@ -1793,21 +1828,40 @@ fn save_review_notes(ctx: &TaskCtx, step: StepKind, answer: &str) {
     }
 }
 
-fn gate_message(kind: GateKind, entry: &Entry, findings: &[FindingRow], config: &Config) -> String {
+/// " Đã review chéo 2 vòng." (nothing before the first round).
+fn rounds_note(round: u8) -> String {
+    if round == 0 {
+        String::new()
+    } else {
+        format!(" Đã review chéo {round} vòng.")
+    }
+}
+
+fn gate_message(kind: GateKind, entry: &Entry, findings: &[FindingRow]) -> String {
+    let wf = &entry.saved.workflow;
     match kind {
         GateKind::PlanReview => {
             "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.".into()
         }
-        GateKind::MediumTriage => {
-            let n = findings
-                .iter()
-                .filter(|f| {
-                    !settled(&f.state)
-                        && !f.chosen
-                        && config.gate.action(severity_of(&f.severity)) == GateAction::Ask
-                })
-                .count();
-            format!("{n} lỗi medium cần bạn quyết: sửa, chấp nhận kèm lý do, hoặc để sau.")
+        GateKind::Findings => {
+            let review = wf.gate_review().unwrap_or(StepKind::FinalReview);
+            let open = findings.iter().filter(|f| f.state == "open").count();
+            let picked = findings.iter().filter(|f| to_fix(f)).count();
+            let next = wf.skip_target().map_or("bước sau", step_label);
+            format!(
+                "{} báo lỗi: {open} lỗi đang mở, đã chọn {picked} cho AI sửa. Chọn lỗi cần sửa, hoặc sang {next} mà không sửa.{}",
+                step_label(review),
+                rounds_note(wf.round())
+            )
+        }
+        GateKind::AfterFix => {
+            let next = wf.round().saturating_add(1);
+            let ask = if wf.round() == 0 {
+                "Chạy Review chéo (vòng 1)?".to_owned()
+            } else {
+                format!("Chạy Review chéo lại (vòng {next})?")
+            };
+            format!("Sửa lỗi xong. {ask}{}", rounds_note(wf.round()))
         }
         GateKind::SelfCode => {
             "Bạn đang tự code trên nhánh này. Xong thì bấm \"Tôi code xong\" để app review.".into()
@@ -1821,15 +1875,18 @@ fn gate_message(kind: GateKind, entry: &Entry, findings: &[FindingRow], config: 
     }
 }
 
-fn gate_view(entry: &Entry, findings: &[FindingRow], config: &Config) -> Option<GateView> {
+fn gate_view(entry: &Entry, findings: &[FindingRow]) -> Option<GateView> {
     if entry.run.is_some() {
         return None;
     }
-    match entry.saved.workflow.phase() {
+    let wf = &entry.saved.workflow;
+    match wf.phase() {
         Phase::Gate(kind) => Some(GateView {
             kind,
             since: entry.saved.since.clone().unwrap_or_default(),
-            message: gate_message(kind, entry, findings, config),
+            message: gate_message(kind, entry, findings),
+            review: wf.gate_review(),
+            next: wf.skip_target(),
         }),
         _ => None,
     }
@@ -2492,36 +2549,15 @@ fn usd(cost: f64) -> String {
     format!("${cost:.2}")
 }
 
-/// The state-machine event of a finished review, and a line for the log.
-fn review_event(
-    step: StepKind,
-    findings: &[FindingRow],
-    policy: &GatePolicy,
-    raw: &[RawFinding],
-) -> (WorkflowEvent, String) {
-    let open = findings.iter().filter(|f| !settled(&f.state)).count();
-    let blocking = findings.iter().filter(|f| to_fix(f, policy)).count();
-    let event = match step {
-        StepKind::FinalReview => WorkflowEvent::FinalReviewFinished {
-            critical_or_high: findings
-                .iter()
-                .filter(|f| {
-                    !settled(&f.state)
-                        && (f.chosen || policy.action(severity_of(&f.severity)) == GateAction::Block)
-                })
-                .count(),
-            medium_undecided: findings
-                .iter()
-                .filter(|f| {
-                    !settled(&f.state)
-                        && !f.chosen
-                        && policy.action(severity_of(&f.severity)) == GateAction::Ask
-                })
-                .count(),
-        },
-        StepKind::CrossReview => WorkflowEvent::CrossReviewFinished { blocking },
-        _ => WorkflowEvent::ReviewLocalFinished { blocking },
-    };
+/// The state-machine event of a finished review, and a line for the log. What it reported and
+/// the user has not accepted or deferred before stops the flow at the findings gate.
+fn review_event(findings: &[FindingRow], raw: &[RawFinding]) -> (WorkflowEvent, String) {
+    let reported: HashSet<String> = raw.iter().map(|r| fingerprint(&r.file, &r.title)).collect();
+    let open = findings
+        .iter()
+        .filter(|f| reported.contains(&f.fingerprint) && !settled(&f.state))
+        .count();
+    let decided = reported.len().saturating_sub(open);
     let mut by_severity = Vec::new();
     for sev in ["critical", "high", "medium", "low"] {
         let n = raw
@@ -2537,14 +2573,12 @@ fn review_event(
     } else {
         format!("báo {} lỗi ({})", raw.len(), by_severity.join(", "))
     };
-    let note = if blocking > 0 {
-        format!("{found}, cần sửa {blocking}")
-    } else if open > 0 {
-        format!("{found}, còn mở {open}")
+    let note = if decided > 0 {
+        format!("{found}, {decided} lỗi bạn đã chấp nhận / để sau từ trước")
     } else {
         found
     };
-    (event, note)
+    (WorkflowEvent::ReviewFinished { open }, note)
 }
 
 /// Check the repo, run the step, check the repo again.
@@ -2623,7 +2657,6 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             inner.with_saved(wp_id, |s| s.session = Some(id.to_owned()));
         }
     };
-    let policy = &ctx.config.gate;
     // the user's model / effort for this step (nothing when they left it to the machine)
     let cl = |args: Vec<String>| claude::with_model(args, &claim.choice);
     match step {
@@ -2699,7 +2732,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             let raw = text::findings_from_text(&r.text).ok_or_else(unreadable_review)?;
             save_review_notes(ctx, step, &r.text);
             let findings = inner.merge(ctx, step, 0, source, &raw)?;
-            let (event, note) = review_event(step, &findings, policy, &raw);
+            let (event, note) = review_event(&findings, &raw);
             Ok(Done {
                 event,
                 note,
@@ -2707,21 +2740,12 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             })
         }
         StepKind::Fix | StepKind::FixCross => {
-            let cap = u32::from(ctx.max_rounds()) * 2 + 2;
-            if fixes >= cap {
-                return Err(flow_error(
-                    "fix.cap",
-                    format!(
-                        "Đã sửa {fixes} lần mà review vẫn còn lỗi. App dừng để bạn xem lại tab Lỗi review."
-                    ),
-                ));
-            }
             let findings = inner.findings(wp_id);
-            let items: Vec<&FindingRow> = findings.iter().filter(|f| to_fix(f, policy)).collect();
+            let items: Vec<&FindingRow> = findings.iter().filter(|f| to_fix(f)).collect();
             if items.is_empty() {
                 return Ok(Done {
                     event: E::StepSucceeded(step),
-                    note: "không còn lỗi cần sửa".into(),
+                    note: "không có lỗi nào được chọn để sửa".into(),
                     cost: None,
                 });
             }
@@ -2753,11 +2777,16 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 claim,
             )?;
             set_session(&r.session_id);
-            inner.with_saved(wp_id, |s| s.fixes += 1);
+            let fixes = inner
+                .with_saved(wp_id, |s| {
+                    s.fixes += 1;
+                    s.fixes
+                })
+                .unwrap_or(fixes + 1);
             Ok(Done {
                 event: E::StepSucceeded(step),
                 note: format!(
-                    "xử lý {} lỗi; {}{}",
+                    "lần sửa thứ {fixes}: xử lý {} lỗi; {}{}",
                     list.len(),
                     change_note(repo),
                     denied_note(r.denials.len())
@@ -2811,7 +2840,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 (raw, "claude", Some(r.cost_usd))
             };
             let findings = inner.merge(ctx, step, round, source, &raw)?;
-            let (event, note) = review_event(step, &findings, policy, &raw);
+            let (event, note) = review_event(&findings, &raw);
             Ok(Done {
                 event,
                 note: format!("vòng {round}: {note}"),
@@ -3096,6 +3125,40 @@ mod tests {
         }
     }
 
+    /// The user picks every open finding for the AI to fix.
+    fn pick_all(flow: &Flow, ctx: &TaskCtx) {
+        for f in flow.detail(ctx).findings {
+            if f.state == opw_domain::finding::FindingState::Open {
+                flow.decide(&FindingDecision {
+                    wp_id: ctx.row.wp_id,
+                    fingerprint: f.fingerprint,
+                    decision: Decision::Fix,
+                    reason: None,
+                })
+                .unwrap();
+            }
+        }
+    }
+
+    /// Answer every stop the plain way (approve, no fixes, no new cross review) until the push
+    /// summary is ready.
+    fn to_push(flow: &Flow, ctx: &TaskCtx, mut d: TaskDetail) -> TaskDetail {
+        for _ in 0..12 {
+            let action = match (d.status, d.gate.as_ref().map(|g| g.kind)) {
+                (FlowStatus::AwaitingPush, _) => return d,
+                (FlowStatus::Gate, Some(GateKind::PlanReview)) => FlowAction::ApprovePlan,
+                (FlowStatus::Gate, Some(GateKind::Findings)) => FlowAction::PickFindings { fix: false },
+                (FlowStatus::Gate, Some(GateKind::AfterFix)) => FlowAction::AfterFix {
+                    choice: AfterFix::Next,
+                },
+                (FlowStatus::Ready, _) => FlowAction::Run,
+                other => panic!("{other:?}: {:?}", d.error),
+            };
+            d = run(flow, ctx, action);
+        }
+        d
+    }
+
     #[test]
     fn runs_all_steps_and_stops_at_each_one() {
         let Some(s) = setup() else { return };
@@ -3128,23 +3191,86 @@ mod tests {
                 .contains("// edit")
         );
 
+        // the review found a high: the flow waits for the user to pick what gets fixed
         let d = run(&flow, &ctx, FlowAction::Run);
-        assert_eq!(d.current, Some(StepKind::Fix), "{:?}", d.error);
+        assert_eq!(d.current, Some(StepKind::ReviewLocal), "{:?}", d.error);
+        let gate = d.gate.clone().unwrap();
+        assert_eq!(
+            (gate.kind, gate.review, gate.next),
+            (
+                GateKind::Findings,
+                Some(StepKind::ReviewLocal),
+                Some(StepKind::CrossReview)
+            )
+        );
+        assert!(
+            gate.message
+                .starts_with("Tự review báo lỗi: 1 lỗi đang mở, đã chọn 0"),
+            "{}",
+            gate.message
+        );
         assert_eq!(d.findings.len(), 1);
         assert_eq!(d.findings[0].severity, Severity::High);
         assert_eq!(d.findings[0].detail.as_deref(), Some("crash"));
+        assert_eq!(d.findings[0].source, "claude");
+        assert_eq!(d.findings[0].step, Some(StepKind::ReviewLocal));
         let card = flow.card(&ctx).unwrap();
         assert_eq!(
-            (card.step.kind, card.step.state),
-            (StepKind::Fix, StepState::Pending)
+            (card.step.kind, card.step.state, card.gate),
+            (
+                StepKind::ReviewLocal,
+                StepState::WaitingUser,
+                Some(GateKind::Findings)
+            )
+        );
+        // a high is not fixed unless the user picks it
+        assert_eq!(
+            flow.act(ctx.clone(), FlowAction::PickFindings { fix: true })
+                .unwrap_err()
+                .code,
+            "findings.none"
+        );
+        pick_all(&flow, &ctx);
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        // the fix ran; now: review again?
+        let gate = d.gate.clone().unwrap();
+        assert_eq!(
+            (gate.kind, d.current, gate.next),
+            (
+                GateKind::AfterFix,
+                Some(StepKind::Fix),
+                Some(StepKind::FinalReview)
+            ),
+            "{:?}",
+            d.error
+        );
+        assert_eq!(gate.message, "Sửa lỗi xong. Chạy Review chéo (vòng 1)?");
+        assert_eq!(d.findings[0].state, opw_domain::finding::FindingState::Fixing);
+        assert!(
+            d.runs
+                .last()
+                .unwrap()
+                .note
+                .as_deref()
+                .unwrap()
+                .starts_with("lần sửa thứ 1: xử lý 1 lỗi"),
+            "{:?}",
+            d.runs.last()
         );
 
-        let d = run(&flow, &ctx, FlowAction::Run);
-        assert_eq!(d.current, Some(StepKind::CrossReview), "{:?}", d.error);
-        assert_eq!(d.findings[0].state, opw_domain::finding::FindingState::Fixing);
-
-        let d = run(&flow, &ctx, FlowAction::Run);
-        assert_eq!(d.current, Some(StepKind::FinalReview), "{:?}", d.error);
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::AfterFix {
+                choice: AfterFix::CrossReview,
+            },
+        );
+        assert_eq!(
+            (d.status, d.current),
+            (FlowStatus::Ready, Some(StepKind::FinalReview)),
+            "{:?}",
+            d.error
+        );
         assert_eq!(d.round, 1);
         assert_eq!(d.findings[0].state, opw_domain::finding::FindingState::Fixed);
         let system = flow.system(&ctx).unwrap();
@@ -3234,13 +3360,8 @@ mod tests {
         assert_eq!((card.column, card.finished_at), (TaskColumn::Active, None));
 
         // through to the push summary and done
-        let mut d = run(&flow, &ctx, FlowAction::ApprovePlan);
-        for _ in 0..6 {
-            if d.status == FlowStatus::AwaitingPush {
-                break;
-            }
-            d = run(&flow, &ctx, FlowAction::Run);
-        }
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        let d = to_push(&flow, &ctx, d);
         assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
         run(&flow, &ctx, FlowAction::Finish { forced: true });
         // Nhận task cannot run again, and a refused "Làm tiếp" leaves the task done
@@ -3312,18 +3433,8 @@ mod tests {
         let (flow, _) = flow_with(&s, false, happy(CLEAN));
         let ctx = s.ctx(1, &Config::default());
         flow.started(&ctx, None).unwrap();
-        let mut d = run(&flow, &ctx, FlowAction::Run);
-        d = if d.status == FlowStatus::Gate {
-            run(&flow, &ctx, FlowAction::ApprovePlan)
-        } else {
-            d
-        };
-        for _ in 0..8 {
-            if d.status == FlowStatus::AwaitingPush {
-                break;
-            }
-            d = run(&flow, &ctx, FlowAction::Run);
-        }
+        let d = run(&flow, &ctx, FlowAction::Run);
+        let d = to_push(&flow, &ctx, d);
         assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
         run(&flow, &ctx, FlowAction::Finish { forced: false });
         let runs_before = flow.detail(&ctx).runs.len();
@@ -3354,24 +3465,64 @@ mod tests {
         assert_eq!(flow.detail(&ctx).current, Some(StepKind::Implement));
     }
 
+    /// "Tự chạy" (one switch per task) runs step after step, but stops at every decision and
+    /// says so: plan, each review's findings, "Review chéo lại?" after each fix, push.
     #[test]
-    fn auto_advance_runs_until_the_next_gate_and_mediums_wait_for_the_user() {
+    fn auto_advance_stops_at_every_decision_and_announces_it() {
         let Some(s) = setup() else { return };
         let (flow, _) = flow_with(&s, false, happy(MEDIUM));
-        let mut config = Config::default();
-        config.steps.auto_advance = true;
-        let ctx = s.ctx(1, &config);
+        let alerts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = alerts.clone();
+        flow.set_alert_sink(move |a| sink.lock().unwrap().push(a.title));
+        let ctx = s.ctx(1, &Config::default());
         flow.started(&ctx, None).unwrap();
+        // the switch is per task
+        let d = run(&flow, &ctx, FlowAction::SetAuto { on: true });
+        assert!(d.auto_advance);
         let d = run(&flow, &ctx, FlowAction::Run);
         assert_eq!(d.gate.map(|g| g.kind), Some(GateKind::PlanReview));
         let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        // implement ran by itself, then Tự review: its high waits for the user
+        let gate = d.gate.clone().unwrap();
         assert_eq!(
-            d.gate.as_ref().map(|g| g.kind),
-            Some(GateKind::MediumTriage),
+            (gate.kind, gate.review),
+            (GateKind::Findings, Some(StepKind::ReviewLocal)),
             "{:?}",
             d.error
         );
-        assert!(d.gate.unwrap().message.starts_with("1 lỗi medium"));
+        pick_all(&flow, &ctx);
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::AfterFix),
+            "{:?}",
+            d.error
+        );
+        // Codex is clean, the final review reports a medium: its gate leads to the push summary
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::AfterFix {
+                choice: AfterFix::CrossReview,
+            },
+        );
+        let gate = d.gate.clone().unwrap();
+        assert_eq!(
+            (gate.kind, gate.review, gate.next, d.round),
+            (
+                GateKind::Findings,
+                Some(StepKind::FinalReview),
+                Some(StepKind::PushSummary),
+                1
+            ),
+            "{:?}",
+            d.error
+        );
+        assert!(
+            gate.message.ends_with("Đã review chéo 1 vòng."),
+            "{}",
+            gate.message
+        );
         let medium = d
             .findings
             .iter()
@@ -3379,11 +3530,6 @@ mod tests {
             .unwrap()
             .fingerprint
             .clone();
-
-        assert_eq!(
-            flow.act(ctx.clone(), FlowAction::FinishTriage).unwrap_err().code,
-            "triage.open"
-        );
         let decide = |decision, reason: Option<&str>| {
             flow.decide(&FindingDecision {
                 wp_id: 1,
@@ -3394,10 +3540,160 @@ mod tests {
         };
         assert_eq!(decide(Decision::Accept, None).unwrap_err().code, "finding.reason");
         decide(Decision::Accept, Some("chỉ là test")).unwrap();
-        let d = run(&flow, &ctx, FlowAction::FinishTriage);
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: false });
         assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
         let accepted = d.findings.iter().find(|f| f.fingerprint == medium).unwrap();
         assert_eq!(accepted.reason.as_deref(), Some("chỉ là test"));
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text == "Bạn chọn Review chéo lại (vòng 1)")
+        );
+
+        // one alert per stop, none between steps that ran by themselves (the last one is sent
+        // just after the step ends)
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alerts.lock().unwrap().len() < 5 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            *alerts.lock().unwrap(),
+            [
+                "WP-1 · plan chờ bạn duyệt",
+                "WP-1 · Tự review báo lỗi: chọn lỗi cần sửa",
+                "WP-1 · sửa lỗi xong: Review chéo lại?",
+                "WP-1 · Review chốt báo lỗi: chọn lỗi cần sửa",
+                "WP-1 · sẵn sàng push",
+            ]
+        );
+        // the same medium reported again later is not asked about again
+        let (_, note) = review_event(
+            &flow.inner.findings(1),
+            &[RawFinding {
+                severity: "medium".into(),
+                file: "a.ts".into(),
+                line: Some(1),
+                title: "Missing test".into(),
+                detail: String::new(),
+                suggestion: String::new(),
+            }],
+        );
+        assert_eq!(
+            note,
+            "báo 1 lỗi (1 medium), 1 lỗi bạn đã chấp nhận / để sau từ trước"
+        );
+    }
+
+    /// Without "Tự chạy" the user can also skip the cross review after a fix, or pick more.
+    #[test]
+    fn after_a_fix_the_user_can_pick_more_or_go_on_without_codex() {
+        let Some(s) = setup() else { return };
+        let two = "```json\n{\"findings\":[{\"severity\":\"high\",\"file\":\"a.ts\",\"line\":1,\"title\":\"Null org\"},{\"severity\":\"low\",\"file\":\"a.ts\",\"line\":9,\"title\":\"Name\"}]}\n```";
+        let reviews = AtomicUsize::new(0);
+        let inner = happy(CLEAN);
+        let (flow, fake) = flow_with(
+            &s,
+            false,
+            move |job: &Job, stop: &AtomicBool, out: &mut dyn FnMut(&str)| {
+                if kind(job) == "review" {
+                    let first = reviews.fetch_add(1, Ordering::SeqCst) == 0;
+                    out(&result_line(if first { two } else { CLEAN }));
+                    return ok();
+                }
+                inner(job, stop, out)
+            },
+        );
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        run(&flow, &ctx, FlowAction::ApprovePlan);
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(d.gate.as_ref().map(|g| g.kind), Some(GateKind::Findings));
+        // fix only the high
+        let high = d.findings.iter().find(|f| f.severity == Severity::High).unwrap();
+        flow.decide(&FindingDecision {
+            wp_id: 1,
+            fingerprint: high.fingerprint.clone(),
+            decision: Decision::Fix,
+            reason: None,
+        })
+        .unwrap();
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        assert_eq!(d.gate.as_ref().map(|g| g.kind), Some(GateKind::AfterFix));
+        // back to Tự review's findings: the low is still there, the high is not taken twice
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::AfterFix {
+                choice: AfterFix::PickMore,
+            },
+        );
+        let gate = d.gate.clone().unwrap();
+        assert_eq!(
+            (gate.kind, gate.review),
+            (GateKind::Findings, Some(StepKind::ReviewLocal))
+        );
+        assert!(
+            gate.message.contains("1 lỗi đang mở, đã chọn 0"),
+            "{}",
+            gate.message
+        );
+        pick_all(&flow, &ctx);
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        assert_eq!(d.gate.as_ref().map(|g| g.kind), Some(GateKind::AfterFix));
+        let fixes: Vec<String> = fake
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|j| kind(j) == "code")
+            .skip(1)
+            .map(|j| j.stdin.clone().unwrap())
+            .collect();
+        assert_eq!(fixes.len(), 2);
+        assert!(fixes[0].contains("Null org") && !fixes[0].contains("Name"));
+        assert!(fixes[1].contains("Name") && !fixes[1].contains("Null org"));
+
+        // no cross review: Review chéo and step 9 are "bỏ qua", the final review runs now
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::AfterFix {
+                choice: AfterFix::Next,
+            },
+        );
+        assert_eq!(
+            (d.status, d.current, d.round),
+            (FlowStatus::Ready, Some(StepKind::PushSummary), 0),
+            "{:?}",
+            d.error
+        );
+        let state = |k: StepKind| d.steps.iter().find(|s| s.kind == k).unwrap().state;
+        assert_eq!(state(StepKind::CrossReview), StepState::Skipped);
+        assert_eq!(state(StepKind::FixCross), StepState::Skipped);
+        assert_eq!(state(StepKind::Fix), StepState::Done);
+        assert_eq!(state(StepKind::FinalReview), StepState::Done);
+        let jobs = fake.jobs.lock().unwrap().clone();
+        assert!(!jobs.iter().any(|j| kind(j) == "codex"));
+        assert_eq!(jobs.iter().filter(|j| kind(j) == "review").count(), 2);
+        // the final review was clean: what was being fixed is fixed
+        assert!(
+            d.findings
+                .iter()
+                .all(|f| f.state == opw_domain::finding::FindingState::Fixed)
+        );
+        // answers only count at their own gate
+        assert_eq!(
+            flow.act(
+                ctx.clone(),
+                FlowAction::AfterFix {
+                    choice: AfterFix::Next
+                }
+            )
+            .unwrap_err()
+            .code,
+            "flow.notNow"
+        );
     }
 
     #[test]
@@ -3503,7 +3799,7 @@ mod tests {
     fn a_step_running_when_the_app_closed_can_be_retried() {
         let Some(s) = setup() else { return };
         let ctx = s.ctx(1, &Config::default());
-        let mut saved = new_saved(&ctx);
+        let mut saved = new_saved();
         saved.in_flight = true;
         s.store
             .lock()
@@ -3543,7 +3839,13 @@ mod tests {
         let d = run(&flow, &ctx, FlowAction::SelfCode);
         assert_eq!(d.gate.map(|g| g.kind), Some(GateKind::SelfCode));
         let d = run(&flow, &ctx, FlowAction::SelfCodeDone);
-        assert_eq!(d.current, Some(StepKind::Fix), "{:?}", d.error);
+        // Tự review ran on the user's change and found the high
+        assert_eq!(
+            (d.current, d.gate.map(|g| g.kind)),
+            (Some(StepKind::ReviewLocal), Some(GateKind::Findings)),
+            "{:?}",
+            d.error
+        );
         assert_eq!(
             fake.jobs
                 .lock()
@@ -3571,7 +3873,16 @@ mod tests {
         // nothing picked for analyze: no flag, and the model Claude reported is shown
         assert_eq!(d.steps[1].model.as_deref(), Some("m"));
         assert_eq!(d.steps[1].effort, None);
-        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        run(&flow, &ctx, FlowAction::ApprovePlan);
+        pick_all(&flow, &ctx);
+        run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::AfterFix {
+                choice: AfterFix::CrossReview,
+            },
+        );
         assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
 
         let jobs = fake.jobs.lock().unwrap().clone();

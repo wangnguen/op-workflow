@@ -11,7 +11,7 @@ import {
 } from "../../ipc/mockFlow";
 import type { FindingView, TaskDetail } from "../../ipc/types";
 import { parseBlocks } from "../../shared/Markdown";
-import { asTab, defaultTab, findingCounts, gateTab, sortFindings, undecidedMediums } from "./taskTabs";
+import { asTab, defaultTab, findingCounts, gateTab, sortFindings, unpicked, unpickedSevere } from "./taskTabs";
 
 const finding = (over: Partial<FindingView>): FindingView => ({
   fingerprint: "x",
@@ -29,21 +29,23 @@ describe("task window helpers", () => {
     const at = (over: Partial<TaskDetail>) => defaultTab({ ...base, ...over });
     expect(at({})).toBe("brief");
     expect(at({ status: "gate", gate: { kind: "planReview", since: "", message: "" } })).toBe("plan");
-    expect(at({ status: "gate", gate: { kind: "mediumTriage", since: "", message: "" } })).toBe("findings");
+    expect(at({ status: "gate", gate: { kind: "findings", since: "", message: "" } })).toBe("findings");
+    expect(at({ status: "gate", gate: { kind: "afterFix", since: "", message: "" } })).toBe("progress");
     expect(at({ status: "gate", gate: { kind: "error", since: "", message: "" } })).toBe("progress");
     expect(at({ status: "running" })).toBe("progress");
     expect(at({ status: "awaitingPush" })).toBe("push");
     // after a step, the timeline (not the plan) unless a gate needs another tab
     const ran = mockTaskDetail(186196).runs;
     expect(at({ status: "ready", current: "reviewLocal", plan: "## x", runs: ran })).toBe("progress");
-    expect(gateTab("mediumTriage")).toBe("findings");
+    expect(gateTab("findings")).toBe("findings");
+    expect(gateTab("afterFix")).toBe("progress");
     expect(gateTab("error")).toBe("progress");
     expect(asTab("log")).toBe("progress");
     expect(asTab("chat")).toBe("chat");
     expect(asTab("nope")).toBeUndefined();
   });
 
-  it("sorts open findings first, most severe first, and counts what the fix takes", () => {
+  it("sorts open findings first, most severe first, and counts only what the user picked", () => {
     const list = [
       finding({ fingerprint: "a", severity: "low" }),
       finding({ fingerprint: "b", severity: "high", state: "fixed" }),
@@ -52,10 +54,12 @@ describe("task window helpers", () => {
       finding({ fingerprint: "e", severity: "low", chosen: true }),
     ];
     expect(sortFindings(list).map((f) => f.fingerprint)).toEqual(["d", "c", "a", "e", "b"]);
-    expect(findingCounts(list)).toEqual({ open: 4, fix: 3 });
-    // while the user triages, mediums are theirs to decide, not the fix's
-    expect(findingCounts(list, true)).toEqual({ open: 4, fix: 2 });
-    expect(undecidedMediums(list)).toBe(1);
+    // nothing is fixed by severity alone: only the low the user picked
+    expect(findingCounts(list)).toEqual({ open: 4, fix: 1 });
+    expect(unpickedSevere(list).map((f) => f.fingerprint)).toEqual(["d"]);
+    expect(unpicked(list)).toBe(3);
+    // fixed and waiting for a review: neither open nor taken again
+    expect(findingCounts([finding({ state: "fixing", chosen: true })])).toEqual({ open: 0, fix: 0 });
   });
 
   it("reads the markdown of a plan", () => {
@@ -83,23 +87,31 @@ describe("mock workflow (browser preview)", () => {
     expect(() => mockFlowAction(7, { type: "rejectPlan", feedback: " " })).toThrow();
     mockFlowAction(7, { type: "approvePlan" });
     expect(step(7)).toMatchObject({ status: "ready", current: "reviewLocal" });
+    // Tự review reports a high and a low: the user picks what the AI fixes
     mockFlowAction(7, { type: "run" });
-    expect(step(7)).toMatchObject({ current: "fix" });
-    mockFlowAction(7, { type: "run" });
+    const first = step(7);
+    expect(first.gate).toMatchObject({ kind: "findings", review: "reviewLocal", next: "crossReview" });
+    expect(first.findings.map((f) => f.source)).toEqual(["review-local", "review-local"]);
+    expect(() => mockFlowAction(7, { type: "pickFindings", fix: true })).toThrow(/Chưa chọn/);
+    const high = first.findings.find((f) => f.severity === "high")!;
+    mockDecideFinding({ wpId: 7, fingerprint: high.fingerprint, decision: "fix" });
+    expect(mockFlowAction(7, { type: "pickFindings", fix: true })).toMatchObject({ status: "running", current: "fix" });
     expect(mockTaskDetail(7).findings.find((f) => f.severity === "high")?.state).toBe("fixing");
-    step(7);
-    mockFlowAction(7, { type: "run" });
+    // the fix asks: Review chéo?
+    expect(step(7)).toMatchObject({ status: "gate", current: "fix", gate: { kind: "afterFix", next: "finalReview" } });
+    expect(mockFlowAction(7, { type: "afterFix", choice: "crossReview" })).toMatchObject({ status: "running", round: 1 });
     const cross = step(7);
     expect(cross.current).toBe("finalReview");
     expect(cross.findings.find((f) => f.severity === "high")?.state).toBe("fixed");
+    // Review chốt reports a medium: its own gate, leading to the push summary
     mockFlowAction(7, { type: "run" });
-    const triage = step(7);
-    expect(triage.gate?.kind).toBe("mediumTriage");
-    expect(() => mockFlowAction(7, { type: "finishTriage" })).toThrow();
-    const medium = triage.findings.find((f) => f.severity === "medium")!;
+    const last = step(7);
+    expect(last.gate).toMatchObject({ kind: "findings", review: "finalReview", next: "pushSummary" });
+    expect(last.gate?.message).toContain("Đã review chéo 1 vòng.");
+    const medium = last.findings.find((f) => f.severity === "medium")!;
     expect(() => mockDecideFinding({ wpId: 7, fingerprint: medium.fingerprint, decision: "accept" })).toThrow();
     mockDecideFinding({ wpId: 7, fingerprint: medium.fingerprint, decision: "accept", reason: "ok" });
-    mockFlowAction(7, { type: "finishTriage" });
+    mockFlowAction(7, { type: "pickFindings", fix: false });
     const push = step(7);
     expect(push.status).toBe("awaitingPush");
     expect(push.push?.blocks.map((b) => b.label)).toEqual(["Commit message", "PR description"]);

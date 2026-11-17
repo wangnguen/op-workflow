@@ -3,11 +3,14 @@
 //!
 //! ```text
 //! intake -> analyze -> <plan review gate> -> implement -> checks -> harness
-//!   -> reviewLocal (first pass) -> fix if it found anything
-//!   -> crossReview (Codex) <-> fixCross (max rounds)
-//!   -> finalReview (/review-local again) -> <critical/high: fixCross, then finalReview again
-//!                                           | medium: triage gate> -> browserTest -> pushSummary
+//!   -> reviewLocal -> <findings gate> -> fix -> <"Review chéo lại?"> -> crossReview
+//!   -> <findings gate> -> fixCross -> <"Review chéo lại?"> -> crossReview (again) …
+//!   -> finalReview -> <findings gate> -> fixCross -> <"Review chéo lại?"> -> finalReview (again) …
+//!   -> browserTest -> pushSummary
 //! ```
+//! Every review that reports something stops at the findings gate: the user picks what the AI
+//! fixes (or goes on without fixing). Every fix stops at the after-fix gate: the user decides
+//! whether the other AI reviews it again. There is no cap on rounds or fixes.
 //! Checks, harness and browserTest are optional: a task that does not use one marks it skipped
 //! and moves on (nothing turns them on yet; later parts do).
 //! At the plan gate the user can also code by hand (`SelfCode`): the workflow waits until they
@@ -18,10 +21,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{DomainError, DomainResult};
 use crate::view::GateKind;
-
-/// Default number of cross-review/fix rounds before the workflow moves on to the final
-/// `/review-local`.
-pub const DEFAULT_MAX_REVIEW_ROUNDS: u8 = 3;
 
 /// Number of steps; the UI shows "x/12".
 pub const STEP_COUNT: usize = 12;
@@ -47,7 +46,7 @@ pub enum StepKind {
     CrossReview,
     /// Fixes what the cross review or the final review found.
     FixCross,
-    /// `/review-local` again once Codex is clean; its result goes through gate G2.
+    /// `/review-local` again before the push summary.
     FinalReview,
     /// Chrome DevTools MCP test of the app. Optional.
     BrowserTest,
@@ -98,6 +97,14 @@ impl StepKind {
         matches!(self, StepKind::Fix | StepKind::FixCross)
     }
 
+    /// Tự review, Review chéo or Review chốt: steps that report findings.
+    pub fn is_review(self) -> bool {
+        matches!(
+            self,
+            StepKind::ReviewLocal | StepKind::CrossReview | StepKind::FinalReview
+        )
+    }
+
     /// The step after this one; `None` after the push summary.
     pub fn next(self) -> Option<StepKind> {
         StepKind::ALL.get(self.slot() + 1).copied()
@@ -105,6 +112,15 @@ impl StepKind {
 
     fn slot(self) -> usize {
         usize::from(self.index() - 1)
+    }
+}
+
+/// The Sửa lỗi step that fixes what `review` found: step 7 after Tự review, step 9 otherwise.
+pub fn fix_step_of(review: StepKind) -> StepKind {
+    if review == StepKind::ReviewLocal {
+        StepKind::Fix
+    } else {
+        StepKind::FixCross
     }
 }
 
@@ -131,6 +147,19 @@ pub enum Phase {
     AwaitingPush,
 }
 
+/// The user's answer at the after-fix gate ("Review chéo lại?").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AfterFix {
+    /// Yes: the other AI reviews the change again (a new cross-review round).
+    CrossReview,
+    /// No: on to the final review; after a fix of the final review, that review runs again
+    /// (the step that found the problems).
+    Next,
+    /// Back to the findings of the review that was just fixed, to pick more of them.
+    PickMore,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowEvent {
     Start,
@@ -144,23 +173,18 @@ pub enum WorkflowEvent {
     SelfCode,
     /// The user finished coding by hand; review it.
     SelfCodeDone,
-    /// First `/review-local` finished. `blocking` = findings to fix before Codex reviews.
-    ReviewLocalFinished {
-        blocking: usize,
+    /// A review finished. `open` = findings it reported that the user has not accepted or
+    /// deferred yet; any of them stops the flow at the findings gate.
+    ReviewFinished {
+        open: usize,
     },
-    /// Cross-review finished. `blocking` = findings the user (or gate policy) wants fixed.
-    CrossReviewFinished {
-        blocking: usize,
-    },
-    /// Final `/review-local` finished with these counts of still-open findings.
-    FinalReviewFinished {
-        critical_or_high: usize,
-        medium_undecided: usize,
-    },
-    /// Every medium finding of the final review is decided; `fix` of them go back to a fix.
-    MediumTriaged {
+    /// At the findings gate: `fix` findings are picked for the AI to fix; 0 = go on without
+    /// fixing.
+    FindingsPicked {
         fix: usize,
     },
+    /// At the after-fix gate.
+    AfterFix(AfterFix),
     /// Write the push summary again (another issue number, or the user changed the code).
     RedoPushSummary,
     Pause,
@@ -179,9 +203,8 @@ pub struct Workflow {
     /// Phase to return to after `Resume`.
     paused_from: Option<Phase>,
     round: u8,
-    max_rounds: u8,
-    /// The review a running `FixCross` answers: after a final-review fix the final review runs
-    /// again; otherwise Codex reviews the fix.
+    /// The review whose findings are being picked or fixed (findings gate, Sửa lỗi, after-fix
+    /// gate). Saved tasks from before may not have it; see [`Workflow::gate_review`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fix_for: Option<StepKind>,
     /// Optional steps this task runs; the other optional steps are skipped.
@@ -189,7 +212,8 @@ pub struct Workflow {
     uses: Vec<StepKind>,
 }
 
-/// What a saved workflow looks like on disk: 12 states now, 8 before the 12-step flow.
+/// What a saved workflow looks like on disk: 12 states now, 8 before the 12-step flow. Older
+/// saves also carry `maxRounds` (the cap on cross-review rounds is gone; serde ignores it).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SavedWorkflow {
@@ -197,7 +221,6 @@ struct SavedWorkflow {
     phase: Phase,
     paused_from: Option<Phase>,
     round: u8,
-    max_rounds: u8,
     #[serde(default)]
     fix_for: Option<StepKind>,
     #[serde(default)]
@@ -227,7 +250,6 @@ impl TryFrom<SavedWorkflow> for Workflow {
             phase: phase(s.phase),
             paused_from: s.paused_from.map(phase),
             round: s.round,
-            max_rounds: s.max_rounds.max(1),
             fix_for: s.fix_for,
             uses: s.uses,
         })
@@ -269,18 +291,17 @@ fn upgrade_states(old: &[StepState], round: u8) -> [StepState; STEP_COUNT] {
 
 impl Default for Workflow {
     fn default() -> Self {
-        Self::new(DEFAULT_MAX_REVIEW_ROUNDS)
+        Self::new()
     }
 }
 
 impl Workflow {
-    pub fn new(max_rounds: u8) -> Self {
+    pub fn new() -> Self {
         Self {
             states: [StepState::Pending; STEP_COUNT],
             phase: Phase::NotStarted,
             paused_from: None,
             round: 0,
-            max_rounds: max_rounds.max(1),
             fix_for: None,
             uses: Vec::new(),
         }
@@ -312,10 +333,6 @@ impl Workflow {
         self.round
     }
 
-    pub fn max_rounds(&self) -> u8 {
-        self.max_rounds
-    }
-
     /// The step that failed, while waiting at the error gate.
     pub fn failed_step(&self) -> Option<StepKind> {
         match self.phase {
@@ -328,11 +345,34 @@ impl Workflow {
         match self.phase {
             Phase::Running(step) => Some(step),
             Phase::Gate(GateKind::PlanReview) => Some(StepKind::Analyze),
-            Phase::Gate(GateKind::MediumTriage) => Some(StepKind::FinalReview),
+            Phase::Gate(GateKind::Findings) => self.gate_review(),
+            Phase::Gate(GateKind::AfterFix) => self.gate_review().map(fix_step_of),
             Phase::Gate(GateKind::SelfCode) => Some(StepKind::Implement),
             Phase::Gate(GateKind::Error) => StepKind::ALL
                 .into_iter()
                 .find(|s| self.state_of(*s) == StepState::Failed),
+            _ => None,
+        }
+    }
+
+    /// The review whose findings the findings gate or the after-fix gate is about. A findings
+    /// gate saved before every review had one was the final review's medium triage.
+    pub fn gate_review(&self) -> Option<StepKind> {
+        match self.phase {
+            Phase::Gate(GateKind::Findings | GateKind::AfterFix) => {
+                Some(self.fix_for.unwrap_or(StepKind::FinalReview))
+            }
+            _ => None,
+        }
+    }
+
+    /// Where the gate's "go on" answer leads: past the findings gate without fixing, or "No" at
+    /// the after-fix gate (the final review, again when it was the one fixed).
+    pub fn skip_target(&self) -> Option<StepKind> {
+        let review = self.gate_review()?;
+        match self.phase {
+            Phase::Gate(GateKind::Findings) => Some(self.after_review_target(review)),
+            Phase::Gate(GateKind::AfterFix) => Some(StepKind::FinalReview),
             _ => None,
         }
     }
@@ -375,52 +415,44 @@ impl Workflow {
                 self.run(StepKind::Checks)
             }
 
-            (Phase::Running(StepKind::ReviewLocal), E::ReviewLocalFinished { blocking }) => {
-                self.set(StepKind::ReviewLocal, StepState::Done);
-                if blocking > 0 {
-                    self.run(StepKind::Fix)
+            (Phase::Running(review), E::ReviewFinished { open }) if review.is_review() => {
+                if open == 0 {
+                    self.set(review, StepState::Done);
+                    self.after_review(review)
                 } else {
-                    self.pass(StepKind::Fix);
-                    self.start_cross_review()
-                }
-            }
-
-            (Phase::Running(StepKind::CrossReview), E::CrossReviewFinished { blocking }) => {
-                self.set(StepKind::CrossReview, StepState::Done);
-                if blocking > 0 && self.round < self.max_rounds {
-                    self.fix_for = Some(StepKind::CrossReview);
-                    self.run(StepKind::FixCross)
-                } else {
-                    self.pass(StepKind::FixCross);
-                    self.run(StepKind::FinalReview)
-                }
-            }
-
-            (
-                Phase::Running(StepKind::FinalReview),
-                E::FinalReviewFinished {
-                    critical_or_high,
-                    medium_undecided,
-                },
-            ) => {
-                if critical_or_high > 0 {
-                    self.set(StepKind::FinalReview, StepState::Done);
-                    self.fix_final_review()
-                } else if medium_undecided > 0 {
-                    self.set(StepKind::FinalReview, StepState::WaitingUser);
-                    self.phase = Phase::Gate(GateKind::MediumTriage);
+                    self.findings_gate(review);
                     Ok(())
-                } else {
-                    self.set(StepKind::FinalReview, StepState::Done);
-                    self.run(StepKind::BrowserTest)
                 }
             }
-            (Phase::Gate(GateKind::MediumTriage), E::MediumTriaged { fix }) => {
-                self.set(StepKind::FinalReview, StepState::Done);
+            (Phase::Gate(GateKind::Findings), E::FindingsPicked { fix }) => {
+                let review = self.fix_for.unwrap_or(StepKind::FinalReview);
+                self.set(review, StepState::Done);
                 if fix > 0 {
-                    self.fix_final_review()
+                    self.fix_for = Some(review);
+                    self.run(fix_step_of(review))
                 } else {
-                    self.run(StepKind::BrowserTest)
+                    self.after_review(review)
+                }
+            }
+            (Phase::Gate(GateKind::AfterFix), E::AfterFix(answer)) => {
+                let review = self.fix_for.unwrap_or(StepKind::CrossReview);
+                self.set(fix_step_of(review), StepState::Done);
+                match answer {
+                    AfterFix::CrossReview => {
+                        self.fix_for = None;
+                        self.start_cross_review()
+                    }
+                    AfterFix::PickMore => {
+                        self.findings_gate(review);
+                        Ok(())
+                    }
+                    AfterFix::Next => {
+                        self.fix_for = None;
+                        // the cross review that was not wanted is "bỏ qua", not "chưa tới"
+                        self.pass(StepKind::CrossReview);
+                        self.pass(StepKind::FixCross);
+                        self.run(StepKind::FinalReview)
+                    }
                 }
             }
 
@@ -438,9 +470,13 @@ impl Workflow {
                     self.set(later, StepState::Pending);
                 }
                 self.paused_from = None;
-                if step != StepKind::FixCross {
-                    self.fix_for = None;
-                }
+                // a Sửa lỗi run again fixes what its review found; Review chốt is pending again
+                // now, so step 9 answers the cross review
+                self.fix_for = match step {
+                    StepKind::Fix => Some(StepKind::ReviewLocal),
+                    StepKind::FixCross => Some(StepKind::CrossReview),
+                    _ => None,
+                };
                 // review rounds count again from a step before the cross review; the cross
                 // review itself starts a fresh first round
                 if step.index() < StepKind::CrossReview.index() {
@@ -486,45 +522,75 @@ impl Workflow {
                     None => Ok(()),
                 }
             }
-            // The first review's fix is checked by Codex next.
-            StepKind::Fix => {
-                self.set(step, StepState::Done);
-                self.start_cross_review()
-            }
-            // A fix of the final review: that review runs again; of Codex's: Codex again.
-            StepKind::FixCross => {
-                self.set(step, StepState::Done);
-                if self.fix_for.take() == Some(StepKind::FinalReview) {
-                    self.run(StepKind::FinalReview)
+            // Every fix waits for the user: review it again, or go on. A fix saved before the
+            // findings gate existed answers Tự review (step 7) or Codex (step 9).
+            StepKind::Fix | StepKind::FixCross => {
+                let review = self.fix_for.unwrap_or(if step == StepKind::Fix {
+                    StepKind::ReviewLocal
                 } else {
-                    self.start_cross_review()
-                }
+                    StepKind::CrossReview
+                });
+                self.fix_for = Some(review);
+                self.set(step, StepState::WaitingUser);
+                self.phase = Phase::Gate(GateKind::AfterFix);
+                Ok(())
             }
             StepKind::PushSummary => {
                 self.set(step, StepState::Done);
                 self.phase = Phase::AwaitingPush;
                 Ok(())
             }
-            // Reviews finish with their own events because the outcome matters.
+            // Reviews finish with their own event because the outcome matters.
             StepKind::ReviewLocal | StepKind::CrossReview | StepKind::FinalReview => {
                 Err(DomainError::InvalidTransition {
                     state: format!("{:?}", self.phase),
-                    event: format!("StepSucceeded({step:?}); use the review result event"),
+                    event: format!("StepSucceeded({step:?}); use ReviewFinished"),
                 })
             }
         }
     }
 
-    /// The flow went past a Sửa lỗi step with nothing to fix: it shows "bỏ qua", not "chưa tới".
+    /// Stop so the user picks which findings of `review` the AI fixes.
+    fn findings_gate(&mut self, review: StepKind) {
+        self.fix_for = Some(review);
+        self.set(review, StepState::WaitingUser);
+        self.phase = Phase::Gate(GateKind::Findings);
+    }
+
+    /// The step after a review that leaves nothing to fix.
+    fn after_review_target(&self, review: StepKind) -> StepKind {
+        match review {
+            StepKind::ReviewLocal => StepKind::CrossReview,
+            StepKind::CrossReview => StepKind::FinalReview,
+            _ if self.uses(StepKind::BrowserTest) => StepKind::BrowserTest,
+            _ => StepKind::PushSummary,
+        }
+    }
+
+    /// Nothing (more) to fix after `review`: on to the next step of the flow.
+    fn after_review(&mut self, review: StepKind) -> DomainResult<()> {
+        self.fix_for = None;
+        match review {
+            StepKind::ReviewLocal => {
+                self.pass(StepKind::Fix);
+                self.start_cross_review()
+            }
+            StepKind::CrossReview => {
+                self.pass(StepKind::FixCross);
+                self.run(StepKind::FinalReview)
+            }
+            _ => {
+                self.pass(StepKind::FixCross);
+                self.run(StepKind::BrowserTest)
+            }
+        }
+    }
+
+    /// The flow went past a step with nothing to do there: it shows "bỏ qua", not "chưa tới".
     fn pass(&mut self, step: StepKind) {
         if self.state_of(step) == StepState::Pending {
             self.set(step, StepState::Skipped);
         }
-    }
-
-    fn fix_final_review(&mut self) -> DomainResult<()> {
-        self.fix_for = Some(StepKind::FinalReview);
-        self.run(StepKind::FixCross)
     }
 
     fn start_cross_review(&mut self) -> DomainResult<()> {
@@ -577,16 +643,11 @@ mod tests {
     /// Implemented, first `/review-local` clean, now in Codex round 1.
     fn started_to_review() -> Workflow {
         let mut wf = implemented();
-        wf.apply(E::ReviewLocalFinished { blocking: 0 }).unwrap();
+        wf.apply(E::ReviewFinished { open: 0 }).unwrap();
         wf
     }
 
-    fn clean_final() -> E {
-        E::FinalReviewFinished {
-            critical_or_high: 0,
-            medium_undecided: 0,
-        }
-    }
+    const CLEAN: E = E::ReviewFinished { open: 0 };
 
     #[test]
     fn steps_are_numbered_in_order() {
@@ -594,18 +655,20 @@ mod tests {
         assert_eq!(indexes, (1..=12).collect::<Vec<u8>>());
         assert_eq!(StepKind::BrowserTest.next(), Some(StepKind::PushSummary));
         assert_eq!(StepKind::PushSummary.next(), None);
+        assert_eq!(fix_step_of(StepKind::ReviewLocal), StepKind::Fix);
+        assert_eq!(fix_step_of(StepKind::FinalReview), StepKind::FixCross);
     }
 
     #[test]
     fn happy_path_ends_waiting_for_user_push() {
         let mut wf = implemented();
         assert_eq!(wf.phase(), Phase::Running(StepKind::ReviewLocal));
-        wf.apply(E::ReviewLocalFinished { blocking: 0 }).unwrap();
+        wf.apply(CLEAN).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::CrossReview));
         assert_eq!(wf.round(), 1);
-        wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
+        wf.apply(CLEAN).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
-        wf.apply(clean_final()).unwrap();
+        wf.apply(CLEAN).unwrap();
         // Test trình duyệt is not used by this task: skipped on the way to the push summary
         assert_eq!(wf.phase(), Phase::Running(StepKind::PushSummary));
         wf.apply(E::StepSucceeded(StepKind::PushSummary)).unwrap();
@@ -622,26 +685,120 @@ mod tests {
             };
             assert_eq!(wf.state_of(s), expected, "{s:?}");
         }
+        // a review does not succeed without saying what it found
+        assert!(
+            implemented()
+                .apply(E::StepSucceeded(StepKind::ReviewLocal))
+                .is_err()
+        );
     }
 
-    /// The order the user chose: review-local -> Claude fixes -> Codex ⇄ Claude -> review-local.
+    /// Every review that reports something waits for the user to pick what gets fixed.
     #[test]
-    fn review_local_findings_are_fixed_before_codex_reviews() {
+    fn every_review_with_findings_stops_for_the_user_to_pick() {
         let mut wf = implemented();
-        wf.apply(E::ReviewLocalFinished { blocking: 2 }).unwrap();
+        wf.apply(E::ReviewFinished { open: 2 }).unwrap();
+        assert_eq!(wf.phase(), Phase::Gate(GateKind::Findings));
+        assert_eq!(wf.current_step(), Some(StepKind::ReviewLocal));
+        assert_eq!(wf.gate_review(), Some(StepKind::ReviewLocal));
+        assert_eq!(wf.state_of(StepKind::ReviewLocal), StepState::WaitingUser);
+        assert_eq!(wf.skip_target(), Some(StepKind::CrossReview));
+        // nothing picked: on to Codex, step 7 "bỏ qua"
+        let mut skip = wf.clone();
+        skip.apply(E::FindingsPicked { fix: 0 }).unwrap();
+        assert_eq!(skip.phase(), Phase::Running(StepKind::CrossReview));
+        assert_eq!(skip.state_of(StepKind::Fix), StepState::Skipped);
+        assert_eq!(skip.state_of(StepKind::ReviewLocal), StepState::Done);
+
+        // Codex reports too: its gate, then the final review's
+        skip.apply(E::ReviewFinished { open: 1 }).unwrap();
+        assert_eq!(skip.gate_review(), Some(StepKind::CrossReview));
+        assert_eq!(skip.skip_target(), Some(StepKind::FinalReview));
+        skip.apply(E::FindingsPicked { fix: 0 }).unwrap();
+        assert_eq!(skip.phase(), Phase::Running(StepKind::FinalReview));
+        // the final review no longer fixes critical/high by itself
+        skip.apply(E::ReviewFinished { open: 3 }).unwrap();
+        assert_eq!(skip.phase(), Phase::Gate(GateKind::Findings));
+        assert_eq!(skip.current_step(), Some(StepKind::FinalReview));
+        assert_eq!(skip.skip_target(), Some(StepKind::PushSummary));
+        skip.set_uses(StepKind::BrowserTest, true);
+        assert_eq!(skip.skip_target(), Some(StepKind::BrowserTest));
+        skip.apply(E::FindingsPicked { fix: 0 }).unwrap();
+        assert_eq!(skip.phase(), Phase::Running(StepKind::BrowserTest));
+    }
+
+    /// After every fix the user is asked whether the other AI reviews again.
+    #[test]
+    fn every_fix_asks_whether_to_cross_review_again() {
+        let mut wf = implemented();
+        wf.apply(E::ReviewFinished { open: 2 }).unwrap();
+        wf.apply(E::FindingsPicked { fix: 1 }).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::Fix));
         assert_eq!(wf.round(), 0);
         wf.apply(E::StepSucceeded(StepKind::Fix)).unwrap();
+        assert_eq!(wf.phase(), Phase::Gate(GateKind::AfterFix));
+        assert_eq!(wf.current_step(), Some(StepKind::Fix));
+        assert_eq!(wf.state_of(StepKind::Fix), StepState::WaitingUser);
+        assert_eq!(wf.skip_target(), Some(StepKind::FinalReview));
+
+        // pick more of Tự review's findings, fix them, and get asked again
+        let mut more = wf.clone();
+        more.apply(E::AfterFix(AfterFix::PickMore)).unwrap();
+        assert_eq!(more.phase(), Phase::Gate(GateKind::Findings));
+        assert_eq!(more.gate_review(), Some(StepKind::ReviewLocal));
+        assert_eq!(more.state_of(StepKind::Fix), StepState::Done);
+        more.apply(E::FindingsPicked { fix: 1 }).unwrap();
+        assert_eq!(more.phase(), Phase::Running(StepKind::Fix));
+
+        // no cross review: Review chéo and step 9 "bỏ qua", the final review runs
+        let mut no = wf.clone();
+        no.apply(E::AfterFix(AfterFix::Next)).unwrap();
+        assert_eq!(no.phase(), Phase::Running(StepKind::FinalReview));
+        assert_eq!(no.state_of(StepKind::CrossReview), StepState::Skipped);
+        assert_eq!(no.state_of(StepKind::FixCross), StepState::Skipped);
+        assert_eq!(no.round(), 0);
+
+        // yes: Codex round 1; its findings fixed in step 9; yes again: round 2, no cap
+        wf.apply(E::AfterFix(AfterFix::CrossReview)).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::CrossReview));
-        assert_eq!(wf.round(), 1);
-        wf.apply(E::CrossReviewFinished { blocking: 1 }).unwrap();
-        // Codex's findings are fixed in step 9, then Codex reviews again
-        assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
-        wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
-        assert_eq!(wf.phase(), Phase::Running(StepKind::CrossReview));
-        assert_eq!(wf.round(), 2);
         assert_eq!(wf.state_of(StepKind::Fix), StepState::Done);
-        wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
+        for round in 1..=5 {
+            assert_eq!(wf.round(), round);
+            wf.apply(E::ReviewFinished { open: 1 }).unwrap();
+            wf.apply(E::FindingsPicked { fix: 1 }).unwrap();
+            assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
+            wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+            assert_eq!(wf.phase(), Phase::Gate(GateKind::AfterFix));
+            assert_eq!(wf.current_step(), Some(StepKind::FixCross));
+            wf.apply(E::AfterFix(AfterFix::CrossReview)).unwrap();
+        }
+        assert_eq!(wf.round(), 6);
+        wf.apply(CLEAN).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
+    }
+
+    #[test]
+    fn a_fix_of_the_final_review_runs_that_review_again_or_codex() {
+        let mut wf = started_to_review();
+        wf.apply(CLEAN).unwrap();
+        wf.apply(E::ReviewFinished { open: 1 }).unwrap();
+        wf.apply(E::FindingsPicked { fix: 1 }).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
+        // survives a save while the fix runs
+        let mut wf: Workflow = serde_json::from_str(&serde_json::to_string(&wf).unwrap()).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+        assert_eq!(wf.gate_review(), Some(StepKind::FinalReview));
+        assert_eq!(wf.skip_target(), Some(StepKind::FinalReview));
+        let mut again = wf.clone();
+        again.apply(E::AfterFix(AfterFix::Next)).unwrap();
+        assert_eq!(again.phase(), Phase::Running(StepKind::FinalReview));
+        assert_eq!(again.round(), 1);
+        wf.apply(E::AfterFix(AfterFix::CrossReview)).unwrap();
+        assert_eq!(
+            (wf.phase(), wf.round()),
+            (Phase::Running(StepKind::CrossReview), 2)
+        );
+        wf.apply(CLEAN).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
     }
 
@@ -653,73 +810,9 @@ mod tests {
         wf.apply(E::StepSucceeded(StepKind::Analyze)).unwrap();
         assert_eq!(wf.phase(), Phase::Gate(GateKind::PlanReview));
         assert_eq!(wf.current_step(), Some(StepKind::Analyze));
+        assert_eq!(wf.gate_review(), None);
         wf.apply(E::PlanRejected).unwrap();
         assert_eq!(wf.phase(), Phase::Running(StepKind::Analyze));
-    }
-
-    #[test]
-    fn review_fix_loop_stops_after_max_rounds() {
-        let mut wf = started_to_review();
-        for expected_round in 1..DEFAULT_MAX_REVIEW_ROUNDS {
-            assert_eq!(wf.round(), expected_round);
-            wf.apply(E::CrossReviewFinished { blocking: 2 }).unwrap();
-            assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
-            wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
-        }
-        assert_eq!(wf.round(), DEFAULT_MAX_REVIEW_ROUNDS);
-        wf.apply(E::CrossReviewFinished { blocking: 1 }).unwrap();
-        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
-    }
-
-    #[test]
-    fn final_review_blocking_is_fixed_then_reviewed_again_and_medium_waits_for_user() {
-        let mut wf = started_to_review();
-        wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
-        wf.apply(E::FinalReviewFinished {
-            critical_or_high: 1,
-            medium_undecided: 3,
-        })
-        .unwrap();
-        assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
-        wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
-        // fixed in step 9, then the final review runs again (not Codex)
-        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
-        assert_eq!(wf.round(), 1);
-        wf.apply(E::FinalReviewFinished {
-            critical_or_high: 0,
-            medium_undecided: 2,
-        })
-        .unwrap();
-        assert_eq!(wf.phase(), Phase::Gate(GateKind::MediumTriage));
-        assert_eq!(wf.current_step(), Some(StepKind::FinalReview));
-        wf.apply(E::MediumTriaged { fix: 0 }).unwrap();
-        assert_eq!(wf.phase(), Phase::Running(StepKind::PushSummary));
-    }
-
-    #[test]
-    fn mediums_picked_for_fixing_go_through_fix_and_codex_again() {
-        let mut wf = started_to_review();
-        wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
-        wf.apply(E::FinalReviewFinished {
-            critical_or_high: 0,
-            medium_undecided: 1,
-        })
-        .unwrap();
-        wf.apply(E::MediumTriaged { fix: 1 }).unwrap();
-        assert_eq!(wf.phase(), Phase::Running(StepKind::FixCross));
-        wf.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
-        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
-        // survives a save while the fix runs
-        let mut wf = started_to_review();
-        wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
-        wf.apply(E::FinalReviewFinished {
-            critical_or_high: 1,
-            medium_undecided: 0,
-        })
-        .unwrap();
-        let mut back: Workflow = serde_json::from_str(&serde_json::to_string(&wf).unwrap()).unwrap();
-        back.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
-        assert_eq!(back.phase(), Phase::Running(StepKind::FinalReview));
     }
 
     #[test]
@@ -740,7 +833,8 @@ mod tests {
     #[test]
     fn state_survives_a_round_trip_through_json() {
         let mut wf = started_to_review();
-        wf.apply(E::CrossReviewFinished { blocking: 1 }).unwrap();
+        wf.apply(E::ReviewFinished { open: 1 }).unwrap();
+        wf.apply(E::FindingsPicked { fix: 1 }).unwrap();
         wf.apply(E::StepFailed(StepKind::FixCross)).unwrap();
         let back: Workflow = serde_json::from_str(&serde_json::to_string(&wf).unwrap()).unwrap();
         assert_eq!(back, wf);
@@ -763,8 +857,8 @@ mod tests {
     #[test]
     fn reopen_runs_again_from_a_step_and_resets_what_follows() {
         let mut wf = started_to_review();
-        wf.apply(E::CrossReviewFinished { blocking: 0 }).unwrap();
-        wf.apply(clean_final()).unwrap();
+        wf.apply(CLEAN).unwrap();
+        wf.apply(CLEAN).unwrap();
         wf.apply(E::StepSucceeded(StepKind::PushSummary)).unwrap();
         assert_eq!(wf.phase(), Phase::AwaitingPush);
         assert_eq!(wf.round(), 1);
@@ -799,6 +893,17 @@ mod tests {
         assert_eq!(push.state_of(StepKind::FinalReview), StepState::Done);
         assert!(wf.clone().apply(E::Reopen(StepKind::Intake)).is_err());
         assert!(Workflow::default().apply(E::Reopen(StepKind::Analyze)).is_err());
+
+        // step 9 run again answers Codex, then asks about another cross review
+        let mut fixed = started_to_review();
+        fixed.apply(E::ReviewFinished { open: 1 }).unwrap();
+        fixed.apply(E::FindingsPicked { fix: 1 }).unwrap();
+        fixed.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+        fixed.apply(E::AfterFix(AfterFix::Next)).unwrap();
+        fixed.apply(CLEAN).unwrap();
+        fixed.apply(E::Reopen(StepKind::FixCross)).unwrap();
+        fixed.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+        assert_eq!(fixed.gate_review(), Some(StepKind::CrossReview));
     }
 
     #[test]
@@ -857,8 +962,8 @@ mod tests {
         ] {
             assert_eq!(push.state_of(s), want, "{s:?}");
         }
-        // fixing Codex's findings: that fix is step 9 now
-        let fixing: Workflow = serde_json::from_str(&legacy(
+        // fixing Codex's findings: that fix is step 9 now, and it asks about Codex afterwards
+        let mut fixing: Workflow = serde_json::from_str(&legacy(
             r#""done","done","done","done","running","done","pending","pending""#,
             r#"{"running":"fix"}"#,
             2,
@@ -867,8 +972,10 @@ mod tests {
         assert_eq!(fixing.phase(), Phase::Running(StepKind::FixCross));
         assert_eq!(fixing.state_of(StepKind::FixCross), StepState::Running);
         assert_eq!(fixing.state_of(StepKind::BrowserTest), StepState::Pending);
+        fixing.apply(E::StepSucceeded(StepKind::FixCross)).unwrap();
+        assert_eq!(fixing.gate_review(), Some(StepKind::CrossReview));
         // the first review's fix (no Codex yet) stays step 7; Kiểm tra / Harness are behind it
-        let first: Workflow = serde_json::from_str(&legacy(
+        let mut first: Workflow = serde_json::from_str(&legacy(
             r#""done","done","done","done","running","pending","pending","pending""#,
             r#"{"running":"fix"}"#,
             0,
@@ -876,6 +983,8 @@ mod tests {
         .unwrap();
         assert_eq!(first.phase(), Phase::Running(StepKind::Fix));
         assert_eq!(first.state_of(StepKind::Checks), StepState::Skipped);
+        first.apply(E::StepSucceeded(StepKind::Fix)).unwrap();
+        assert_eq!(first.gate_review(), Some(StepKind::ReviewLocal));
         // still at the plan gate: nothing to skip yet
         let plan: Workflow = serde_json::from_str(&legacy(
             r#""done","waitingUser","pending","pending","pending","pending","pending","pending""#,
@@ -884,8 +993,20 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(plan.state_of(StepKind::Checks), StepState::Pending);
+        // the old medium triage of the final review is the findings gate now
+        let mut triage: Workflow = serde_json::from_str(&legacy(
+            r#""done","done","done","done","pending","done","waitingUser","pending""#,
+            r#"{"gate":"mediumTriage"}"#,
+            1,
+        ))
+        .unwrap();
+        assert_eq!(triage.phase(), Phase::Gate(GateKind::Findings));
+        assert_eq!(triage.current_step(), Some(StepKind::FinalReview));
+        triage.apply(E::FindingsPicked { fix: 0 }).unwrap();
+        assert_eq!(triage.phase(), Phase::Running(StepKind::PushSummary));
         // saved again, it is a 12-step workflow
         let json = serde_json::to_string(&push).unwrap();
+        assert!(!json.contains("maxRounds"));
         assert_eq!(serde_json::from_str::<Workflow>(&json).unwrap(), push);
         assert!(serde_json::from_str::<Workflow>(&legacy(r#""done""#, r#""notStarted""#, 0)).is_err());
     }
@@ -900,5 +1021,9 @@ mod tests {
             Err(DomainError::NotCurrentStep(StepKind::Analyze))
         );
         assert!(wf.apply(E::Start).is_err());
+        // findings answers only at their gates
+        assert!(wf.apply(E::FindingsPicked { fix: 1 }).is_err());
+        assert!(wf.apply(E::AfterFix(AfterFix::CrossReview)).is_err());
+        assert!(wf.apply(E::ReviewFinished { open: 0 }).is_err());
     }
 }

@@ -1,7 +1,7 @@
 //! Demo data driven by the real workflow state machine. One tick = 4 s; the active task walks
-//! through all eight steps (plan gate, first /review-local + fix, two Codex rounds, a
-//! compaction, a medium triage gate at the final /review-local) and then loops. Replaced by
-//! live data in Phase 1/3.
+//! through the steps (plan gate, first /review-local + its findings gate + fix + "Review chéo
+//! lại?", two Codex rounds, a compaction, the final /review-local's findings gate) and then
+//! loops. Replaced by live data in Phase 1/3.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,7 +11,7 @@ use opw_domain::view::{
     OrbitSnapshot, PriorityView, Provider, QuotaSnapshot, QuotaWindow, QuotaWindowKind, SessionStatus,
     StepRef, StepView, SubagentView, TaskCard, TaskColumn, TaskSystem, TodayStats, ToolEvent,
 };
-use opw_domain::workflow::{Phase, StepKind, StepState, Workflow, WorkflowEvent as E};
+use opw_domain::workflow::{AfterFix, Phase, StepKind, StepState, Workflow, WorkflowEvent as E};
 
 const TICK_SECS: u64 = 4;
 const CLAUDE_WINDOW: u64 = 1_000_000;
@@ -27,16 +27,21 @@ fn script() -> Vec<E> {
         E::StepSucceeded(StepKind::Analyze),
         E::PlanApproved,
         E::StepSucceeded(StepKind::Implement),
-        E::ReviewLocalFinished { blocking: 1 },
+        // frame 6: Tự review's findings gate
+        E::ReviewFinished { open: 1 },
+        E::FindingsPicked { fix: 1 },
+        // frame 8: "Review chéo lại?"
         E::StepSucceeded(StepKind::Fix),
-        E::CrossReviewFinished { blocking: 2 },
+        E::AfterFix(AfterFix::CrossReview),
+        // frame 10: Codex's findings gate
+        E::ReviewFinished { open: 3 },
+        E::FindingsPicked { fix: 1 },
         E::StepSucceeded(StepKind::FixCross),
-        E::CrossReviewFinished { blocking: 0 },
-        E::FinalReviewFinished {
-            critical_or_high: 0,
-            medium_undecided: 1,
-        },
-        E::MediumTriaged { fix: 0 },
+        E::AfterFix(AfterFix::CrossReview),
+        E::ReviewFinished { open: 0 },
+        // frame 15: the final review's findings gate
+        E::ReviewFinished { open: 1 },
+        E::FindingsPicked { fix: 0 },
         E::StepSucceeded(StepKind::PushSummary),
     ]
 }
@@ -106,10 +111,12 @@ fn findings(frame: u64) -> Vec<FindingView> {
         "Chưa kiểm tra quyền khi đọc thư mục chia sẻ",
         "review-local",
     )];
-    if frame >= 7 {
+    if (7..10).contains(&frame) {
+        list[0].state = FindingState::Fixing;
+    } else if frame >= 10 {
         list[0].state = FindingState::Fixed;
     }
-    if frame < 8 {
+    if frame < 10 {
         return list.into_iter().map(to_view).collect();
     }
     let mut codex = vec![
@@ -135,11 +142,16 @@ fn findings(frame: u64) -> Vec<FindingView> {
             "codex",
         ),
     ];
-    if frame >= 9 {
+    if (11..14).contains(&frame) {
+        codex[0].state = FindingState::Fixing;
+    } else if frame >= 14 {
         codex[0].state = FindingState::Fixed;
     }
-    if frame >= 12 {
+    if frame >= 11 {
         codex[1].state = FindingState::Accepted;
+    }
+    if frame >= 16 {
+        codex[2].state = FindingState::Deferred;
     }
     list.extend(codex);
     list.into_iter().map(to_view).collect()
@@ -193,8 +205,8 @@ fn agent_for(step: StepKind, frame: u64, waiting: bool) -> AgentView {
             recent_tools: tools(&["git diff", "Read"]),
         };
     }
-    // context grows, then the handoff + compact at frame 8 (Claude fixing Codex findings) drops it
-    let context_tokens = if frame >= 8 {
+    // context grows, then the handoff + compact at frame 11 (Claude fixing Codex findings) drops it
+    let context_tokens = if frame >= 11 {
         140_000 + frame * 12_000
     } else {
         90_000 + frame * 60_000
@@ -221,7 +233,7 @@ fn agent_for(step: StepKind, frame: u64, waiting: bool) -> AgentView {
         context_tokens,
         context_window: CLAUDE_WINDOW,
         handoff_at: CLAUDE_HANDOFF,
-        compactions: u32::from(frame >= 8),
+        compactions: u32::from(frame >= 11),
         subagents,
         children: Vec::new(),
         recent_tools: tools(&["Read", "Edit", "Bash(npx tsc)"]),
@@ -255,11 +267,14 @@ fn active_system(frame: u64) -> Option<TaskSystem> {
         since: DEMO_TIME.into(),
         message: match kind {
             GateKind::PlanReview => "Plan đã sẵn sàng, chờ bạn duyệt".into(),
-            GateKind::MediumTriage => "1 finding medium chờ bạn quyết".into(),
+            GateKind::Findings => "Review báo lỗi: chọn lỗi cho AI sửa".into(),
+            GateKind::AfterFix => "Sửa lỗi xong: Review chéo lại?".into(),
             GateKind::AgentQuestion => "AI đang hỏi bạn".into(),
             GateKind::Error => "Bước bị lỗi".into(),
             GateKind::SelfCode => "Bạn đang tự code".into(),
         },
+        review: wf.gate_review(),
+        next: wf.skip_target(),
     });
     Some(TaskSystem {
         task_id: "WP-187716".into(),
@@ -487,7 +502,11 @@ mod tests {
             }
             serde_json::to_string(&board).unwrap();
         }
-        assert_eq!(seen_gates, vec![GateKind::PlanReview, GateKind::MediumTriage]);
+        use GateKind::{AfterFix, Findings, PlanReview};
+        assert_eq!(
+            seen_gates,
+            vec![PlanReview, Findings, AfterFix, Findings, AfterFix, Findings]
+        );
     }
 
     #[test]

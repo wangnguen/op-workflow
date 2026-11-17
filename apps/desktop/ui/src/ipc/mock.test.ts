@@ -35,7 +35,8 @@ describe("demo timeline", () => {
   it("covers the story: gate, compaction, codex child, review round 2", () => {
     const frames = DEMO_FRAMES.map((_, i) => orbitForFrame(i, NOW).active);
     expect(frames.some((a) => a?.gate?.kind === "planReview")).toBe(true);
-    expect(frames.some((a) => a?.gate?.kind === "mediumTriage")).toBe(true);
+    expect(frames.some((a) => a?.gate?.kind === "findings")).toBe(true);
+    expect(frames.some((a) => a?.gate?.kind === "afterFix")).toBe(true);
     expect(frames.some((a) => (a?.agents[0]?.compactions ?? 0) > 0)).toBe(true);
     expect(frames.some((a) => a?.agents[0]?.children.some((c) => c.kind === "codex"))).toBe(true);
     expect(frames.some((a) => a?.steps.find((s) => s.kind === "crossReview")?.round === 2)).toBe(true);

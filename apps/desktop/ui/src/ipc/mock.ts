@@ -157,18 +157,25 @@ export const DEMO_FRAMES: readonly Frame[] = [
     findings: { f6: "fixed", ...ALL_OPEN, f1: "fixing", f2: "fixing" }, newComments: 0, cost: 0.74,
     agent: { kind: "claude", status: "running", ctxPct: 35, compactions: 1, subagents: [], tools: ["Edit", "Edit", "Bash"] },
   },
+  // every fix asks before Codex looks again
+  {
+    active: true, step: "fixCross", state: "waitingUser", round: 1,
+    findings: { f6: "fixed", ...ALL_OPEN, f1: "fixing", f2: "fixing" }, newComments: 0, cost: 0.74,
+    gate: { kind: "afterFix", message: "Sửa lỗi xong. Chạy Review chéo lại (vòng 2)? Đã review chéo 1 vòng." },
+    agent: { kind: "claude", status: "waiting", ctxPct: 35, compactions: 1, subagents: [], tools: ["Bash"] },
+  },
   {
     active: true, step: "crossReview", state: "running", round: 2, findings: { f6: "fixed", ...AFTER_R2 }, newComments: 0, cost: 0.81,
     agent: { kind: "claude", status: "idle", ctxPct: 37, compactions: 1, subagents: [], child: "running", tools: ["Bash"] },
   },
-  // final /review-local, gate G2 for the medium finding, then push-summary
+  // final /review-local, its findings wait for the user to pick, then push-summary
   {
     active: true, step: "finalReview", state: "running", round: 2, findings: { f6: "fixed", ...AFTER_R2, f5: "open" }, newComments: 0, cost: 0.88,
     agent: { kind: "claude", status: "running", ctxPct: 41, compactions: 1, subagents: [], tools: ["Bash", "Read"] },
   },
   {
     active: true, step: "finalReview", state: "waitingUser", round: 2, findings: { f6: "fixed", ...AFTER_R2, f5: "open", f7: "open" }, newComments: 0, cost: 0.92,
-    gate: { kind: "mediumTriage", message: "/review-local chốt báo 1 finding medium: sửa, chấp nhận hay để sau?" },
+    gate: { kind: "findings", message: "Review chốt báo lỗi: 2 lỗi đang mở, đã chọn 0 cho AI sửa. Chọn lỗi cần sửa, hoặc sang Push summary mà không sửa." },
     agent: { kind: "claude", status: "waiting", ctxPct: 43, compactions: 1, subagents: [], tools: ["Bash"] },
   },
   {

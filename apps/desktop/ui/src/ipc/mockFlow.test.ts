@@ -29,7 +29,7 @@ function finishStep(wpId: number): TaskDetail {
 const stateOf = (d: TaskDetail, kind: StepKind): StepState | undefined => d.steps.find((s) => s.kind === kind)?.state;
 
 describe("12-step flow in the preview", () => {
-  it("passes the steps not turned on and sends Review chốt's fixes back to Review chốt", () => {
+  it("passes the steps not turned on, asks after every fix and runs Review chốt again after its fix", () => {
     vi.useFakeTimers();
     mockStarted(9, "t");
     mockFlowAction(9, { type: "run" });
@@ -42,34 +42,68 @@ describe("12-step flow in the preview", () => {
     expect([stateOf(d, "checks"), stateOf(d, "harness")]).toEqual(["skipped", "skipped"]);
     expect(stateOf(d, "browserTest")).toBe("pending");
 
-    // Tự review finds a high → the first Sửa lỗi (7) → Review chéo round 1
+    // Tự review finds a high → the user picks it → the first Sửa lỗi (7) → "Review chéo?"
     mockFlowAction(9, { type: "run" });
-    expect(finishStep(9).current).toBe("fix");
-    mockFlowAction(9, { type: "run" });
+    expect(finishStep(9).gate?.kind).toBe("findings");
+    mockDecideFinding({ wpId: 9, fingerprint: "m-high", decision: "fix" });
+    mockFlowAction(9, { type: "pickFindings", fix: true });
     d = finishStep(9);
+    expect([d.current, d.gate?.kind, stateOf(d, "fix")]).toEqual(["fix", "afterFix", "waitingUser"]);
+    expect(d.runs.at(-1)?.note).toBe("lần sửa thứ 1: xử lý 1 lỗi; 2 file thay đổi (+41 −6)");
+    d = mockFlowAction(9, { type: "afterFix", choice: "crossReview" });
     expect([d.current, d.steps.find((s) => s.kind === "crossReview")?.round]).toEqual(["crossReview", 1]);
 
-    // Review chéo clean → Review chốt finds a medium → the gate
-    mockFlowAction(9, { type: "run" });
+    // Review chéo clean → Review chốt finds a medium → its gate
     expect(finishStep(9).current).toBe("finalReview");
     mockFlowAction(9, { type: "run" });
     d = finishStep(9);
-    expect(d.gate?.kind).toBe("mediumTriage");
+    expect(d.gate).toMatchObject({ kind: "findings", review: "finalReview" });
 
-    // fixing it runs the second Sửa lỗi (9), which goes back to Review chốt, not Review chéo
+    // fixing it runs the second Sửa lỗi (9); "No" runs Review chốt again, not Review chéo
     mockDecideFinding({ wpId: 9, fingerprint: "m-med", decision: "fix" });
-    d = mockFlowAction(9, { type: "finishTriage" });
+    d = mockFlowAction(9, { type: "pickFindings", fix: true });
     expect([d.status, d.current]).toEqual(["running", "fixCross"]);
     d = finishStep(9);
-    expect([d.status, d.current]).toEqual(["ready", "finalReview"]);
+    expect(d.gate).toMatchObject({ kind: "afterFix", review: "finalReview", next: "finalReview" });
+    d = mockFlowAction(9, { type: "afterFix", choice: "next" });
+    expect([d.status, d.current, d.round]).toEqual(["running", "finalReview", 1]);
     expect(stateOf(d, "fixCross")).toBe("done");
 
     // clean Review chốt → Test trình duyệt passed → Push summary
-    mockFlowAction(9, { type: "run" });
     d = finishStep(9);
     expect([d.status, d.current]).toEqual(["ready", "pushSummary"]);
     expect(stateOf(d, "browserTest")).toBe("skipped");
     expect(d.steps.map((s) => s.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+
+  it("picks more after a fix, or skips the cross review", () => {
+    vi.useFakeTimers();
+    mockStarted(9, "t");
+    mockFlowAction(9, { type: "run" });
+    finishStep(9);
+    mockFlowAction(9, { type: "approvePlan" });
+    finishStep(9);
+    mockFlowAction(9, { type: "run" });
+    finishStep(9);
+    // fix only the high; the low is still there to pick afterwards
+    mockDecideFinding({ wpId: 9, fingerprint: "m-high", decision: "fix" });
+    mockFlowAction(9, { type: "pickFindings", fix: true });
+    finishStep(9);
+    let d = mockFlowAction(9, { type: "afterFix", choice: "pickMore" });
+    expect(d.gate).toMatchObject({ kind: "findings", review: "reviewLocal" });
+    expect(d.findings.find((f) => f.fingerprint === "m-low")?.state).toBe("open");
+    mockDecideFinding({ wpId: 9, fingerprint: "m-low", decision: "fix" });
+    mockFlowAction(9, { type: "pickFindings", fix: true });
+    expect(finishStep(9).runs.at(-1)?.note).toMatch(/^lần sửa thứ 2: xử lý 1 lỗi/);
+    // no cross review: Review chéo and step 9 "bỏ qua", Review chốt runs
+    d = mockFlowAction(9, { type: "afterFix", choice: "next" });
+    expect([d.current, d.round, stateOf(d, "crossReview"), stateOf(d, "fixCross")]).toEqual([
+      "finalReview",
+      0,
+      "skipped",
+      "skipped",
+    ]);
+    expect(() => mockFlowAction(9, { type: "afterFix", choice: "next" })).toThrow();
   });
 
   it("passes a Sửa lỗi that was not needed instead of leaving it 'chưa tới'", () => {

@@ -29,7 +29,13 @@ export type SessionStatus = "running" | "waiting" | "idle";
 
 export type TaskColumn = "inbox" | "active" | "awaitingPush" | "done";
 
-export type GateKind = "planReview" | "mediumTriage" | "agentQuestion" | "error" | "selfCode";
+/** `findings`: a review reported findings, the user picks what the AI fixes. `afterFix`: a Sửa
+ *  lỗi finished, "Review chéo lại?". */
+export type GateKind = "planReview" | "findings" | "afterFix" | "agentQuestion" | "error" | "selfCode";
+
+/** The answer at the after-fix gate: Codex reviews again, go on (the final review; again after
+ *  its own fix), or pick more findings of the review that was fixed. */
+export type AfterFixChoice = "crossReview" | "next" | "pickMore";
 
 export interface AppInfo {
   version: string;
@@ -611,6 +617,10 @@ export interface GateView {
   kind: GateKind;
   since: string;
   message: string;
+  /** findings / after-fix gates: the review whose findings they are about */
+  review?: StepKind;
+  /** where "go on" leads (past the findings without fixing, or "No" after a fix) */
+  next?: StepKind;
 }
 
 export interface TaskSystem {
@@ -800,9 +810,10 @@ export interface TaskDetail {
   gate?: GateView;
   error?: FlowError;
   running?: RunView;
+  /** cross-review rounds so far (no cap) */
   round: number;
-  maxRounds: number;
-  /** run the next step by itself (off: stop after each step) */
+  /** "Tự chạy": run the next step by itself, stopping at every decision or error (off: stop
+   *  after each step) */
   autoAdvance: boolean;
   brief?: string;
   plan?: string;
@@ -827,7 +838,10 @@ export type FlowAction =
   | { type: "rejectPlan"; feedback: string }
   | { type: "selfCode" }
   | { type: "selfCodeDone" }
-  | { type: "finishTriage" }
+  /** findings gate: fix the picked findings, or go on without fixing */
+  | { type: "pickFindings"; fix: boolean }
+  /** after-fix gate: the answer to "Review chéo lại?" */
+  | { type: "afterFix"; choice: AfterFixChoice }
   | { type: "rerunPush"; issue?: number }
   /** the task moves to "Đã xong"; also before the push summary (the steps left are skipped).
    *  `forced`: the push check said "not pushed" and the user marks it done anyway */
