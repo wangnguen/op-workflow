@@ -585,7 +585,18 @@ export function mockSettings(): SettingsView {
     tasksDirSuggested: MOCK_DESKTOP_TASKS,
     notify: mockNotify(),
     steps: mockStepSettings(),
+    claudeActiveProbeSec: mockProbe.activeSec,
+    claudeProbeMin: mockProbe.idleMin,
   };
+}
+
+const mockProbe = { activeSec: 60, idleMin: 15 };
+
+/** Browser preview: Settings → Hạn mức probe intervals, in memory only (same rules as the core). */
+export function mockSetQuotaProbe(activeSec: number, idleMin: number): SettingsView {
+  mockProbe.activeSec = activeSec <= 0 ? 0 : Math.max(30, Math.round(activeSec));
+  mockProbe.idleMin = Math.max(1, Math.round(idleMin));
+  return mockSettings();
 }
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"];

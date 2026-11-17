@@ -66,6 +66,9 @@ impl Default for TrackerConfig {
 pub struct QuotaConfig {
     pub codex_poll_sec: u32,
     pub claude_probe_min: u32,
+    /// While Claude Code is in use outside the app (its transcripts are being written), keep the
+    /// Claude reading at most this old; 0 = only the `claudeProbeMin` cycle.
+    pub claude_active_probe_sec: u32,
     pub claude_probe_model: String,
     pub warn_at: Vec<u8>,
     /// Undocumented OAuth usage endpoints; off unless the user opts in.
@@ -79,6 +82,9 @@ impl Default for QuotaConfig {
             // each probe costs ~735 Haiku tokens; 15 min keeps it small (headless steps
             // also report rate_limit_event for free)
             claude_probe_min: 15,
+            // usage moves only while Claude Code works; a probe a minute then keeps the app
+            // within ~1% of Claude Code's own panel (~45k Haiku tokens per busy hour)
+            claude_active_probe_sec: 60,
             claude_probe_model: "haiku".into(),
             warn_at: vec![80, 95],
             oauth_endpoints: false,
@@ -305,6 +311,25 @@ pub fn save_notify(path: &Path, kind: NotifyKind, on: bool) -> ConfigResult<()> 
     };
     edit_file(path, |root| {
         object_at(root, "notify").insert(key.into(), Value::Bool(on));
+    })
+}
+
+/// Shortest `quota.claudeActiveProbeSec` other than 0 (off); smaller values are raised to it.
+pub const MIN_ACTIVE_PROBE_SEC: u32 = 30;
+
+/// Write how often Claude is probed, keeping every other key: `quota.claudeActiveProbeSec`
+/// while Claude Code is in use (0 = off, otherwise at least [`MIN_ACTIVE_PROBE_SEC`]) and
+/// `quota.claudeProbeMin` otherwise (at least 1).
+pub fn save_claude_probe(path: &Path, active_sec: u32, idle_min: u32) -> ConfigResult<()> {
+    let active = if active_sec == 0 {
+        0
+    } else {
+        active_sec.max(MIN_ACTIVE_PROBE_SEC)
+    };
+    edit_file(path, |root| {
+        let quota = object_at(root, "quota");
+        quota.insert("claudeActiveProbeSec".into(), Value::from(active));
+        quota.insert("claudeProbeMin".into(), Value::from(idle_min.max(1)));
     })
 }
 
@@ -638,6 +663,33 @@ mod tests {
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.tasks_dir.as_deref(), Some("~/Desktop/op-workflow-tasks"));
         assert_eq!(cfg.tracker.task_prefix, "XY");
+    }
+
+    #[test]
+    fn saving_the_claude_probe_keeps_other_quota_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"quota":{"claudeProbeMin":20,"codexPollSec":30}}"#).unwrap();
+        assert_eq!(Config::load(&path).unwrap().quota.claude_active_probe_sec, 60);
+        save_claude_probe(&path, 120, 10).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(
+            (
+                cfg.quota.claude_active_probe_sec,
+                cfg.quota.claude_probe_min,
+                cfg.quota.codex_poll_sec
+            ),
+            (120, 10, 30)
+        );
+        // 0 turns the active probe off; anything else is at least 30 s; idle at least 1 min
+        save_claude_probe(&path, 0, 0).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(
+            (cfg.quota.claude_active_probe_sec, cfg.quota.claude_probe_min),
+            (0, 1)
+        );
+        save_claude_probe(&path, 5, 15).unwrap();
+        assert_eq!(Config::load(&path).unwrap().quota.claude_active_probe_sec, 30);
     }
 
     #[test]

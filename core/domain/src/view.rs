@@ -335,6 +335,13 @@ pub struct SettingsView {
     /// Agent, model and effort of each AI step, with what past runs cost (Các bước AI).
     #[serde(default)]
     pub steps: Vec<StepSetting>,
+    /// Probe Claude this often (seconds) while Claude Code is in use outside the app; 0 = off
+    /// (`quota.claudeActiveProbeSec`).
+    #[serde(default)]
+    pub claude_active_probe_sec: u32,
+    /// Probe Claude this often (minutes) when Claude Code is not in use (`quota.claudeProbeMin`).
+    #[serde(default)]
+    pub claude_probe_min: u32,
 }
 
 /// Models and effort levels the Claude and Codex CLIs on this machine offer, for Settings →

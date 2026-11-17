@@ -203,6 +203,10 @@ export interface SettingsView {
   notify?: NotifySettings;
   /** agent, model and effort of each AI step, with past cost and time */
   steps?: StepSetting[];
+  /** probe Claude this often (seconds) while Claude Code is in use outside the app; 0 = off */
+  claudeActiveProbeSec?: number;
+  /** probe Claude this often (minutes) when Claude Code is not in use */
+  claudeProbeMin?: number;
 }
 
 /** Models and effort levels the Claude / Codex CLIs on this machine offer (`step_models`). */
@@ -862,6 +866,7 @@ export interface Commands {
   mark_alerts_read: null;
   set_notify: SettingsView;
   set_step_choice: SettingsView;
+  set_quota_probe: SettingsView;
   step_models: StepModels;
   step_chat: ChatView;
   allow_bash: TaskDetail;
@@ -895,6 +900,7 @@ export interface CommandArgs {
   mark_alerts_read: { ids: number[] };
   set_notify: { kind: NotifyKind; on: boolean };
   set_step_choice: { choice: StepChoiceRequest };
+  set_quota_probe: { activeSec: number; idleMin: number };
   step_models: { refresh: boolean };
   step_chat: { wpId: number; runId?: number };
   allow_bash: { wpId: number; rule: string };

@@ -49,7 +49,8 @@ export const vi = {
     lastSync: "Lần lấy gần nhất",
     refresh: "Lấy lại ngay",
     quotaSection: "Hạn mức",
-    quotaHint: "Codex: tiến trình codex app-server chạy nền. Claude: probe nhỏ bằng Haiku (~735 token) theo chu kỳ trong config.",
+    quotaHint:
+      "Codex: tiến trình codex app-server chạy nền, không tốn token. Claude: app hiện số mới nhất trong ba nguồn: số Claude Code tự lưu (~/.claude.json, không tốn token), số mỗi bước của app tự báo về, và probe nhỏ bằng Haiku (~735 token mỗi lần) khi số đã cũ.",
     claudeAt: "Claude cập nhật",
     codexAt: "Codex cập nhật",
     never: "chưa có",
@@ -125,6 +126,15 @@ export const vi = {
       "Bật một lần: mở chrome://inspect/#remote-debugging trong Chrome và bật cho phép kết nối. Mỗi lần đọc, Chrome hỏi Allow, bấm Allow là xong.",
     claudeQuota: "Claude",
     codexQuota: "Codex",
+    activeProbe: "Probe khi đang dùng Claude Code",
+    activeProbeHint:
+      "Khi Claude Code đang chạy ngoài app (VS Code, terminal), app giữ số Claude mới theo nhịp này để khớp panel Usage của Claude Code. Mỗi lần ~735 token Haiku: 1 phút/lần là khoảng 45k token Haiku cho một giờ dùng liên tục.",
+    activeProbeOff: "Tắt (chỉ theo ô bên dưới)",
+    idleProbe: "Probe lúc không dùng Claude Code",
+    idleProbeHint:
+      "Lúc này số hạn mức gần như đứng yên, chỉ đổi khi bạn dùng Claude trên web, điện thoại hoặc máy khác, hoặc khi tới giờ reset. Mỗi lần ~735 token Haiku.",
+    activeProbeEvery: (secs: number) => (secs % 60 === 0 ? `${secs / 60} phút một lần` : `${secs} giây một lần`),
+    activeProbeDefault: " (mặc định)",
     steps: {
       intro:
         "Mỗi bước chọn model và effort riêng, trong danh sách app hỏi thẳng Claude Code và Codex trên máy bạn (có model mới thì bấm Đọc lại). \"Theo máy\" = không truyền cờ, CLI dùng mặc định của máy (như chạy tay). App không tự chọn thay bạn.",
@@ -171,7 +181,7 @@ export const vi = {
     staleAfterReset: "đã reset, chờ số mới",
     estimateNote: "Claude và Codex chỉ báo %, số token còn lại là ước tính (Phase 4).",
     reconnect: "Kết nối lại",
-    reconnectHint: "Codex: khởi động lại codex app-server. Claude: chạy probe ngay (~735 token Haiku).",
+    reconnectHint: "Codex: khởi động lại codex app-server. Claude: đọc lại số Claude Code lưu và chạy probe ngay (~735 token Haiku).",
     reconnectAllHint: "Kết nối lại cả Claude và Codex rồi lấy số mới",
     login: "Đăng nhập",
     loginHint: (name: string) =>

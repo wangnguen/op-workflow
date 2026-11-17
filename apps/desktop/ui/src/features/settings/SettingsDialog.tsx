@@ -15,6 +15,7 @@ import {
   revealPath,
   saveNxToken,
   setNotify,
+  setQuotaProbe,
   setTasksDir,
 } from "../../ipc/client";
 import type { NotifyKind, Provider, ProviderLink, SettingsView, StepModels, UpdateView } from "../../ipc/types";
@@ -40,6 +41,16 @@ interface Props {
 
 const t = vi.settings;
 const FLASH_MS = 1400;
+/** `quota.claudeActiveProbeSec` / `quota.claudeProbeMin` defaults in the core. */
+const DEFAULT_PROBE_SEC = 60;
+const DEFAULT_IDLE_MIN = 15;
+const PROBE_CHOICES = [0, 30, 60, 120, 300];
+const IDLE_CHOICES = [5, 10, 15, 30, 60];
+
+/** The usual intervals, plus the saved one when config.json holds another value. */
+function withSaved(choices: number[], current: number): number[] {
+  return choices.includes(current) ? choices : [...choices, current].sort((a, b) => a - b);
+}
 
 const NOTIFY_ROWS: { kind: NotifyKind; id: string; label: string; hint: string }[] = [
   { kind: "comments", id: "notifyComments", label: vi.notify.comments, hint: vi.notify.commentsHint },
@@ -321,6 +332,8 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
   const canSave = !busy && url.trim() !== "" && (token.trim() !== "" || view?.nxTokenSet === true);
   const save = () => run(() => saveNxToken(url, token), true);
   const status = !view ? "…" : view.nxTokenSet ? (view.nxUser ? t.connectedAs(view.nxUser) : t.tokenSet) : t.noToken;
+  const probeSec = view?.claudeActiveProbeSec ?? DEFAULT_PROBE_SEC;
+  const idleMin = view?.claudeProbeMin ?? DEFAULT_IDLE_MIN;
 
   const versionText = !update
     ? "…"
@@ -589,6 +602,40 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                           <span className="settings-error">{view.quotaError}</span>
                         </div>
                       )}
+                    </Group>
+                    <Group>
+                      <Row id="activeProbe" label={t.activeProbe} hint={t.activeProbeHint}>
+                        <select
+                          className="input set-probe-select"
+                          aria-label={t.activeProbe}
+                          disabled={busy || !view}
+                          value={probeSec}
+                          onChange={(e) => run(() => setQuotaProbe(Number(e.target.value), idleMin), false)}
+                        >
+                          {withSaved(PROBE_CHOICES, probeSec).map((secs) => (
+                            <option key={secs} value={secs}>
+                              {secs === 0 ? t.activeProbeOff : t.activeProbeEvery(secs)}
+                              {secs === DEFAULT_PROBE_SEC ? t.activeProbeDefault : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </Row>
+                      <Row id="idleProbe" label={t.idleProbe} hint={t.idleProbeHint}>
+                        <select
+                          className="input set-probe-select"
+                          aria-label={t.idleProbe}
+                          disabled={busy || !view}
+                          value={idleMin}
+                          onChange={(e) => run(() => setQuotaProbe(probeSec, Number(e.target.value)), false)}
+                        >
+                          {withSaved(IDLE_CHOICES, idleMin).map((mins) => (
+                            <option key={mins} value={mins}>
+                              {t.activeProbeEvery(mins * 60)}
+                              {mins === DEFAULT_IDLE_MIN ? t.activeProbeDefault : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </Row>
                     </Group>
                   </>
                 )}

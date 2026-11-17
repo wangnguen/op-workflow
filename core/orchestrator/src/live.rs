@@ -5,8 +5,14 @@
 //!   Comments of a task are read again only when its `updatedAt` moved (PLAN.md §8).
 //! - Codex quota: one long-lived `codex app-server` (JSON-RPC over stdio), polled every
 //!   `quota.codexPollSec` seconds; restarted if it dies.
-//! - Claude quota: a minimal `claude -p` probe (~735 Haiku tokens) in an empty folder every
-//!   `quota.claudeProbeMin` minutes, reading its `rate_limit_event` (PLAN.md §7).
+//! - Claude quota, newest reading wins:
+//!   - Claude Code's own cache (`~/.claude.json` `cachedUsageUtilization`, the numbers of its
+//!     usage panel), read again whenever the file changes; free;
+//!   - each workflow step's `rate_limit_event`; free;
+//!   - a minimal `claude -p` probe (~735 Haiku tokens) in an empty folder, reading its
+//!     `rate_limit_event` (PLAN.md §7), only when the newest reading is older than
+//!     `quota.claudeProbeMin` minutes, or `quota.claudeActiveProbeSec` seconds while Claude Code
+//!     is being used outside the app (a transcript under `~/.claude/projects` was just written).
 //!
 //! Nothing here writes to OpenProject.
 
@@ -16,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use opw_agents::cli;
 use opw_agents::env::{Account, is_stripped};
@@ -30,6 +36,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 const RESTART_BACKOFF: Duration = Duration::from_secs(60);
 /// How often a healthy app-server connection checks for a "Kết nối lại" request.
 const WAKE_CHECK: Duration = Duration::from_secs(1);
+/// How often the Claude quota thread looks at Claude Code's cache file (one `stat`).
+const CLAUDE_TICK: Duration = Duration::from_secs(3);
+/// How often it lists Claude Code's transcripts to see whether Claude Code is in use.
+const ACTIVITY_SCAN: Duration = Duration::from_secs(15);
 
 /// Cached live state. The token stays inside the process and is never serialized.
 #[derive(Clone, Default)]
@@ -58,6 +68,8 @@ pub struct LiveState {
     /// `None` until the quota threads start.
     pub claude_link: Option<ProviderLink>,
     pub codex_link: Option<ProviderLink>,
+    /// How often Claude is probed (Settings → Hạn mức changes it without a restart).
+    pub claude_probe: ClaudeProbe,
 }
 
 impl LiveState {
@@ -111,6 +123,18 @@ impl LiveState {
         (!errors.is_empty()).then(|| errors.join("\n"))
     }
 
+    /// Keep the newest Claude reading: probes, the steps' own events and Claude Code's cache
+    /// arrive out of order. `false` when `snap` is not newer than the one kept.
+    pub fn put_claude(&mut self, snap: QuotaSnapshot) -> bool {
+        let newer = self.claude.as_ref().is_none_or(|old| {
+            opw_quota::seconds_between(&old.observed_at, &snap.observed_at).is_none_or(|s| s > 0.0)
+        });
+        if newer {
+            self.claude = Some(snap);
+        }
+        newer
+    }
+
     fn link_mut(&mut self, provider: Provider) -> &mut Option<ProviderLink> {
         match provider {
             Provider::Claude => &mut self.claude_link,
@@ -129,11 +153,38 @@ impl std::fmt::Debug for LiveState {
     }
 }
 
+/// How often the Claude probe runs, from `quota.claudeProbeMin` (Claude Code not in use) and
+/// `quota.claudeActiveProbeSec` (in use outside the app; 0 = off).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaudeProbe {
+    pub idle: Duration,
+    pub active: Option<Duration>,
+}
+
+impl ClaudeProbe {
+    pub fn from_config(q: &opw_config::QuotaConfig) -> Self {
+        Self {
+            idle: Duration::from_secs(u64::from(q.claude_probe_min.max(1)) * 60),
+            active: (q.claude_active_probe_sec > 0).then(|| {
+                Duration::from_secs(u64::from(
+                    q.claude_active_probe_sec.max(opw_config::MIN_ACTIVE_PROBE_SEC),
+                ))
+            }),
+        }
+    }
+}
+
+impl Default for ClaudeProbe {
+    fn default() -> Self {
+        Self::from_config(&opw_config::QuotaConfig::default())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LiveSettings {
     pub poll: Duration,
     pub codex_poll: Duration,
-    pub claude_probe: Duration,
+    pub claude_probe: ClaudeProbe,
     pub claude_probe_model: String,
     /// Empty folder for the Claude probe, so no CLAUDE.md is loaded.
     pub probe_dir: PathBuf,
@@ -183,6 +234,7 @@ impl Live {
             token,
             claude_link: Some(link(Provider::Claude, LinkStatus::Connecting, None)),
             codex_link: Some(link(Provider::Codex, LinkStatus::Connecting, None)),
+            claude_probe: settings.claude_probe,
             ..LiveState::default()
         }));
         let (wake_tasks, wake_rx) = mpsc::channel();
@@ -253,13 +305,18 @@ impl Live {
     /// Quota read from a workflow step's own `rate_limit_event` (every headless Claude run
     /// reports it for free, PLAN.md §9).
     pub fn observe_claude(&self, snap: QuotaSnapshot) {
-        update(&self.state, |s| s.claude = Some(snap));
-        set_link(&self.state, Provider::Claude, LinkStatus::Ok, None);
+        put_claude(&self.state, snap);
     }
 
     /// Fetch tasks now instead of waiting for the next poll.
     pub fn refresh(&self) {
         let _ = self.wake_tasks.send(());
+    }
+
+    /// Settings → Hạn mức changed how often Claude is probed; the Claude thread reads it on its
+    /// next tick.
+    pub fn set_claude_probe(&self, probe: ClaudeProbe) {
+        update(&self.state, |s| s.claude_probe = probe);
     }
 
     /// "Kết nối lại": restart a dead Codex app-server or read it again now; run the Claude
@@ -674,47 +731,192 @@ fn run_app_server(
 
 // ---------- claude quota ----------
 
+/// Take a Claude reading if it is newer than the one shown; a new one means the source works.
+fn put_claude(state: &Mutex<LiveState>, snap: QuotaSnapshot) {
+    let mut newer = false;
+    update(state, |s| newer = s.put_claude(snap));
+    if newer {
+        set_link(state, Provider::Claude, LinkStatus::Ok, None);
+    }
+}
+
+/// Where Claude Code keeps its files: `$CLAUDE_CONFIG_DIR`, or `~/.claude` with the config file
+/// beside it (`~/.claude.json`).
+struct ClaudeHome {
+    config: PathBuf,
+    projects: PathBuf,
+}
+
+fn claude_home() -> Option<ClaudeHome> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from) {
+        return Some(ClaudeHome {
+            config: dir.join(".claude.json"),
+            projects: dir.join("projects"),
+        });
+    }
+    let home = dirs::home_dir()?;
+    Some(ClaudeHome {
+        config: home.join(".claude.json"),
+        projects: home.join(".claude").join("projects"),
+    })
+}
+
+/// Claude Code's own last usage reading, read again only when its config file changed. A file
+/// caught half-written is tried again on the next tick.
+fn read_claude_cache(state: &Mutex<LiveState>, path: &Path, seen: &mut Option<SystemTime>) {
+    let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+        return;
+    };
+    if *seen == Some(modified) {
+        return;
+    }
+    let Some(config) = std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    else {
+        return;
+    };
+    *seen = Some(modified);
+    if let Some(snap) = opw_quota::from_claude_code_cache(&config) {
+        put_claude(state, snap);
+    }
+}
+
+/// Newest write to a Claude Code transcript (`projects/<folder>/<session>.jsonl`; one line per
+/// turn), so a recent time means Claude Code is spending quota right now. The app's own probe
+/// keeps no transcript, so it never counts.
+fn last_claude_write(projects: &Path) -> Option<SystemTime> {
+    std::fs::read_dir(projects)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|d| std::fs::read_dir(d.path()).ok())
+        .flat_map(|dir| dir.flatten())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .max()
+}
+
+/// Whether a probe is due: the newest reading (`None` = none yet) and the last probe are both
+/// older than the interval, which is `active` while Claude Code is in use elsewhere. After a
+/// failed probe only the normal interval counts, so a broken CLI is not retried every minute.
+fn probe_due(
+    reading_age: Option<Duration>,
+    since_probe: Option<Duration>,
+    last_ok: bool,
+    every: Duration,
+    active: Option<Duration>,
+) -> bool {
+    let reading_every = active.map_or(every, |a| a.min(every));
+    let probe_every = if last_ok { reading_every } else { every };
+    reading_age.is_none_or(|a| a >= reading_every) && since_probe.is_none_or(|p| p >= probe_every)
+}
+
+fn claude_age(state: &Mutex<LiveState>) -> Option<Duration> {
+    let at = state
+        .lock()
+        .ok()
+        .and_then(|s| s.claude.as_ref().map(|c| c.observed_at.clone()))?;
+    let secs = opw_quota::seconds_between(&at, &now())?;
+    Some(Duration::from_secs_f64(secs.max(0.0)))
+}
+
 fn claude_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receiver<()>) {
-    let mins = settings.claude_probe.as_secs().div_ceil(60);
+    let home = claude_home();
+    let mut seen = None;
+    // (when the transcripts were last listed, the newest write found)
+    let mut scanned: Option<(Instant, Option<SystemTime>)> = None;
+    let mut last_probe: Option<(Instant, bool)> = None;
+    let mut asked = false;
     loop {
-        match cli::find_claude() {
-            Some(exe) => match probe_claude(&exe, settings) {
-                Ok(Some(snap)) => {
-                    update(state, |s| s.claude = Some(snap));
-                    set_link(state, Provider::Claude, LinkStatus::Ok, None);
-                }
-                Ok(_) | Err(_) if claude_signed_in(&exe) == Some(false) => set_link(
+        if let Some(h) = &home {
+            read_claude_cache(state, &h.config, &mut seen);
+        }
+        // Claude Code wrote a transcript within two active intervals: one more probe after its
+        // last turn catches the final number
+        let every = state.lock().map(|s| s.claude_probe).unwrap_or_default();
+        let active = every.active.filter(|a| {
+            let Some(h) = &home else { return false };
+            if scanned.is_none_or(|(at, _)| at.elapsed() >= ACTIVITY_SCAN) {
+                scanned = Some((Instant::now(), last_claude_write(&h.projects)));
+            }
+            scanned
+                .and_then(|(_, w)| w)
+                .and_then(|w| w.elapsed().ok())
+                .is_some_and(|ago| ago < *a * 2)
+        });
+        let due = probe_due(
+            claude_age(state),
+            last_probe.map(|(at, _)| at.elapsed()),
+            last_probe.is_none_or(|(_, ok)| ok),
+            every.idle,
+            active,
+        );
+        if asked || due {
+            let ok = probe_round(state, settings, every.idle);
+            last_probe = Some((Instant::now(), ok));
+        }
+        asked = match wake.recv_timeout(CLAUDE_TICK) {
+            Ok(()) => {
+                while wake.try_recv().is_ok() {}
+                true
+            }
+            Err(RecvTimeoutError::Timeout) => false,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+    }
+}
+
+/// One probe and the link status it leaves; `true` when it brought a reading.
+fn probe_round(state: &Mutex<LiveState>, settings: &LiveSettings, idle: Duration) -> bool {
+    let mins = idle.as_secs().div_ceil(60);
+    match cli::find_claude() {
+        Some(exe) => match probe_claude(&exe, settings) {
+            Ok(Some(snap)) => {
+                put_claude(state, snap);
+                set_link(state, Provider::Claude, LinkStatus::Ok, None);
+                true
+            }
+            Ok(_) | Err(_) if claude_signed_in(&exe) == Some(false) => {
+                set_link(
                     state,
                     Provider::Claude,
                     LinkStatus::SignedOut,
                     Some(signed_out_message(Provider::Claude)),
-                ),
-                Ok(None) => set_link(
+                );
+                false
+            }
+            Ok(None) => {
+                set_link(
                     state,
                     Provider::Claude,
                     LinkStatus::Error,
                     Some(format!(
                         "Probe Claude chạy xong nhưng không có số hạn mức (rate_limit_event). Kiểm tra claude đã đăng nhập chưa; app thử lại sau {mins} phút."
                     )),
-                ),
-                Err(e) => set_link(
+                );
+                false
+            }
+            Err(e) => {
+                set_link(
                     state,
                     Provider::Claude,
                     LinkStatus::Error,
                     Some(format!(
                         "Probe Claude lỗi: {e}. App thử lại sau {mins} phút, hoặc bấm Kết nối lại."
                     )),
-                ),
-            },
-            None => set_link(
+                );
+                false
+            }
+        },
+        None => {
+            set_link(
                 state,
                 Provider::Claude,
                 LinkStatus::Missing,
                 Some(missing_message(Provider::Claude)),
-            ),
-        }
-        if !wait_wake(wake, settings.claude_probe) {
-            return;
+            );
+            false
         }
     }
 }
@@ -799,6 +1001,118 @@ mod tests {
         let high = s.priority("High").unwrap();
         assert_eq!((high.rank, high.ranks), (Some(3), Some(4)));
         assert_eq!(s.priority("Odd").unwrap().rank, None);
+    }
+
+    fn claude_at(observed_at: &str, five_hour: f64) -> QuotaSnapshot {
+        QuotaSnapshot {
+            provider: Provider::Claude,
+            windows: vec![opw_domain::view::QuotaWindow {
+                kind: opw_domain::view::QuotaWindowKind::FiveHour,
+                used_pct: five_hour,
+                resets_at: None,
+            }],
+            source: "test".into(),
+            observed_at: observed_at.into(),
+            plan: None,
+        }
+    }
+
+    #[test]
+    fn newest_claude_reading_wins() {
+        let mut s = LiveState::default();
+        assert!(s.put_claude(claude_at("2026-11-17T03:40:00Z", 29.0)));
+        // Claude Code's cache, fetched earlier, arrives later: kept out
+        assert!(!s.put_claude(claude_at("2026-11-17T03:34:42Z", 27.0)));
+        assert!(!s.put_claude(claude_at("2026-11-17T03:40:00Z", 27.0)));
+        assert!(s.put_claude(claude_at("2026-11-17T03:40:00.25Z", 30.0)));
+        assert!((s.claude.unwrap().windows[0].used_pct - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn probe_runs_only_when_the_reading_is_old() {
+        let m = |n: u64| Duration::from_secs(n * 60);
+        let (every, active) = (m(15), Some(m(1)));
+        // nothing yet: probe
+        assert!(probe_due(None, None, true, every, None));
+        // a fresh reading (Claude Code's cache, a step): no probe
+        assert!(!probe_due(Some(m(3)), None, true, every, None));
+        // Claude Code busy elsewhere: one minute is old enough
+        assert!(probe_due(Some(m(3)), Some(m(2)), true, every, active));
+        assert!(!probe_due(
+            Some(Duration::from_secs(20)),
+            Some(m(2)),
+            true,
+            every,
+            active
+        ));
+        // the last probe was just now (it found nothing newer): wait
+        assert!(!probe_due(
+            Some(m(3)),
+            Some(Duration::from_secs(10)),
+            true,
+            every,
+            active
+        ));
+        // after a failed probe, retry on the normal cycle only
+        assert!(!probe_due(Some(m(3)), Some(m(2)), false, every, active));
+        assert!(probe_due(Some(m(20)), Some(m(15)), false, every, active));
+        // idle: the normal cycle
+        assert!(!probe_due(Some(m(10)), Some(m(10)), true, every, None));
+        assert!(probe_due(Some(m(16)), Some(m(16)), true, every, None));
+    }
+
+    #[test]
+    #[ignore = "reads this machine's Claude Code files"]
+    fn live_claude_code_files() {
+        let home = claude_home().expect("home folder");
+        let state = Mutex::new(LiveState::default());
+        read_claude_cache(&state, &home.config, &mut None);
+        let snap = state
+            .lock()
+            .unwrap()
+            .claude
+            .clone()
+            .expect("cachedUsageUtilization");
+        let wrote = last_claude_write(&home.projects).expect("a transcript");
+        println!(
+            "{} {:?}; last transcript write {:?} ago",
+            snap.observed_at,
+            snap.windows,
+            wrote.elapsed().unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn reads_claude_code_cache_when_the_file_changes() {
+        let dir = std::env::temp_dir().join(format!("opw-cc-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".claude.json");
+        let state = Mutex::new(LiveState::default());
+        let mut seen = None;
+        // half-written: nothing, and read again next time
+        std::fs::write(&path, b"{\"oauthAccount\":").unwrap();
+        read_claude_cache(&state, &path, &mut seen);
+        assert!(seen.is_none() && state.lock().unwrap().claude.is_none());
+        let config = json!({
+            "oauthAccount": {"accountUuid": "a"},
+            "cachedUsageUtilization": {"fetchedAtMs": 1_794_886_482_855_u64, "accountUuid": "a",
+                "utilization": {"five_hour": {"utilization": 27}, "seven_day": {"utilization": 43}}}
+        });
+        std::fs::write(&path, config.to_string()).unwrap();
+        read_claude_cache(&state, &path, &mut seen);
+        let s = state.lock().unwrap().clone();
+        assert_eq!(s.claude.unwrap().source, opw_quota::SOURCE_CLAUDE_CODE);
+        assert_eq!(s.claude_link.unwrap().status, LinkStatus::Ok);
+        assert!(seen.is_some());
+        // a transcript next to it counts as Claude Code being in use
+        let projects = dir.join("projects");
+        assert!(last_claude_write(&projects).is_none());
+        std::fs::create_dir_all(projects.join("c--repo")).unwrap();
+        std::fs::write(projects.join("c--repo").join("s.jsonl"), b"{}\n").unwrap();
+        std::fs::write(projects.join("c--repo").join("notes.txt"), b"x").unwrap();
+        let wrote = last_claude_write(&projects).unwrap();
+        assert!(wrote.elapsed().unwrap_or_default() < Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

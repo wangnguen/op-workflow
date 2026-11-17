@@ -43,7 +43,7 @@ use opw_tracker::{Comment, HttpTracker, TrackerApi, WorkPackage};
 
 use crate::alerts::{Alerts, NewAlert};
 use crate::flow::{CliLauncher, Flow, TaskCtx};
-use crate::live::{Live, LiveSettings, LiveState};
+use crate::live::{ClaudeProbe, Live, LiveSettings, LiveState};
 use crate::updater::Updater;
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -107,7 +107,7 @@ impl AppService {
         let settings = LiveSettings {
             poll: Duration::from_secs(u64::from(config.tracker.poll_min.max(1)) * 60),
             codex_poll: Duration::from_secs(u64::from(config.quota.codex_poll_sec.max(15))),
-            claude_probe: Duration::from_secs(u64::from(config.quota.claude_probe_min.max(1)) * 60),
+            claude_probe: ClaudeProbe::from_config(&config.quota),
             claude_probe_model: config.quota.claude_probe_model.clone(),
             probe_dir,
         };
@@ -1351,6 +1351,23 @@ impl AppService {
         Ok(self.settings())
     }
 
+    /// Settings → Hạn mức: how often Claude is probed while Claude Code is in use outside the
+    /// app (`quota.claudeActiveProbeSec`, 0 = off) and otherwise (`quota.claudeProbeMin`).
+    /// Takes effect without a restart.
+    pub fn set_claude_probe(&self, active_sec: u32, idle_min: u32) -> Result<SettingsView, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
+        opw_config::save_claude_probe(path, active_sec, idle_min)
+            .map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        if let Some(live) = &self.live {
+            live.set_claude_probe(ClaudeProbe::from_config(&self.config().quota));
+        }
+        Ok(self.settings())
+    }
+
     /// Open `chrome://inspect/#remote-debugging`, where the user allows "Lấy issue" to connect.
     pub fn open_browser_debug(&self) -> Result<(), ApiError> {
         opw_browser::open_debug_settings().map_err(|e| ApiError::new("browser.open", e))
@@ -1457,6 +1474,8 @@ impl AppService {
             tasks_dir_suggested: folders::desktop_suggestion().map(|p| p.to_string_lossy().into_owned()),
             notify: config.notify,
             steps: steps::settings(&config, &self.done_step_runs()),
+            claude_active_probe_sec: config.quota.claude_active_probe_sec,
+            claude_probe_min: config.quota.claude_probe_min,
         }
     }
 

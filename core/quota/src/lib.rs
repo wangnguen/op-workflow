@@ -6,6 +6,10 @@
 //! | Claude statusline JSON | `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}` | 0..100, unix s |
 //! | Codex `app-server` `account/rateLimits/read` | `rateLimits.{primary,secondary}.{usedPercent,windowDurationMins,resetsAt}` | 0..100, unix s |
 //! | Codex rollout `token_count.rate_limits` | `{primary,secondary}.{used_percent,window_minutes,resets_at}` | 0..100, unix s |
+//! | Claude Code's own cache, `~/.claude.json` `cachedUsageUtilization` (checked 2026-11-17, CLI 2.1.x) | `utilization.{five_hour,seven_day}.{utilization,resets_at}`, `fetchedAtMs` | 0..100, RFC 3339 |
+//!
+//! The last row is what Claude Code's own usage panel shows: every Claude Code process (CLI, VS
+//! Code) writes it after asking the server, so reading it costs no tokens and no credentials.
 //!
 //! Parsers are pure: callers pass `observed_at`. Missing fields give `None`, never a panic.
 
@@ -21,6 +25,7 @@ pub const SOURCE_RATE_LIMIT_EVENT: &str = "rate_limit_event";
 pub const SOURCE_STATUSLINE: &str = "statusline";
 pub const SOURCE_APP_SERVER: &str = "app-server";
 pub const SOURCE_ROLLOUT: &str = "rollout";
+pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 
 /// Claude `{"type":"rate_limit_event","rate_limit_info":{...}}` from `claude -p --output-format stream-json`.
 /// Uses `unifiedWindows` (observed, not yet in the SDK types) and falls back to the declared
@@ -76,6 +81,57 @@ pub fn from_claude_statusline(status: &Value, observed_at: &str) -> Option<Quota
     })
     .collect();
     (!windows.is_empty()).then(|| snapshot(Provider::Claude, windows, SOURCE_STATUSLINE, observed_at, None))
+}
+
+/// Claude Code's config file (`~/.claude.json`, parsed whole): the usage it last fetched for the
+/// signed-in account, timed by `fetchedAtMs`. `None` when the cache is missing or belongs to
+/// another account than `oauthAccount` (someone switched accounts since). Only these two keys
+/// are read; the file holds no token.
+pub fn from_claude_code_cache(config: &Value) -> Option<QuotaSnapshot> {
+    let cache = config.get("cachedUsageUtilization")?;
+    let owner = cache.get("accountUuid").and_then(Value::as_str)?;
+    let signed_in = config
+        .pointer("/oauthAccount/accountUuid")
+        .and_then(Value::as_str)?;
+    if owner != signed_in {
+        return None;
+    }
+    let fetched = num(cache.get("fetchedAtMs"))?;
+    let usage = cache.get("utilization")?;
+    let mut windows: Vec<QuotaWindow> = [
+        ("five_hour", QuotaWindowKind::FiveHour),
+        ("seven_day", QuotaWindowKind::SevenDay),
+    ]
+    .into_iter()
+    .filter_map(|(key, kind)| {
+        let w = usage.get(key)?;
+        Some(window_at(kind, num(w.get("utilization"))?, w.get("resets_at")))
+    })
+    .collect();
+    if windows.is_empty() {
+        // newer shape: `limits: [{kind: "session" | "weekly_all", percent, resets_at}]`
+        windows = usage
+            .get("limits")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|l| {
+                let kind = match l.get("kind").and_then(Value::as_str)? {
+                    "session" => QuotaWindowKind::FiveHour,
+                    "weekly_all" => QuotaWindowKind::SevenDay,
+                    _ => return None,
+                };
+                Some(window_at(kind, num(l.get("percent"))?, l.get("resets_at")))
+            })
+            .collect();
+    }
+    let observed_at = unix_to_rfc3339(fetched / 1000.0)?;
+    (!windows.is_empty()).then(|| snapshot(Provider::Claude, windows, SOURCE_CLAUDE_CODE, &observed_at, None))
+}
+
+/// `a` was observed after `b` (both RFC 3339; a string that does not parse is never newer).
+pub fn is_newer(a: &str, b: &str) -> bool {
+    seconds_between(b, a).is_some_and(|s| s > 0.0)
 }
 
 /// Codex app-server `account/rateLimits/read` result (or the `rateLimits` of an
@@ -159,6 +215,15 @@ fn window(kind: QuotaWindowKind, used_pct: f64, resets_at: Option<f64>) -> Quota
         used_pct: used_pct.clamp(0.0, 100.0),
         resets_at: resets_at.filter(|r| *r > 0.0).and_then(unix_to_rfc3339),
     }
+}
+
+/// Like [`window`], with the reset time given as RFC 3339 text (stored in UTC like the others).
+fn window_at(kind: QuotaWindowKind, used_pct: f64, resets_at: Option<&Value>) -> QuotaWindow {
+    let reset = resets_at
+        .and_then(Value::as_str)
+        .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok())
+        .map(|t| t.unix_timestamp() as f64);
+    window(kind, used_pct, reset)
 }
 
 fn snapshot(
@@ -261,6 +326,58 @@ mod tests {
         let s = from_codex_rollout(&p, AT).unwrap();
         assert_eq!(s.source, SOURCE_ROLLOUT);
         assert!((used(&s, QuotaWindowKind::SevenDay) - 17.0).abs() < 1e-9);
+    }
+
+    /// Shape of `~/.claude.json` written by Claude Code on 2026-11-17 (ids replaced, other keys cut).
+    fn claude_code_config(owner: &str) -> Value {
+        json!({
+            "oauthAccount": {"accountUuid": "acc-1", "emailAddress": "x"},
+            "cachedUsageUtilization": {"fetchedAtMs": 1_794_886_482_855_u64, "accountUuid": owner,
+                "utilization": {
+                    "five_hour": {"utilization": 27, "resets_at": "2026-11-17T07:19:59.656530+00:00", "limit_dollars": null},
+                    "seven_day": {"utilization": 43, "resets_at": "2026-11-22T11:59:59.656547+00:00"},
+                    "seven_day_opus": null,
+                    "limits": [{"kind": "session", "percent": 27}, {"kind": "weekly_all", "percent": 43}]}}
+        })
+    }
+
+    #[test]
+    fn claude_code_cache() {
+        let s = from_claude_code_cache(&claude_code_config("acc-1")).unwrap();
+        assert_eq!(
+            (s.provider, s.source.as_str()),
+            (Provider::Claude, SOURCE_CLAUDE_CODE)
+        );
+        assert_eq!(s.observed_at, "2026-11-17T03:34:42Z");
+        assert!((used(&s, QuotaWindowKind::FiveHour) - 27.0).abs() < 1e-9);
+        assert!((used(&s, QuotaWindowKind::SevenDay) - 43.0).abs() < 1e-9);
+        assert_eq!(s.windows[0].resets_at.as_deref(), Some("2026-11-17T07:19:59Z"));
+        // another account's numbers, or nobody signed in: nothing
+        assert!(from_claude_code_cache(&claude_code_config("acc-2")).is_none());
+        let mut signed_out = claude_code_config("acc-1");
+        signed_out.as_object_mut().unwrap().remove("oauthAccount");
+        assert!(from_claude_code_cache(&signed_out).is_none());
+        assert!(from_claude_code_cache(&json!({})).is_none());
+    }
+
+    #[test]
+    fn claude_code_cache_falls_back_to_limits() {
+        let mut c = claude_code_config("acc-1");
+        let u = c.pointer_mut("/cachedUsageUtilization/utilization").unwrap();
+        u["five_hour"] = Value::Null;
+        u["seven_day"] = Value::Null;
+        let s = from_claude_code_cache(&c).unwrap();
+        assert_eq!(s.windows.len(), 2);
+        assert!((used(&s, QuotaWindowKind::SevenDay) - 43.0).abs() < 1e-9);
+        assert!(s.windows[0].resets_at.is_none());
+    }
+
+    #[test]
+    fn newer_compares_times_not_text() {
+        // as text "…00Z" > "…00.5Z", but 00.5 is later
+        assert!(is_newer("2026-11-17T03:00:00.5Z", "2026-11-17T03:00:00Z"));
+        assert!(!is_newer("2026-11-17T03:00:00Z", "2026-11-17T03:00:00Z"));
+        assert!(!is_newer("x", "2026-11-17T03:00:00Z"));
     }
 
     #[test]

@@ -344,6 +344,10 @@
 .set-row-control .qp-link {
   margin: 0;
 }
+/* Hạn mức probe intervals: one fixed width, so picking a longer option moves nothing */
+.set-row-control .set-probe-select {
+  width: 15.5rem;
+}
 
 /* paths in Settings open in Explorer */
 .set-path-link {

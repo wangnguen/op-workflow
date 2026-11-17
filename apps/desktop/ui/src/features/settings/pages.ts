@@ -33,6 +33,8 @@ export const ENTRIES: SettingEntry[] = [
   ),
   { page: "quota", id: "claude", label: `${t.claudeQuota} · ${t.quotaSection}`, keywords: "quota hạn mức limit claude probe" },
   { page: "quota", id: "codex", label: `${t.codexQuota} · ${t.quotaSection}`, keywords: "quota hạn mức limit codex app-server" },
+  { page: "quota", id: "activeProbe", label: t.activeProbe, keywords: "quota hạn mức probe haiku claude code realtime đồng bộ usage chu kỳ" },
+  { page: "quota", id: "idleProbe", label: t.idleProbe, keywords: "quota hạn mức probe haiku claude chu kỳ rảnh không dùng" },
   { page: "notify", id: "notifyComments", label: vi.notify.comments, keywords: "thông báo notification toast comment test failed reopened" },
   { page: "notify", id: "notifySteps", label: vi.notify.steps, keywords: "thông báo notification toast bước step xong lỗi chờ" },
   { page: "notify", id: "notifyQuota", label: vi.notify.quota, keywords: "thông báo notification toast hạn mức quota 80 95" },

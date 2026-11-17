@@ -68,6 +68,7 @@ fn main() {
             settings_api::reveal_path,
             settings_api::set_tasks_dir,
             settings_api::set_step_choice,
+            settings_api::set_quota_probe,
             settings_api::step_models,
             flow_api::task_detail,
             flow_api::flow_action,

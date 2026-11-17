@@ -13,6 +13,7 @@ import {
   mockRepoState,
   mockSaveToken,
   mockSetTasksDir,
+  mockSetQuotaProbe,
   mockSetStepChoice,
   mockSettings,
   mockStepModels,
@@ -94,6 +95,10 @@ export const openConfig = (): Promise<null> => call("open_config", () => null);
 /** Settings → Các bước AI: agent, model and effort of one step (absent = the machine's default). */
 export const setStepChoice = (choice: StepChoiceRequest): Promise<SettingsView> =>
   call("set_step_choice", () => mockSetStepChoice(choice), { choice });
+/** Settings → Hạn mức: probe Claude every `activeSec` while Claude Code is in use elsewhere
+ *  (0 = off), and every `idleMin` minutes otherwise. */
+export const setQuotaProbe = (activeSec: number, idleMin: number): Promise<SettingsView> =>
+  call("set_quota_probe", () => mockSetQuotaProbe(activeSec, idleMin), { activeSec, idleMin });
 /** Models and effort levels the Claude / Codex CLIs on this machine offer. The core starts both
  *  CLIs (no prompt, no tokens, ~2 s) and reuses the answer for 10 minutes unless `refresh`. */
 export async function getStepModels(refresh: boolean): Promise<StepModels> {

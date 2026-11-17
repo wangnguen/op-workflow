@@ -61,6 +61,17 @@ pub fn set_step_choice(
     service.set_step_choice(&choice)
 }
 
+/// Settings → Hạn mức: how often Claude is probed while Claude Code is in use (seconds, 0 =
+/// off) and otherwise (minutes).
+#[tauri::command]
+pub fn set_quota_probe(
+    service: State<'_, AppService>,
+    active_sec: u32,
+    idle_min: u32,
+) -> Result<SettingsView, ApiError> {
+    service.set_claude_probe(active_sec, idle_min)
+}
+
 /// Settings → Các bước AI: models and effort levels of the Claude / Codex CLIs on this machine.
 /// Starts both CLIs (no prompt, no tokens, about 2 s), so off the UI thread.
 #[tauri::command(async)]
