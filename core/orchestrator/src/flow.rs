@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::browsertest;
 use crate::checks::{self, Check, CheckKind, CheckResult, CheckRunner, ProcessRunner};
 use crate::harness;
 use opw_agents::ModelChoice;
@@ -62,8 +63,6 @@ const NOTE_CHARS: usize = 400;
 const RUN_LOG_DAYS: u64 = 14;
 /// Optional steps the user turns on or off per task (the analysis proposes them).
 const SWITCHABLE: [StepKind; 2] = [StepKind::Harness, StepKind::BrowserTest];
-/// Steps this build cannot run yet (part 5f): turned on, they are passed as "bỏ qua".
-const NOT_YET: [StepKind; 1] = [StepKind::BrowserTest];
 /// Times Claude may fix what Kiểm tra reports before the step stops for the user.
 const CHECK_FIX_ROUNDS: usize = 2;
 /// What a question left to the AI says in plan.md.
@@ -175,6 +174,8 @@ struct Saved {
     review_after_checks: bool,
     /// Harness (step 5): what the AI built and how it ran last.
     harness: Option<HarnessState>,
+    /// Test trình duyệt (step 11): how it went last.
+    browser: Option<BrowserState>,
 }
 
 /// The task's harness: the command the app runs again after each fix, and its last result.
@@ -201,6 +202,48 @@ struct HarnessState {
     library_root: Option<String>,
     /// The AI found it worth keeping, but it did not PASS yet: kept once it does.
     pending: Option<harness::LibraryPick>,
+}
+
+/// The task's browser test (step 11): its last result.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct BrowserState {
+    passed: bool,
+    summary: String,
+    /// Where the AI opened the app.
+    url: String,
+    /// NG cases first.
+    cases: Vec<browsertest::Case>,
+    at: String,
+    runs: u32,
+}
+
+impl BrowserState {
+    fn view(&self) -> TestView {
+        TestView {
+            step: StepKind::BrowserTest,
+            passed: self.passed,
+            summary: self.summary.clone(),
+            cases: self
+                .cases
+                .iter()
+                .map(|c| TestCase {
+                    name: c.name.clone(),
+                    ok: c.ok,
+                    detail: c.detail.clone(),
+                    screenshot: c.screenshot.clone(),
+                })
+                .collect(),
+            at: self.at.clone(),
+            runs: self.runs,
+            command: None,
+            dir: None,
+            negative: None,
+            negative_detail: String::new(),
+            library: None,
+            url: Some(self.url.clone()).filter(|u| !u.is_empty()),
+        }
+    }
 }
 
 impl HarnessState {
@@ -230,6 +273,7 @@ impl HarnessState {
             negative: self.negative,
             negative_detail: self.negative_detail.clone(),
             library: self.library.clone(),
+            url: None,
         }
     }
 }
@@ -812,12 +856,12 @@ impl Flow {
                 if checks_ahead {
                     saved.workflow.set_uses(StepKind::Checks, true);
                 }
-                let mut entry = Entry {
+                let entry = Entry {
                     saved,
                     run: None,
                     log,
                 };
-                if pass_not_yet(&mut entry) || checks_ahead {
+                if checks_ahead {
                     if let Ok(json) = serde_json::to_string(&entry.saved) {
                         let _ = s.save_flow(wp_id, &json, &at);
                     }
@@ -963,7 +1007,6 @@ impl Flow {
             let mut tasks = self.inner.lock_tasks();
             let entry = tasks.get_mut(&wp_id).ok_or_else(flow_missing)?;
             let start = apply_action(entry, &ctx, &action, &self.inner.store)?;
-            pass_not_yet(entry);
             if !matches!(action, FlowAction::Run | FlowAction::Retry) || start {
                 self.inner.persist(wp_id, entry);
             }
@@ -1198,7 +1241,13 @@ impl Flow {
             cost_usd: runs.iter().filter_map(|r| r.cost_usd).sum(),
             // the facade fills this from OpenProject and the last issue read
             new_comments: 0,
-            tests: entry.saved.harness.iter().map(HarnessState::view).collect(),
+            tests: entry
+                .saved
+                .harness
+                .iter()
+                .map(HarnessState::view)
+                .chain(entry.saved.browser.iter().map(BrowserState::view))
+                .collect(),
         }
     }
 
@@ -1900,35 +1949,6 @@ fn apply_action(
     }
 }
 
-/// The flow reached an optional step this build cannot run yet: pass it as "bỏ qua" (with a
-/// log line) and move on, so the task never waits on a step nothing will run. Returns whether
-/// anything changed.
-fn pass_not_yet(entry: &mut Entry) -> bool {
-    let mut changed = false;
-    while entry.run.is_none() {
-        let Phase::Running(step) = entry.saved.workflow.phase() else {
-            break;
-        };
-        if !NOT_YET.contains(&step)
-            || entry
-                .saved
-                .workflow
-                .apply(WorkflowEvent::StepSkipped(step))
-                .is_err()
-        {
-            break;
-        }
-        push_log(
-            entry,
-            Some(step),
-            "info",
-            &format!("{} chưa chạy được ở bản này: bỏ qua", step_label(step)),
-        );
-        changed = true;
-    }
-    changed
-}
-
 /// plan.md with the user's answers as its last section (an older answers section is replaced).
 fn plan_with_answers(plan: &str, questions: &[PlanQuestion]) -> String {
     let body = match plan.find(prompts::ANSWERS_HEADING) {
@@ -2527,7 +2547,6 @@ impl Inner {
         };
         let note = with_sweep(note);
         push_log(entry, Some(step), kind, &text);
-        pass_not_yet(entry);
         self.persist(wp_id, entry);
         // Kiểm tra costs no tokens: it follows Viết code even without "Tự chạy"
         let after_checks = step == StepKind::Checks && std::mem::take(&mut entry.saved.review_after_checks);
@@ -3435,6 +3454,94 @@ fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Resu
     Ok(finish(state, ran, Some(r.cost_usd), String::new()))
 }
 
+/// Step 11. Claude tries the change in Chrome through the Chrome DevTools MCP server only,
+/// following the analysis's scenario; screenshots go to `<task>/browser-test/`. NG cases stop
+/// at the findings gate; they are fixed in step 9 and the test runs again.
+fn run_browser_test(
+    inner: &Inner,
+    ctx: &TaskCtx,
+    claim: &Claim,
+    repo: &Path,
+    brief: &str,
+) -> Result<Done, FlowError> {
+    let wp_id = ctx.row.wp_id;
+    let (budget, timeout, _) = limits(StepKind::BrowserTest, &ctx.config);
+    let (scenario, runs) = inner
+        .with_saved(wp_id, |s| {
+            let scenario: Vec<String> = s
+                .proposals
+                .iter()
+                .filter(|p| p.step == StepKind::BrowserTest)
+                .flat_map(|p| {
+                    p.checks
+                        .lines()
+                        .map(|l| l.trim().trim_start_matches("- ").to_owned())
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            (scenario, s.browser.as_ref().map_or(0, |b| b.runs))
+        })
+        .unwrap_or_default();
+    let shots = ctx.task_dir.join(browsertest::DIR);
+    let mcp = shots.join("mcp.json");
+    std::fs::create_dir_all(&shots)
+        .and_then(|()| std::fs::write(&mcp, claude::BROWSER_MCP))
+        .map_err(|e| flow_error("task.write", format!("Không ghi được {}: {e}", mcp.display())))?;
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    let repo_config = ctx.repo_config();
+    let mut allowed: Vec<String> = claude::BROWSER_BASH.iter().map(|s| (*s).to_owned()).collect();
+    allowed.extend(repo_config.allow_bash.iter().cloned());
+    let plan = ctx.read(PLAN_FILE).unwrap_or_default();
+    let prompt = prompts::browser_test(&plan, brief, &scenario, &path(&shots), &allowed);
+    let args = claude::with_model(
+        claude::browser_test_args(budget, &repo_config.allow_bash, &path(&mcp)),
+        &claim.choice,
+    );
+    let job = Job {
+        agent: Provider::Claude,
+        args,
+        cwd: repo.to_path_buf(),
+        stdin: Some(prompt),
+        timeout,
+    };
+    let r = inner.run_claude(ctx, StepKind::BrowserTest, &job, claim)?;
+    let answer = browsertest::answer(&r.text).ok_or_else(|| {
+        flow_error(
+            "browser.parse",
+            "AI không trả về kết quả test (khối ```json có `cases`). Xem tab Chat rồi bấm Thử lại.",
+        )
+    })?;
+    if answer.cases.is_empty() {
+        return Err(flow_error(
+            "browser.empty",
+            "AI không báo ca test nào. Xem tab Chat rồi bấm Thử lại.",
+        ));
+    }
+    let raw = browsertest::findings(&answer);
+    let findings = inner.merge(ctx, StepKind::BrowserTest, 0, "browserTest", &raw)?;
+    let (event, _) = review_event(&findings, &raw);
+    let pictures = answer.cases.iter().filter(|c| c.screenshot.is_some()).count();
+    let note = if pictures > 0 {
+        format!("{}, {pictures} ảnh", browsertest::tally(&answer))
+    } else {
+        browsertest::tally(&answer)
+    };
+    let state = BrowserState {
+        passed: answer.passed(),
+        summary: answer.summary.clone(),
+        url: answer.url.clone(),
+        cases: browsertest::shown(&answer),
+        at: now(),
+        runs: runs + 1,
+    };
+    inner.with_saved(wp_id, |s| s.browser = Some(state));
+    Ok(Done {
+        event,
+        note,
+        cost: Some(r.cost_usd),
+    })
+}
+
 fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<Done, FlowError> {
     use WorkflowEvent as E;
     let step = claim.step;
@@ -3686,11 +3793,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             })
         }
         StepKind::Harness => run_harness(inner, ctx, claim, repo),
-        // turned on by a later part; until then the workflow skips it
-        StepKind::BrowserTest => Err(flow_error(
-            "step.notYet",
-            format!("{} chưa chạy được ở bản này", step_label(step)),
-        )),
+        StepKind::BrowserTest => run_browser_test(inner, ctx, claim, repo, &brief),
         StepKind::CrossReview => {
             let round = inner.round_of(wp_id);
             let (raw, source, cost) = if claim.agent == AgentKind::Codex {
@@ -3864,6 +3967,8 @@ mod tests {
             "codex"
         } else if has("--restricted") {
             "analyze"
+        } else if has("--mcp-config") {
+            "browser"
         } else if has("--add-dir") {
             "harness"
         } else if has("acceptEdits") {
@@ -5153,6 +5258,133 @@ mod tests {
         assert_eq!(
             flow.act(ctx.clone(), FlowAction::DropHarness).unwrap_err().code,
             "harness.library"
+        );
+    }
+
+    /// Test trình duyệt: Chrome DevTools MCP only, screenshots in the task folder; NG cases go
+    /// through the findings gate, are fixed in step 9, and "Không" at "Review chéo lại?" runs the
+    /// test again.
+    #[test]
+    fn the_browser_test_reports_ng_cases_with_screenshots_and_runs_again_after_the_fix() {
+        let Some(s) = setup() else { return };
+        let tests = AtomicUsize::new(0);
+        let (flow, fake) = flow_with(&s, false, move |job, stop, out| match kind(job) {
+            "analyze" => {
+                out(&result_line(
+                    "## Nguyên nhân\nx\n```json\n{\"browserTest\":{\"recommend\":true,\"reason\":\"đổi màn hình\",\"scenario\":[\"mở /files khi chưa có org\"]}}\n```",
+                ));
+                ok()
+            }
+            "browser" => {
+                let shots = job
+                    .cwd
+                    .parent()
+                    .unwrap()
+                    .join("tasks")
+                    .join("WP-1")
+                    .join("browser-test");
+                let shot = shots.join("1.png");
+                std::fs::write(&shot, b"png").unwrap();
+                let shot = shot.to_string_lossy().replace('\\', "\\\\");
+                let n = tests.fetch_add(1, Ordering::SeqCst);
+                let first_ok = if n == 0 { "false" } else { "true" };
+                out(&result_line(&format!(
+                    "```json\n{{\"result\":\"ng\",\"summary\":\"thử 2 ca\",\"url\":\"http://localhost:5173/files\",\"cases\":[\
+                     {{\"name\":\"chưa có org\",\"ok\":{first_ok},\"detail\":\"trang trắng\",\"screenshot\":\"{shot}\",\"file\":\"a.ts\"}},\
+                     {{\"name\":\"có org\",\"ok\":true}}]}}\n```"
+                )));
+                ok()
+            }
+            _ => (happy(CLEAN))(job, stop, out),
+        });
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        let mut d = run(&flow, &ctx, FlowAction::Run);
+        // the plain answers until the browser test is next
+        for _ in 0..12 {
+            if d.current == Some(StepKind::BrowserTest) {
+                break;
+            }
+            let action = match (d.status, d.gate.as_ref().map(|g| g.kind)) {
+                (FlowStatus::Gate, Some(GateKind::PlanReview)) => FlowAction::ApprovePlan,
+                (FlowStatus::Gate, Some(GateKind::Findings)) => FlowAction::PickFindings { fix: false },
+                (FlowStatus::Ready, _) => FlowAction::Run,
+                other => panic!("{other:?}: {:?}", d.error),
+            };
+            d = run(&flow, &ctx, action);
+        }
+        assert_eq!(d.current, Some(StepKind::BrowserTest), "{:?}", d.error);
+        // "Không sửa" at Review chốt's gate already started it
+        let d = if d.status == FlowStatus::Ready {
+            run(&flow, &ctx, FlowAction::Run)
+        } else {
+            d
+        };
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::Findings),
+            "{:?}",
+            d.error
+        );
+        let view = d.tests.iter().find(|t| t.step == StepKind::BrowserTest).unwrap();
+        assert!(!view.passed && view.runs == 1);
+        assert_eq!(view.url.as_deref(), Some("http://localhost:5173/files"));
+        assert!(
+            view.cases[0]
+                .screenshot
+                .as_deref()
+                .is_some_and(|p| p.ends_with("1.png"))
+        );
+        let f = d
+            .findings
+            .iter()
+            .find(|f| f.title == "Test trình duyệt NG: chưa có org")
+            .unwrap();
+        assert_eq!((f.file.as_str(), f.source.as_str()), ("a.ts", "browserTest"));
+        let note = d
+            .runs
+            .iter()
+            .rev()
+            .find(|r| r.step == StepKind::BrowserTest)
+            .and_then(|r| r.note.clone());
+        assert_eq!(note.as_deref(), Some("NG 1/2, 1 ảnh"));
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let job = jobs.iter().find(|j| kind(j) == "browser").unwrap();
+        let at = job.args.iter().position(|a| a == "--mcp-config").unwrap();
+        let mcp = std::fs::read_to_string(&job.args[at + 1]).unwrap();
+        assert!(mcp.contains("chrome-devtools-mcp@"));
+        assert!(
+            job.stdin
+                .as_deref()
+                .unwrap()
+                .contains("Scenario:\n- mở /files khi chưa có org")
+        );
+
+        // fixed in step 9; "Không" at "Review chéo lại?" runs the browser test again: OK
+        pick_all(&flow, &ctx);
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        assert_eq!(d.gate.as_ref().and_then(|g| g.next), Some(StepKind::BrowserTest));
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::AfterFix {
+                choice: AfterFix::Next,
+            },
+        );
+        // answering the gate starts the browser test at once; this time it is OK
+        assert_eq!(
+            (d.current, d.status),
+            (Some(StepKind::PushSummary), FlowStatus::Ready),
+            "{:?}",
+            d.error
+        );
+        let view = d.tests.iter().find(|t| t.step == StepKind::BrowserTest).unwrap();
+        assert!(view.passed && view.runs == 2);
+        assert!(
+            d.findings
+                .iter()
+                .filter(|f| f.source == "browserTest")
+                .all(|f| f.state == opw_domain::finding::FindingState::Fixed)
         );
     }
 

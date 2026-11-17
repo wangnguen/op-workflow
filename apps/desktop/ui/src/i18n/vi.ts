@@ -515,6 +515,7 @@ export const vi = {
       drop: "Bỏ khỏi thư viện",
       dropHint: "Xoá thư mục này khỏi thư viện harness của repo và bỏ dòng của nó trong README.md",
       screenshot: "Xem ảnh",
+      url: "Đã thử ở",
     },
     chat: {
       runLabel: "Lần chạy",
@@ -851,7 +852,8 @@ export const stepHint: Record<StepKind, string> = {
   crossReview: "AI còn lại (Codex) review chéo phần đã sửa, chỉ đọc",
   fixCross: "AI sửa các lỗi của Review chéo / Review chốt",
   finalReview: "/review-local lần chốt; lỗi nào cũng chờ bạn chọn có cho AI sửa không",
-  browserTest: "Test trên trình duyệt bằng Chrome DevTools MCP; bật/tắt ở cổng Duyệt plan. Chưa bật: giờ luồng bỏ qua",
+  browserTest:
+    "Không bắt buộc (bật/tắt ở cổng Duyệt plan): AI mở app như repo vẫn chạy ở máy rồi thử kịch bản của plan trong Chrome (chỉ Chrome DevTools MCP, không sửa file). Ca NG có ảnh trong thư mục task, vào cổng chọn lỗi; sửa ở bước 9 rồi test lại. Dev server và Chrome nó bật được tắt khi bước xong.",
   pushSummary: "Soạn commit message và mô tả PR. App không push: bạn tự commit và push",
 };
 

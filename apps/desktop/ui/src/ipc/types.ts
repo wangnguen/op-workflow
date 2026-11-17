@@ -898,6 +898,8 @@ export interface TestView {
   negativeDetail?: string;
   /** harness: the folder it was kept in, in the repo's harness library */
   library?: string;
+  /** browser test: the page the AI opened */
+  url?: string;
 }
 
 export interface TestCase {

@@ -7,6 +7,7 @@
 
 pub mod alerts;
 pub mod allow;
+pub mod browsertest;
 pub mod checks;
 pub mod comments;
 pub mod demo;

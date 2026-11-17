@@ -414,6 +414,57 @@ pub fn harness_args(budget_usd: f64, allowed_bash: &[String], dirs: &[String]) -
     stream_json(args)
 }
 
+/// The only MCP server of the browser test: Chrome DevTools MCP (the version Claude Code's own
+/// plugin uses), headless, in a throwaway profile so it never fights over the user's Chrome.
+pub const BROWSER_MCP: &str = r#"{"mcpServers":{"chrome-devtools":{"command":"npx","args":["-y","chrome-devtools-mcp@1.11.0","--isolated","--headless"]}}}"#;
+
+/// Commands a browser test may run besides the repo's `allowBash`: start the app, see it answer.
+pub const BROWSER_BASH: [&str; 7] = [
+    "npm run *",
+    "npm start*",
+    "pnpm run *",
+    "pnpm dev*",
+    "yarn dev*",
+    "npx vite*",
+    "curl *",
+];
+
+/// [11] Test trình duyệt, headless: read the repo, start the app (Bash from the allow list), drive
+/// Chrome through the MCP server in `mcp_config` (a file) and nothing else. No edits.
+pub fn browser_test_args(budget_usd: f64, allowed_bash: &[String], mcp_config: &str) -> Vec<String> {
+    let mut args = strings(&[
+        "-p",
+        "--mcp-config",
+        mcp_config,
+        "--strict-mcp-config",
+        "--tools",
+        "Read,Grep,Glob,Bash",
+    ]);
+    let mut allowed: Vec<String> = vec!["mcp__chrome-devtools".into()];
+    for e in BROWSER_BASH
+        .iter()
+        .map(|e| (*e).to_owned())
+        .chain(allowed_bash.iter().cloned())
+        .filter(|e| !e.trim().is_empty())
+    {
+        let rule = bash_rule(&e);
+        if !allowed.contains(&rule) {
+            allowed.push(rule);
+        }
+    }
+    args.push("--allowedTools".into());
+    args.push(allowed.join(" "));
+    args.extend(strings(&[
+        "--permission-prompts",
+        "none",
+        "--disallowedTools",
+        &format!("{DISALLOWED_GIT} Edit Write"),
+        "--max-budget-usd",
+        &budget(budget_usd),
+    ]));
+    stream_json(args)
+}
+
 /// `/review-local` run headless. The repo command hard-codes `development`, so the real base
 /// of the task is passed in; `Skill` is blocked so it cannot chain into `/push-summary`.
 pub fn review_local_args(base: &str, budget_usd: f64) -> Vec<String> {
@@ -622,6 +673,28 @@ mod tests {
                 .any(|w| w[0] == "--disallowedTools" && w[1].contains("git push"))
         );
         assert!(!harness_args(1.0, &[], &[]).contains(&"--add-dir".to_owned()));
+    }
+
+    #[test]
+    fn a_browser_test_gets_only_chrome_devtools_and_no_edits() {
+        let args = browser_test_args(3.0, &["npm run dev".into()], "C:/t/mcp.json");
+        assert!(args.windows(2).any(|w| w == ["--mcp-config", "C:/t/mcp.json"]));
+        assert!(args.contains(&"--strict-mcp-config".to_owned()));
+        assert!(args.windows(2).any(|w| w == ["--tools", "Read,Grep,Glob,Bash"]));
+        let allowed = &args[args.iter().position(|a| a == "--allowedTools").unwrap() + 1];
+        assert!(
+            allowed.starts_with("mcp__chrome-devtools Bash(npm run *)"),
+            "{allowed}"
+        );
+        assert!(allowed.ends_with("Bash(npm run dev)"));
+        let denied = &args[args.iter().position(|a| a == "--disallowedTools").unwrap() + 1];
+        assert!(denied.contains("git push") && denied.ends_with("Edit Write"));
+        let mcp: serde_json::Value = serde_json::from_str(BROWSER_MCP).unwrap();
+        assert!(
+            mcp["mcpServers"]["chrome-devtools"]["args"]
+                .to_string()
+                .contains("--isolated")
+        );
     }
 
     #[test]

@@ -56,7 +56,7 @@ const TOOLS: Record<StepKind, string[]> = {
   checks: [],
   harness: ["Read C:\\tmp\\acme-api-harness\\README.md", "Write org-guard/run.mjs", "Bash npx tsx run.mjs"],
   fixCross: ["Edit api/src/routes/files.ts", "Bash npx tsc --noEmit"],
-  browserTest: [],
+  browserTest: ["Bash npm run dev", "mcp__chrome-devtools__navigate_page /files", "mcp__chrome-devtools__take_screenshot"],
   intake: [],
   analyze: ["Grep orgId", "Read api/src/routes/files.ts", "Read api/src/services/org.ts"],
   implement: [
@@ -556,7 +556,9 @@ function skipTarget(f: Flow): StepKind | undefined {
   if (f.phase !== "gate" || !f.fixFor) return undefined;
   if (f.gate === "afterFix") return "finalReview";
   if (f.gate !== "findings") return undefined;
-  return f.fixFor === "reviewLocal" ? "crossReview" : f.fixFor === "crossReview" ? "finalReview" : "pushSummary";
+  if (f.fixFor === "reviewLocal") return "crossReview";
+  if (f.fixFor === "crossReview") return "finalReview";
+  return f.uses.includes("browserTest") ? "browserTest" : "pushSummary";
 }
 
 /** Nothing (more) to fix after `review`: on to the next step of the flow. */
@@ -623,9 +625,9 @@ function enter(f: Flow, step: StepKind): void {
   }
   while (OPTIONAL_STEPS.includes(STEP_ORDER[at] as StepKind)) {
     const passed = STEP_ORDER[at] as StepKind;
-    // Harness runs when the task uses it
-    if (passed === "harness" && f.uses.includes("harness")) {
-      goTo(f, "harness");
+    // Harness and Test trình duyệt run when the task uses them
+    if ((passed === "harness" || passed === "browserTest") && f.uses.includes(passed)) {
+      goTo(f, passed);
       return;
     }
     f.states[passed] = "skipped";
@@ -769,6 +771,13 @@ function complete(f: Flow): void {
       enter(f, "reviewLocal");
       return;
     }
+    case "browserTest": {
+      f.states.browserTest = "done";
+      f.tests = [...f.tests.filter((x) => x.step !== "browserTest"), browserView(n)];
+      done("OK 2/2, 1 ảnh");
+      enter(f, "pushSummary");
+      return;
+    }
     case "pushSummary":
       f.push = pushView();
       f.states.pushSummary = "done";
@@ -819,6 +828,26 @@ function harnessView(f: Flow, runs: number): TestView {
     negative: true,
     negativeDetail: "bỏ guard orgId: ca \"user chưa có org\" FAIL",
     library: f.tests[0]?.library ?? (runs === 1 ? `${HARNESS_LIB}\\org-guard` : undefined),
+  };
+}
+
+/** The demo browser test: two cases of the plan's scenario, OK, one screenshot. */
+function browserView(runs: number): TestView {
+  return {
+    step: "browserTest",
+    passed: true,
+    summary: "Mở trang Files bằng user chưa có org và user có org; danh sách hiện đúng, không còn trang trắng.",
+    cases: [
+      {
+        name: "user chưa có org: thấy thông báo \"chưa có file\"",
+        ok: true,
+        screenshot: "C:\\Users\\me\\Desktop\\op-workflow-tasks\\WP-187716\\browser-test\\1.png",
+      },
+      { name: "user có org: thấy 12 file của org", ok: true },
+    ],
+    at: iso(Date.now()),
+    runs,
+    url: "http://localhost:5173/files",
   };
 }
 

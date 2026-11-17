@@ -69,6 +69,11 @@ function TestCard({ test, busy, onAction, onOpenPath }: { test: TestView } & Omi
           {t.command} <code className="mono">{test.command}</code>
         </p>
       )}
+      {test.url && (
+        <p className="faint tl-test-command">
+          {t.url} <code className="mono">{test.url}</code>
+        </p>
+      )}
       {(test.dir || test.library) && (
         <div className="tl-actions">
           {test.dir && (

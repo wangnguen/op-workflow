@@ -1342,6 +1342,9 @@ pub struct TestView {
     /// Harness: the folder it was kept in, in the repo's harness library.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<String>,
+    /// Browser test: the page the AI opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// One case of a harness or browser test.
