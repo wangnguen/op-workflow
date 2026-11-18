@@ -171,6 +171,21 @@ describe("mock workflow (browser preview)", () => {
     expect(runs[0]?.note).toContain("dừng");
   });
 
+  it("goes on in the stopped session with the user's words after Dừng", () => {
+    mockFlowAction(18, { type: "run" });
+    const stopped = mockFlowAction(18, { type: "stop" });
+    expect(stopped.canGoOn).toBe(true);
+    expect(stopped.error?.message).toContain("Chạy tiếp");
+    const on = mockFlowAction(18, { type: "goOn", note: " Đọc thêm a.ts " });
+    expect(on.status).toBe("running");
+    expect(on.canGoOn).toBe(false);
+    expect(on.log.some((l) => l.text === "Chạy tiếp Phân tích: Đọc thêm a.ts")).toBe(true);
+    // only right after a Dừng
+    mockFlowAction(18, { type: "stop" });
+    mockFlowAction(18, { type: "retry" });
+    expect(() => mockFlowAction(18, { type: "goOn", note: "" })).toThrow();
+  });
+
   it("keeps each run with its result, refused commands and transcript", () => {
     mockFlowAction(9, { type: "run" });
     expect(mockStepChat(9).run.state).toBe("running");

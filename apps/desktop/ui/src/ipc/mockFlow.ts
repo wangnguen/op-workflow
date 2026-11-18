@@ -336,6 +336,8 @@ interface Flow {
   devServer?: DevServer;
   /** question gate: what the AI asked */
   ask?: { question: string; url: string };
+  /** stopped with Dừng: the step whose session "Chạy tiếp" goes on in */
+  stopped?: StepKind;
   /** Quota preview: one reset deadline, and whether auto-run stopped before an AI step. */
   quotaUntil?: number;
   quotaWaiting?: boolean;
@@ -1019,6 +1021,7 @@ export function mockTaskDetail(wpId: number): TaskDetail {
       f.phase === "gate" && f.gate === "agentQuestion" && f.ask
         ? { step: "browserTest", question: f.ask.question, url: f.ask.url, browserOpen: true }
         : undefined,
+    canGoOn: f.phase === "gate" && f.gate === "error" && f.stopped !== undefined && f.stopped === f.current,
     findings: f.findings.map((x) => ({ ...x })),
     reviewNotes: STEP_ORDER.filter((s) => f.notes[s]).map((s) => ({ step: s, text: f.notes[s] ?? "" })),
     push: f.push,
@@ -1068,19 +1071,41 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       if (f.phase !== "ready") throw fail("flow.notNow", "Lúc này chưa chạy bước tiếp được");
       startRun(f);
       break;
-    case "retry":
+    case "retry": {
       if (f.gate !== "error" || !f.current) throw fail("flow.notNow", "Lúc này chưa thử lại được");
+      const fresh = f.error?.code === "step.stopped";
+      f.stopped = undefined;
       f.states[f.current] = "running";
       f.phase = "ready";
-      log(f, "info", `Thử lại ${LABEL[f.current]}`, f.current);
+      log(f, "info", fresh ? `Chạy lại ${LABEL[f.current]} từ đầu` : `Thử lại ${LABEL[f.current]}`, f.current);
       startRun(f);
       break;
+    }
+    case "goOn": {
+      if (f.gate !== "error" || !f.current || f.stopped !== f.current) {
+        throw fail("flow.notNow", "Lúc này chưa chạy tiếp (chỉ sau khi bạn bấm Dừng một bước AI) được");
+      }
+      const note = action.note.trim();
+      f.stopped = undefined;
+      f.states[f.current] = "running";
+      f.phase = "ready";
+      log(f, "info", note ? `Chạy tiếp ${LABEL[f.current]}: ${note}` : `Chạy tiếp ${LABEL[f.current]} trong phiên cũ`, f.current);
+      startRun(f);
+      break;
+    }
     case "stop":
       if (!running || !f.current) throw fail("flow.notNow", "Không có bước nào đang chạy");
       f.runEnds = undefined;
       for (const x of f.findings) if (x.state === "fixing") x.state = "open";
       f.states[f.current] = "failed";
-      f.error = { code: "step.stopped", message: "Bạn đã dừng bước này. Bấm Thử lại để chạy lại." };
+      // like the Rust side: an AI step but the push summary keeps its session
+      f.stopped = agentOf(f.current) !== "shell" && f.current !== "pushSummary" ? f.current : undefined;
+      f.error = {
+        code: "step.stopped",
+        message: f.stopped
+          ? "Bạn đã dừng bước này. Gõ hướng dẫn cho AI rồi bấm Chạy tiếp (AI làm tiếp trong phiên đó), hoặc Chạy lại từ đầu."
+          : "Bạn đã dừng bước này. Bấm Chạy lại từ đầu để chạy lại.",
+      };
       endRun(f, "failed", f.error.message);
       toGate(f, "error", f.current);
       log(f, "error", `${LABEL[f.current]} lỗi: ${f.error.message}`, f.current);

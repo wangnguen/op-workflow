@@ -35,6 +35,34 @@ packages unless the plan says so.\n\
 /// Test trình duyệt again after the AI asked: what the user said (empty = they only did what was
 /// asked, such as logging in). `restarted` = the test's Chrome window had been closed, so the app
 /// opened a new one (its profile keeps the login).
+/// After Dừng → "Chạy tiếp": the next message of the stopped run's own session. `note` is what
+/// the user typed (may be empty); `browser` = the browser test, with its Chrome window still
+/// open (`Some(false)`: the app had to open a new one).
+pub fn go_on(note: &str, browser: Option<bool>) -> String {
+    let mut p = String::from("The user stopped you before you finished");
+    let note = note.trim();
+    if note.is_empty() {
+        p.push_str(" and now lets you go on.\n");
+    } else {
+        p.push_str(" to tell you this (follow it):\n");
+        p.push_str(&tagged("user_note", note));
+        p.push('\n');
+    }
+    match browser {
+        Some(true) => p.push_str("The test's Chrome window is still open on the page you left.\n"),
+        Some(false) => p.push_str(
+            "The test's Chrome window had been closed, so the app opened a new one: open the app \
+             again (its profile keeps the login).\n",
+        ),
+        None => {}
+    }
+    p.push_str(
+        "Go on with the same task from where you stopped. Keep to every rule of the first \
+         message and end with the answer it asked for, in the same format.\n",
+    );
+    p
+}
+
 pub fn browser_answer(answer: &str, restarted: bool) -> String {
     let mut p = String::from("The user did what you asked");
     let answer = answer.trim();
@@ -774,6 +802,16 @@ mod tests {
                 && !ready.contains("Shell commands")
                 && !ready.contains("cd …")
         );
+        // after Dừng: the user's words go first, the rules of the first message still hold
+        let on = go_on(" Mở thư mục 4348 thay vì NTQ ", Some(true));
+        assert!(
+            on.contains("<user_note>\nMở thư mục 4348 thay vì NTQ\n</user_note>")
+                && on.contains("still open")
+        );
+        assert!(on.contains("same format"));
+        let plain = go_on("", None);
+        assert!(!plain.contains("<user_note>") && !plain.contains("Chrome"));
+        assert!(go_on("", Some(false)).contains("opened a new one"));
         // after the user logged in
         let again = browser_answer("", false);
         assert!(again.contains("still open") && !again.contains("<answer>"));

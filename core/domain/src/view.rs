@@ -1416,6 +1416,9 @@ pub struct TaskDetail {
     /// At the question gate: what the AI asks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_question: Option<AgentQuestionView>,
+    /// Stopped with Dừng, and the run's session can go on: "Chạy tiếp" with the user's words.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_go_on: bool,
     pub findings: Vec<FindingView>,
     /// Docs/test judgement of the latest review of each kind (Tự review, Review chốt, …).
     #[serde(default)]
@@ -1499,8 +1502,14 @@ pub enum FlowAction {
     Run,
     /// Stop the running step; it can be retried.
     Stop,
-    /// Run the failed step again.
+    /// Run the failed step again, from the start ("Chạy lại từ đầu" after Dừng).
     Retry,
+    /// After Dừng: go on in the stopped run's own session, the user's words (may be empty) as
+    /// its next message ("Chạy tiếp").
+    GoOn {
+        #[serde(default)]
+        note: String,
+    },
     /// Plan gate: the AI codes the plan.
     ApprovePlan,
     /// Plan gate: analyze again with this feedback.

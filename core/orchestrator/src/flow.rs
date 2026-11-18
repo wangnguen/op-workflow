@@ -190,6 +190,48 @@ struct Saved {
     /// The AI of a step stopped to ask the user (question gate), and the answer once given.
     #[serde(skip_serializing_if = "Option::is_none")]
     ask: Option<AskState>,
+    /// The user pressed Dừng: the run's session, when "Chạy tiếp" can go on in it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopped: Option<StoppedRun>,
+    /// "Chạy tiếp": the next run of that step goes on in the stopped session with the user's words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    go_on: Option<GoOnRun>,
+}
+
+/// A run the user stopped with Dừng, whose session can take the user's words next.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoppedRun {
+    step: StepKind,
+    agent: AgentKind,
+    session: String,
+}
+
+/// "Chạy tiếp" asked: the stopped run, and what the user wrote (may be empty).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoOnRun {
+    step: StepKind,
+    agent: AgentKind,
+    session: String,
+    note: String,
+}
+
+/// After Dừng, what the error gate says when the run can go on in its session…
+const STOPPED_GO_ON: &str = "Bạn đã dừng bước này. Gõ hướng dẫn cho AI rồi bấm Chạy tiếp (AI làm tiếp trong phiên đó), hoặc Chạy lại từ đầu.";
+/// … and when it cannot (no session, or a step that keeps none).
+const STOPPED_AGAIN: &str = "Bạn đã dừng bước này. Bấm Chạy lại từ đầu để chạy lại.";
+
+/// Whether a stopped run of `step` by `agent` can take more words in its session: Claude keeps
+/// one for every AI step but Push summary; Codex goes on (`exec resume`) only in the steps
+/// that write code.
+fn can_go_on(step: StepKind, agent: AgentKind) -> bool {
+    use StepKind as S;
+    match agent {
+        AgentKind::Claude => !matches!(step, S::Intake | S::Checks | S::PushSummary),
+        AgentKind::Codex => matches!(step, S::Implement | S::Fix | S::FixCross | S::Harness),
+        AgentKind::Shell => false,
+    }
 }
 
 /// What the AI asked at the question gate.
@@ -1294,6 +1336,8 @@ impl Flow {
         if let Some(run) = self.inner.lock_tasks().get(&wp_id).and_then(|e| e.run.as_ref()) {
             run.stop.store(true, Ordering::Relaxed);
         }
+        // the task goes back to the Inbox: nothing waits on its test window any more
+        self.inner.close_browser(wp_id);
     }
 
     /// The app is quitting: stop every running step (each AI process with everything it
@@ -1579,6 +1623,15 @@ impl Flow {
                         .lock()
                         .is_ok_and(|b| b.get(&ctx.row.wp_id).is_some_and(|s| s.chrome.is_some())),
                 }),
+            can_go_on: entry.saved.stopped.as_ref().is_some_and(|s| {
+                entry.saved.workflow.phase() == Phase::Gate(GateKind::Error)
+                    && entry.saved.workflow.failed_step() == Some(s.step)
+                    && entry
+                        .saved
+                        .error
+                        .as_ref()
+                        .is_some_and(|e| e.code == "step.stopped")
+            }),
             uses: SWITCHABLE
                 .into_iter()
                 .filter(|s| entry.saved.workflow.uses(*s))
@@ -1999,6 +2052,8 @@ fn apply_action(
                         .ok_or_else(|| not_now("chạy"))?;
                     event(entry, E::Retry(step))?;
                     entry.saved.error = None;
+                    entry.saved.stopped = None;
+                    entry.saved.go_on = None;
                     Ok(true)
                 }
                 _ => Err(not_now("chạy bước tiếp")),
@@ -2010,14 +2065,61 @@ fn apply_action(
                 .workflow
                 .failed_step()
                 .ok_or_else(|| not_now("thử lại"))?;
+            let stopped = entry
+                .saved
+                .error
+                .as_ref()
+                .is_some_and(|e| e.code == "step.stopped");
             event(entry, E::Retry(step))?;
             entry.saved.error = None;
-            push_log(
-                entry,
-                Some(step),
-                "info",
-                &format!("Thử lại {}", step_label(step)),
-            );
+            entry.saved.stopped = None;
+            entry.saved.go_on = None;
+            let text = if stopped {
+                format!("Chạy lại {} từ đầu", step_label(step))
+            } else {
+                format!("Thử lại {}", step_label(step))
+            };
+            push_log(entry, Some(step), "info", &text);
+            Ok(true)
+        }
+        FlowAction::GoOn { note } => {
+            if running {
+                return Err(ApiError::new("step.running", "Bước này đang chạy"));
+            }
+            let stopped_here = phase == Phase::Gate(GateKind::Error)
+                && entry
+                    .saved
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.code == "step.stopped");
+            let stopped = entry
+                .saved
+                .stopped
+                .clone()
+                .filter(|s| stopped_here && entry.saved.workflow.failed_step() == Some(s.step))
+                .ok_or_else(|| not_now("chạy tiếp (chỉ sau khi bạn bấm Dừng một bước AI)"))?;
+            if ctx.agent_for(stopped.step) != stopped.agent {
+                return Err(ApiError::new(
+                    "flow.goOn",
+                    "AI của bước này đã đổi trong Cài đặt nên không làm tiếp phiên cũ được: bấm Chạy lại từ đầu",
+                ));
+            }
+            event(entry, E::Retry(stopped.step))?;
+            entry.saved.error = None;
+            let note = note.trim().to_owned();
+            let text = if note.is_empty() {
+                format!("Chạy tiếp {} trong phiên cũ", step_label(stopped.step))
+            } else {
+                format!("Chạy tiếp {}: {}", step_label(stopped.step), short(&note))
+            };
+            push_log(entry, Some(stopped.step), "info", &text);
+            entry.saved.go_on = Some(GoOnRun {
+                step: stopped.step,
+                agent: stopped.agent,
+                session: stopped.session,
+                note,
+            });
+            entry.saved.stopped = None;
             Ok(true)
         }
         FlowAction::Stop => {
@@ -2941,6 +3043,13 @@ impl Inner {
         if let (Some(id), Ok(store)) = (early.filter(|_| !early_note.is_empty()), self.store.lock()) {
             let _ = store.set_step_run_note(id, &early_note);
         }
+        // Dừng: the run's session, for "Chạy tiếp"
+        let stopped_run = match &result {
+            Err(e) if e.code == "step.stopped" && !quitting => {
+                early.and_then(|id| self.runs(wp_id).into_iter().find(|r| r.id == id))
+            }
+            _ => None,
+        };
         let mut tasks = self.lock_tasks();
         let entry = tasks.get_mut(&wp_id)?;
         let run_id = entry.run.take().and_then(|r| r.run_id);
@@ -2982,8 +3091,22 @@ impl Inner {
                     ("error", text)
                 }
             },
-            Err(err) => {
+            Err(mut err) => {
                 let _ = entry.saved.workflow.apply(WorkflowEvent::StepFailed(step));
+                if err.code == "step.stopped" && !quitting {
+                    entry.saved.go_on = None;
+                    entry.saved.stopped = stopped_run.as_ref().and_then(|row| {
+                        let agent = agent_of_row(row);
+                        let session = row.session_id.clone().filter(|s| !s.is_empty())?;
+                        can_go_on(step, agent).then_some(StoppedRun { step, agent, session })
+                    });
+                    err.message = if entry.saved.stopped.is_some() {
+                        STOPPED_GO_ON
+                    } else {
+                        STOPPED_AGAIN
+                    }
+                    .to_owned();
+                }
                 let text = format!("{} lỗi: {}", step_label(step), err.message);
                 note = short(&err.message);
                 entry.saved.error = Some(err);
@@ -3339,6 +3462,15 @@ impl Inner {
         claim: &Claim,
     ) -> Result<RunResult, FlowError> {
         let mut job = job.clone();
+        // "Chạy tiếp" after Dừng: the stopped session, the user's words as its next message
+        if let Some(g) = self.take_go_on(ctx.row.wp_id, step, AgentKind::Claude) {
+            if let Some(i) = job.args.iter().position(|a| a == "--resume") {
+                let end = (i + 2).min(job.args.len());
+                job.args.drain(i..end);
+            }
+            job.args.extend(["--resume".to_owned(), g.session]);
+            job.stdin = Some(prompts::go_on(&g.note, None));
+        }
         if !job
             .args
             .iter()
@@ -3493,6 +3625,21 @@ impl Inner {
         let stop: &AtomicBool = &claim.stop;
         use std::io::Write;
         let wp_id = ctx.row.wp_id;
+        // "Chạy tiếp" after Dừng: `exec … resume <stopped thread> -` with the user's words
+        let resumed;
+        let job = match self.take_go_on(wp_id, step, AgentKind::Codex) {
+            Some(g) => {
+                let mut j = job.clone();
+                match j.args.iter().position(|a| a == "resume") {
+                    Some(i) if i + 1 < j.args.len() => j.args[i + 1] = g.session,
+                    _ => j.args = codex::with_resume(j.args, &g.session),
+                }
+                j.stdin = Some(prompts::go_on(&g.note, None));
+                resumed = j;
+                &resumed
+            }
+            None => job,
+        };
         let (_, timeout, key) = limits(step, &ctx.config);
         let (mut raw, log) = self.open_log(ctx, step, job);
         let run_id = self.begin_run(ctx, step, "codex", log.as_deref());
@@ -3602,6 +3749,12 @@ impl Inner {
             .get(&wp_id)
             .map(|e| e.saved.workflow.round())
             .unwrap_or_default()
+    }
+
+    /// "Chạy tiếp" after Dừng, for this run of `step` by `agent` (taken once).
+    fn take_go_on(&self, wp_id: u64, step: StepKind, agent: AgentKind) -> Option<GoOnRun> {
+        self.with_saved(wp_id, |s| s.go_on.take_if(|g| g.step == step && g.agent == agent))
+            .flatten()
     }
 
     /// Read some saved fields and maybe change them, then save.
@@ -4339,12 +4492,15 @@ fn run_browser_test(
                 .filter(|a| a.answer.is_some() && !a.session.is_empty())
         })
         .flatten();
+    // "Chạy tiếp" after Dừng: the stopped session, the window left as it was
+    let go_on = inner.take_go_on(wp_id, StepKind::BrowserTest, AgentKind::Claude);
     let mut session = inner
         .browsers
         .lock()
         .ok()
         .and_then(|mut b| b.remove(&wp_id))
         .unwrap_or_default();
+    let had_window = session.chrome.is_some();
     let mut restarted = false;
     if let Some((chrome, _)) = session.chrome.as_mut() {
         if chrome.exited().is_some() {
@@ -4407,9 +4563,10 @@ fn run_browser_test(
         Some(d) => prompts::BrowserApp::Running(&d.url),
         None => prompts::BrowserApp::Start(&allowed),
     };
-    let prompt = match &answered {
-        Some(a) => prompts::browser_answer(a.answer.as_deref().unwrap_or_default(), restarted),
-        None => prompts::browser_test(&prompts::BrowserTest {
+    let prompt = match (&answered, &go_on) {
+        (Some(a), _) => prompts::browser_answer(a.answer.as_deref().unwrap_or_default(), restarted),
+        (None, Some(g)) => prompts::go_on(&g.note, Some(had_window && !restarted)),
+        (None, None) => prompts::browser_test(&prompts::BrowserTest {
             plan: &plan,
             brief,
             scenario: &scenario,
@@ -4434,8 +4591,12 @@ fn run_browser_test(
         ),
         claim.mode.as_deref(),
     );
-    if let Some(a) = &answered {
-        args.splice(1..1, ["--resume".to_owned(), a.session.clone()]);
+    let resume = answered
+        .as_ref()
+        .map(|a| a.session.clone())
+        .or_else(|| go_on.as_ref().map(|g| g.session.clone()));
+    if let Some(id) = resume {
+        args.splice(1..1, ["--resume".to_owned(), id]);
     }
     let job = Job {
         agent: Provider::Claude,
@@ -4445,6 +4606,27 @@ fn run_browser_test(
         timeout,
     };
     let ran = inner.run_claude(ctx, StepKind::BrowserTest, &job, claim);
+    // Dừng: keep the window and the app as they are, for "Chạy tiếp" (closed when the task
+    // goes another way, goes back to the Inbox, or the app quits)
+    let ran = match ran {
+        Err(e) if e.code == "step.stopped" && !inner.quitting.load(Ordering::Relaxed) => {
+            let open = session.chrome.is_some() || session.server.is_some();
+            if let Ok(mut b) = inner.browsers.lock() {
+                b.insert(wp_id, session);
+            }
+            if open {
+                inner.log(
+                    wp_id,
+                    Some(StepKind::BrowserTest),
+                    "info",
+                    "Cửa sổ Chrome test (và dev server) vẫn mở: Chạy tiếp làm tiếp đúng trang đó",
+                    false,
+                );
+            }
+            return Err(e);
+        }
+        other => other,
+    };
     // the AI asks the user: keep the window (and the app) open until they answer
     if let Ok(r) = &ran {
         if let Some((question, url)) = browsertest::question(&r.text) {
@@ -5965,6 +6147,157 @@ mod tests {
         assert_eq!(d.error.unwrap().code, "step.stopped");
         assert_eq!(d.current, Some(StepKind::Analyze));
         assert_eq!(flow.running_step(1), None);
+    }
+
+    /// The user pressed Dừng (the fake ends the run as stopped).
+    fn stopped() -> RunOutcome {
+        RunOutcome {
+            stopped: true,
+            ..RunOutcome::default()
+        }
+    }
+
+    /// Dừng, then "Chạy tiếp": the stopped run's own session takes the user's words; "Chạy lại
+    /// từ đầu" starts a new one instead.
+    #[test]
+    fn after_stop_the_user_goes_on_in_the_same_session_with_a_note() {
+        let Some(s) = setup() else { return };
+        let analyses = AtomicUsize::new(0);
+        let (flow, fake) = flow_with(&s, false, move |job, stop, out| {
+            if kind(job) == "analyze" && analyses.fetch_add(1, Ordering::SeqCst) == 0 {
+                out(&init_line());
+                return stopped();
+            }
+            (happy(CLEAN))(job, stop, out)
+        });
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        let d = run(&flow, &ctx, FlowAction::Run);
+        let err = d.error.clone().unwrap();
+        assert_eq!(
+            (err.code.as_str(), err.message.as_str()),
+            ("step.stopped", STOPPED_GO_ON)
+        );
+        assert!(d.can_go_on);
+
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::GoOn {
+                note: " Đọc thêm a.ts ".into(),
+            },
+        );
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::PlanReview),
+            "{:?}",
+            d.error
+        );
+        assert!(!d.can_go_on);
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let again = &jobs[1];
+        assert!(
+            again.args.windows(2).any(|w| w == ["--resume", "s-1"]),
+            "{:?}",
+            again.args
+        );
+        let prompt = again.stdin.as_deref().unwrap();
+        assert!(
+            prompt.contains("<user_note>\nĐọc thêm a.ts\n</user_note>") && prompt.contains("same format")
+        );
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text == "Chạy tiếp Phân tích: Đọc thêm a.ts")
+        );
+        // only right after a Dừng
+        assert_eq!(
+            flow.act(ctx.clone(), FlowAction::GoOn { note: String::new() })
+                .unwrap_err()
+                .code,
+            "flow.notNow"
+        );
+        // Codex can go on only where it writes code; the push summary keeps no session
+        assert!(can_go_on(StepKind::Fix, AgentKind::Codex));
+        assert!(!can_go_on(StepKind::CrossReview, AgentKind::Codex));
+        assert!(!can_go_on(StepKind::PushSummary, AgentKind::Claude));
+        assert!(can_go_on(StepKind::FinalReview, AgentKind::Claude));
+    }
+
+    /// Dừng in Test trình duyệt keeps its Chrome window open; "Chạy tiếp" goes on there.
+    #[test]
+    fn a_stopped_browser_test_keeps_its_window_and_goes_on_there() {
+        let Some(s) = setup() else { return };
+        let tests = AtomicUsize::new(0);
+        let (flow, fake) = flow_with(&s, false, move |job, stop, out| match kind(job) {
+            "analyze" => {
+                out(&result_line(
+                    "## Nguyên nhân\nx\n```json\n{\"browserTest\":{\"recommend\":true,\"scenario\":[\"mở /files\"]}}\n```",
+                ));
+                ok()
+            }
+            "browser" => {
+                out(&init_line());
+                if tests.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return stopped();
+                }
+                out(&result_line(
+                    "```json\n{\"result\":\"ok\",\"summary\":\"ổn\",\"cases\":[{\"name\":\"1. mở /files\",\"ok\":true}]}\n```",
+                ));
+                ok()
+            }
+            _ => (happy(CLEAN))(job, stop, out),
+        });
+        let starter = Arc::new(FakeStarter::default());
+        flow.set_app_starter(starter.clone());
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        let mut d = run(&flow, &ctx, FlowAction::Run);
+        for _ in 0..12 {
+            if d.error.is_some() {
+                break;
+            }
+            let action = match (d.status, d.gate.as_ref().map(|g| g.kind)) {
+                (FlowStatus::Gate, Some(GateKind::PlanReview)) => FlowAction::ApprovePlan,
+                (FlowStatus::Gate, Some(GateKind::Findings)) => FlowAction::PickFindings { fix: false },
+                (FlowStatus::Ready, _) => FlowAction::Run,
+                other => panic!("{other:?}: {:?}", d.error),
+            };
+            d = run(&flow, &ctx, action);
+        }
+        assert_eq!(
+            (d.current, d.error.as_ref().map(|e| e.code.as_str())),
+            (Some(StepKind::BrowserTest), Some("step.stopped"))
+        );
+        assert!(d.can_go_on);
+        // the window stays open for "Chạy tiếp"
+        assert_eq!(starter.chrome_stops.load(Ordering::SeqCst), 0);
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text.starts_with("Cửa sổ Chrome test (và dev server) vẫn mở"))
+        );
+
+        let d = run(
+            &flow,
+            &ctx,
+            FlowAction::GoOn {
+                note: "Mở thư mục test 4348".into(),
+            },
+        );
+        assert_eq!(d.current, Some(StepKind::FinalReview), "{:?}", d.error);
+        // the same window, the same session, then everything closed
+        assert_eq!(starter.browsers.lock().unwrap().len(), 1);
+        assert_eq!(starter.chrome_stops.load(Ordering::SeqCst), 1);
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let runs: Vec<&Job> = jobs.iter().filter(|j| kind(j) == "browser").collect();
+        assert_eq!(&runs[1].args[1..3], ["--resume", "s-1"]);
+        let prompt = runs[1].stdin.as_deref().unwrap();
+        assert!(
+            prompt.contains("<user_note>\nMở thư mục test 4348\n</user_note>")
+                && prompt.contains("still open"),
+            "{prompt}"
+        );
     }
 
     #[test]

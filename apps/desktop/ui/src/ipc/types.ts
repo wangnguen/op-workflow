@@ -929,6 +929,8 @@ export interface TaskDetail {
   devServerFromRepo?: boolean;
   /** at the question gate: what the AI asks */
   agentQuestion?: AgentQuestionView;
+  /** stopped with Dừng, and the run's session can go on: "Chạy tiếp" with the user's words */
+  canGoOn?: boolean;
   findings: FindingView[];
   /** docs/test judgement of the latest review of each kind */
   reviewNotes?: ReviewNote[];
@@ -984,6 +986,8 @@ export type FlowAction =
   | { type: "run" }
   | { type: "stop" }
   | { type: "retry" }
+  /** after Dừng: go on in the stopped run's session, `note` (may be empty) as its next message */
+  | { type: "goOn"; note: string }
   | { type: "approvePlan" }
   | { type: "rejectPlan"; feedback: string }
   | { type: "selfCode" }
