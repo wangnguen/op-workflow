@@ -864,12 +864,20 @@ export interface StepProposal {
   devServer?: DevServer;
 }
 
-/** How Test trình duyệt reaches the app: the command the app runs from `dir` (inside the repo,
- *  "" = its root) and the URL it waits for. No command = the app is already running there. */
+/** How Test trình duyệt reaches the app: the URL Chrome opens and the commands that serve it.
+ *  No command = the app is already running there. */
 export interface DevServer {
-  command: string;
   url: string;
+  /** Run top to bottom (one `pnpm dev`, or an API then the web…); none = already running. */
+  commands: DevCommand[];
+}
+
+/** One command: from `dir` (inside the repo, "" = its root), ready once `wait` answers (a port
+ *  on localhost or a URL; "" = the dev server's URL). Already answering = left as it is. */
+export interface DevCommand {
+  command: string;
   dir: string;
+  wait: string;
 }
 
 /** What the AI of a step stopped to ask (question gate). */
@@ -978,7 +986,7 @@ export type FlowAction =
   | { type: "setUses"; step: StepKind; on: boolean }
   | { type: "selfCodeDone" }
   /** Test trình duyệt: the dev server the app starts (remembered for the repo); empty url = none */
-  | { type: "setDevServer"; command: string; url: string; dir: string }
+  | { type: "setDevServer"; url: string; commands: DevCommand[] }
   /** question gate: the user did what the AI asked (or answers it); the step goes on */
   | { type: "answerAgent"; answer: string }
   /** findings gate: fix the picked findings, or go on without fixing */

@@ -154,7 +154,7 @@ const PROPOSALS: StepProposal[] = [
     recommend: false,
     reason: "Chỉ đổi API; màn hình web giữ nguyên.",
     checks: "- mở /files bằng user chưa có org → thấy danh sách rỗng, không trắng trang",
-    devServer: { command: "pnpm --filter web dev", dir: "", url: "http://localhost:5173" },
+    devServer: { url: "http://localhost:5173", commands: [{ command: "pnpm --filter web dev", dir: "", wait: "" }] },
   },
 ];
 
@@ -385,7 +385,7 @@ const branchOf = (f: { wpId: number; taskId: string }) =>
 const agentOf = (step: StepKind): AgentKind => (step === "crossReview" ? "codex" : step === "checks" ? "shell" : "claude");
 
 /** What the mock's Kiểm tra commands report (the app runs them; no tokens). */
-const CHECKS_NOTE = "0 lỗi (tsc, eslint, prettier), bỏ qua 3 lỗi cũ ở file khác";
+const CHECKS_NOTE = "0 lỗi (tsc, eslint, prettier), bỏ qua 3 lỗi cũ (ở file khác hoặc dòng task không sửa)";
 const settled = (f: FindingView) => f.state === "fixed" || f.state === "accepted" || f.state === "deferred";
 /** Picked by the user and still open, like `to_fix` in flow.rs. */
 const toFix = (f: FindingView) => f.chosen === true && f.state === "open";
@@ -1098,13 +1098,22 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       if (url && !/^https?:\/\/[^/\s:]+(:\d+)?(\/\S*)?$/i.test(url)) {
         throw fail("devserver.invalid", `URL phải dạng http://localhost:5173 (đang là \`${url}\`)`);
       }
-      f.devServer = url ? { command: action.command.trim(), url, dir: action.dir.trim() } : undefined;
+      // like the Rust side: a bare port to wait for becomes a localhost URL
+      const commands = action.commands
+        .filter((c) => c.command.trim() || c.wait.trim())
+        .map((c) => {
+          const port = c.wait.trim().replace(/^:/, "");
+          return { command: c.command.trim(), dir: c.dir.trim(), wait: /^\d+$/.test(port) ? `http://localhost:${port}` : c.wait.trim() };
+        });
+      if (!url && commands.length) throw fail("devserver.invalid", "Có lệnh chạy thì cần URL của app để mở trong Chrome");
+      f.devServer = url ? { url, commands } : undefined;
+      const runs = commands.map((c) => (c.dir ? `${c.dir}: ${c.command}` : c.command));
       log(
         f,
         "info",
         url
-          ? action.command.trim()
-            ? `Test trình duyệt: app chạy \`${action.command.trim()}\` rồi mở ${url}`
+          ? runs.length
+            ? `Test trình duyệt: app chạy ${runs.join(" → ")} rồi mở ${url}`
             : `Test trình duyệt dùng app đang chạy ở ${url}`
           : "Bỏ lệnh chạy app: Test trình duyệt để AI tự bật app",
         "browserTest",

@@ -36,6 +36,8 @@ pub struct Check {
     pub kind: CheckKind,
     /// Folder it runs in, relative to the repo (`""` = the repo root, `web`).
     pub dir: String,
+    /// Fed to the command (prettier `--stdin-filepath` on a file's old text).
+    pub stdin: Option<String>,
 }
 
 /// What one check found.
@@ -92,7 +94,7 @@ impl CheckRunner for ProcessRunner {
             } else {
                 repo.join(&check.dir)
             },
-            stdin: None,
+            stdin: check.stdin.clone(),
             env: vec![
                 ("FORCE_COLOR".into(), "0".into()),
                 ("NO_COLOR".into(), "1".into()),
@@ -270,9 +272,14 @@ pub fn plan(repo: &Path, configured: &[String], changed: &[String]) -> Vec<Check
                 Some(Check {
                     label: command.trim().to_owned(),
                     program: program.clone(),
-                    args: args.to_vec(),
+                    args: if is_npx(program) {
+                        npx_args(args)
+                    } else {
+                        args.to_vec()
+                    },
                     kind: kind_of(&words),
                     dir: String::new(),
+                    stdin: None,
                 })
             })
             .collect();
@@ -303,15 +310,18 @@ pub fn plan(repo: &Path, configured: &[String], changed: &[String]) -> Vec<Check
         } else {
             pkg.clone()
         };
+        // `--`: npm 11 reads options after the tool's name as its own (`-p` = `--package`,
+        // `--check` dropped), so the tool's options go after it
         let npx = |tool: &str, args: Vec<String>, kind| Check {
             label: format!("{tool} · {name}"),
             program: "npx".into(),
-            args: ["--no".to_owned(), tool.to_owned()]
+            args: ["--no".to_owned(), "--".to_owned(), tool.to_owned()]
                 .into_iter()
                 .chain(args)
                 .collect(),
             kind,
             dir: pkg.clone(),
+            stdin: None,
         };
         let code: Vec<String> = files.iter().filter(|f| is_code(f)).cloned().collect();
         if dir.join("tsconfig.json").is_file() && code.iter().any(|f| f.contains(".ts")) {
@@ -362,10 +372,91 @@ pub fn plan(repo: &Path, configured: &[String], changed: &[String]) -> Vec<Check
     out
 }
 
+fn is_npx(program: &str) -> bool {
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    matches!(name.as_str(), "npx" | "npx.cmd" | "npx.exe")
+}
+
+/// A configured `npx …` command with `--` before the tool (see `plan`), unless it has one or
+/// uses npx's own `-p` / `-c` (whose values are not the tool).
+fn npx_args(args: &[String]) -> Vec<String> {
+    let tool = args.iter().position(|a| !a.starts_with('-'));
+    let own_values = args
+        .iter()
+        .take(tool.unwrap_or(args.len()))
+        .any(|a| matches!(a.as_str(), "-p" | "--package" | "-c" | "--call"));
+    match tool {
+        Some(i) if !own_values && !args.iter().any(|a| a == "--") => {
+            let mut out = args[..i].to_vec();
+            out.push("--".into());
+            out.extend_from_slice(&args[i..]);
+            out
+        }
+        _ => args.to_vec(),
+    }
+}
+
+/// The lines (new side) the task changed in each file, from `git diff -U0` against the fork
+/// point. A file that is not here (untracked, or a diff the app could not read) counts as
+/// changed on every line.
+#[derive(Debug, Clone, Default)]
+pub struct ChangedLines(std::collections::HashMap<String, Vec<(u32, u32)>>);
+
+static HUNK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@").expect("valid regex"));
+
+impl ChangedLines {
+    pub fn of(repo: &Path, base: &str) -> Self {
+        let git = Git::new(repo);
+        let fork = git.merge_base(base, "HEAD").unwrap_or_else(|_| "HEAD".into());
+        let diff = git
+            .run(&["diff", "-U0", "--no-color", "--no-ext-diff", &fork])
+            .unwrap_or_default();
+        Self::parse(&diff)
+    }
+
+    /// `+++ b/<file>` then `@@ -a,b +c,d @@` hunks; a pure deletion (`d` = 0) marks the lines
+    /// around it.
+    pub fn parse(diff: &str) -> Self {
+        let mut map: std::collections::HashMap<String, Vec<(u32, u32)>> = std::collections::HashMap::new();
+        let mut file: Option<String> = None;
+        for line in diff.lines() {
+            if let Some(path) = line.strip_prefix("+++ ") {
+                let path = path.trim().trim_matches('"');
+                file = path.strip_prefix("b/").map(|p| norm(Path::new(""), "", p));
+                if let Some(f) = &file {
+                    map.entry(f.clone()).or_default();
+                }
+            } else if let (Some(f), Some(c)) = (&file, HUNK.captures(line)) {
+                let start: u32 = c[1].parse().unwrap_or(0);
+                let count: u32 = c.get(2).map_or(1, |m| m.as_str().parse().unwrap_or(1));
+                let range = if count == 0 {
+                    (start, start + 1)
+                } else {
+                    (start, start + count - 1)
+                };
+                map.entry(f.clone()).or_default().push(range);
+            }
+        }
+        Self(map)
+    }
+
+    /// The task changed `line` of `file` (repo-relative, as `norm` gives it).
+    fn touches(&self, file: &str, line: u32) -> bool {
+        self.0
+            .get(file)
+            .is_none_or(|ranges| ranges.iter().any(|(a, b)| (*a..=*b).contains(&line)))
+    }
+}
+
 static TSC_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(.+?)\(\d+,\d+\): error TS\d+").expect("valid regex"));
 static ESLINT_ERROR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s+\d+:\d+\s+error\s").expect("valid regex"));
+    LazyLock::new(|| Regex::new(r"^\s+(\d+):\d+\s+error\s").expect("valid regex"));
 static PRETTIER_WARN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\[warn\]\s+(.+?)\s*$").expect("valid regex"));
 static COLOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*m").expect("valid regex"));
@@ -408,8 +499,18 @@ fn tail(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// Read what a check printed: errors in changed files, errors elsewhere (ignored).
-pub fn read(repo: &Path, check: &Check, code: Option<i32>, output: &str, changed: &[String]) -> CheckResult {
+/// Read what a check printed: errors in changed files, errors elsewhere (ignored). Lint errors
+/// count only on the lines the task changed (`lines`): a file's old lint errors are not the
+/// task's to fix. Type errors count anywhere in a changed file (a change can break a line it
+/// did not touch).
+pub fn read(
+    repo: &Path,
+    check: &Check,
+    code: Option<i32>,
+    output: &str,
+    changed: &[String],
+    lines: &ChangedLines,
+) -> CheckResult {
     let output = COLOR.replace_all(output, "").into_owned();
     let changed: Vec<String> = changed.iter().map(|f| norm(repo, "", f)).collect();
     let touched = |file: &str| changed.contains(&norm(repo, &check.dir, file));
@@ -441,9 +542,10 @@ pub fn read(repo: &Path, check: &Check, code: Option<i32>, output: &str, changed
             for line in output.lines() {
                 if !line.starts_with(char::is_whitespace) && !line.trim().is_empty() && line.contains('.') {
                     line.trim().clone_into(&mut file);
-                } else if ESLINT_ERROR.is_match(line) {
+                } else if let Some(c) = ESLINT_ERROR.captures(line) {
                     found += 1;
-                    if touched(&file) {
+                    let at: u32 = c[1].parse().unwrap_or(0);
+                    if touched(&file) && lines.touches(&norm(repo, &check.dir, &file), at) {
                         r.errors.push(format!("{file}: {}", line.trim()));
                     } else {
                         r.old += 1;
@@ -460,7 +562,7 @@ pub fn read(repo: &Path, check: &Check, code: Option<i32>, output: &str, changed
                     }
                     found += 1;
                     if touched(file) {
-                        r.errors.push(format!("{file}: chưa đúng định dạng prettier"));
+                        r.errors.push(format!("{file}{PRETTIER_SUFFIX}"));
                     } else {
                         r.old += 1;
                     }
@@ -488,6 +590,62 @@ pub fn read(repo: &Path, check: &Check, code: Option<i32>, output: &str, changed
     r
 }
 
+/// What follows the file in a prettier error line.
+const PRETTIER_SUFFIX: &str = ": chưa đúng định dạng prettier";
+
+/// Prettier only says which files are off, not which lines. A file that was off prettier at
+/// the fork point already is not the task's to reformat (the AI would rewrite lines it never
+/// touched): its error moves to `old`. A file new in the task, or whose old text the app cannot
+/// check, keeps its error.
+pub fn forgive_old_format(
+    repo: &Path,
+    base: &str,
+    check: &Check,
+    r: &mut CheckResult,
+    runner: &dyn CheckRunner,
+    timeout: Duration,
+    stop: &AtomicBool,
+) {
+    if check.kind != CheckKind::Prettier || r.errors.is_empty() {
+        return;
+    }
+    let git = Git::new(repo);
+    let fork = git.merge_base(base, "HEAD").unwrap_or_else(|_| "HEAD".into());
+    let lf = |s: &str| s.replace("\r\n", "\n").trim_end().to_owned();
+    let mut keep = Vec::new();
+    for e in std::mem::take(&mut r.errors) {
+        let Some(file) = e.strip_suffix(PRETTIER_SUFFIX) else {
+            keep.push(e);
+            continue;
+        };
+        let rel = file.trim().replace('\\', "/");
+        let path = match check.dir.as_str() {
+            "" => rel.clone(),
+            d => format!("{d}/{rel}"),
+        };
+        let Ok(old) = git.run(&["show", &format!("{fork}:{path}")]) else {
+            keep.push(e); // new in the task
+            continue;
+        };
+        let probe = Check {
+            label: format!("prettier (bản gốc) · {rel}"),
+            program: "npx".into(),
+            args: ["--no", "--", "prettier", "--stdin-filepath", &rel]
+                .iter()
+                .map(|a| (*a).to_owned())
+                .collect(),
+            kind: CheckKind::Other,
+            dir: check.dir.clone(),
+            stdin: Some(old.clone()),
+        };
+        match runner.run(repo, &probe, timeout, stop) {
+            Ok((Some(0), formatted)) if lf(&formatted) != lf(&old) => r.old += 1,
+            _ => keep.push(e),
+        }
+    }
+    r.errors = keep;
+}
+
 /// "tsc · web: 0 lỗi; eslint · web: 2 lỗi" for the step note.
 pub fn summary(results: &[CheckResult]) -> String {
     let errors: usize = results.iter().map(|r| r.errors.len()).sum();
@@ -508,7 +666,9 @@ pub fn summary(results: &[CheckResult]) -> String {
         text.push_str(&format!(" ({})", names.join(", ")));
     }
     if old > 0 {
-        text.push_str(&format!(", bỏ qua {old} lỗi cũ ở file khác"));
+        text.push_str(&format!(
+            ", bỏ qua {old} lỗi cũ (ở file khác hoặc dòng task không sửa)"
+        ));
     }
     text
 }
@@ -542,6 +702,7 @@ mod tests {
             args: vec![],
             kind,
             dir: dir.into(),
+            stdin: None,
         }
     }
 
@@ -562,7 +723,19 @@ mod tests {
             &["web/a.ts".into()],
         );
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].args, vec!["eslint", "web/a.ts"]);
+        // npm 11 reads options after the tool as its own: `--` before the tool
+        assert_eq!(plan[0].args, vec!["--", "eslint", "web/a.ts"]);
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            npx_args(&s(&["--no", "tsc", "--noEmit", "-p", "x.json"])),
+            s(&["--no", "--", "tsc", "--noEmit", "-p", "x.json"])
+        );
+        assert_eq!(npx_args(&s(&["--", "tsc"])), s(&["--", "tsc"]), "has one already");
+        assert_eq!(
+            npx_args(&s(&["-p", "typescript", "tsc"])),
+            s(&["-p", "typescript", "tsc"]),
+            "npx's own -p takes a value"
+        );
         assert_eq!(plan[0].kind, CheckKind::Eslint);
         assert_eq!(plan[1].kind, CheckKind::Other);
         assert!(super::plan(tmp.path(), &["npx tsc".into()], &[]).is_empty());
@@ -588,12 +761,12 @@ mod tests {
         assert_eq!(labels, vec!["tsc · web", "eslint · web", "prettier · web"]);
         assert_eq!(
             plan[0].args,
-            vec!["--no", "tsc", "--noEmit", "-p", "tsconfig.json"]
+            vec!["--no", "--", "tsc", "--noEmit", "-p", "tsconfig.json"]
         );
-        assert_eq!(plan[1].args, vec!["--no", "eslint", "src/a.ts"]);
+        assert_eq!(plan[1].args, vec!["--no", "--", "eslint", "src/a.ts"]);
         assert_eq!(
             plan[2].args,
-            vec!["--no", "prettier", "--check", "src/a.ts", "src/b.css"]
+            vec!["--no", "--", "prettier", "--check", "src/a.ts", "src/b.css"]
         );
         assert!(plan.iter().all(|c| c.dir == "web"));
         // no package.json: nothing to guess
@@ -603,9 +776,10 @@ mod tests {
     #[test]
     fn only_errors_in_changed_files_count() {
         let repo = Path::new("C:/r");
+        let none = ChangedLines::default();
         let changed = vec!["web/src/a.ts".to_owned()];
         let tsc = "src/a.ts(3,5): error TS2322: Type 'x'.\nsrc/old.ts(1,1): error TS1: y\n";
-        let r = read(repo, &check(CheckKind::Tsc, "web"), Some(2), tsc, &changed);
+        let r = read(repo, &check(CheckKind::Tsc, "web"), Some(2), tsc, &changed, &none);
         assert_eq!(r.errors, vec!["src/a.ts(3,5): error TS2322: Type 'x'."]);
         assert_eq!(r.old, 1);
         let only_old = read(
@@ -614,13 +788,49 @@ mod tests {
             Some(2),
             "src/old.ts(1,1): error TS1: y",
             &changed,
+            &none,
         );
         assert!(only_old.ok() && only_old.old == 1);
 
         let eslint = "\nC:\\r\\web\\src\\a.ts\n  3:1  error  'x' is unused  no-unused-vars\n  4:1  warning  w  r\n\nC:\\r\\web\\src\\z.ts\n  1:1  error  e  r\n\n✖ 3 problems\n";
-        let r = read(repo, &check(CheckKind::Eslint, "web"), Some(1), eslint, &changed);
+        let r = read(
+            repo,
+            &check(CheckKind::Eslint, "web"),
+            Some(1),
+            eslint,
+            &changed,
+            &none,
+        );
         assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
         assert_eq!(r.old, 1);
+        // a lint error on a line the task did not change is an old one, even in a changed file
+        let diff = "diff --git a/web/src/a.ts b/web/src/a.ts\n--- a/web/src/a.ts\n+++ b/web/src/a.ts\n\
+                    @@ -10,2 +10,3 @@ fn\n-x\n-y\n+x\n+y\n+z\n@@ -30 +31,0 @@\n-gone\n";
+        let lines = ChangedLines::parse(diff);
+        let eslint = "\nC:\\r\\web\\src\\a.ts\n  3:1  error  any  no-explicit-any\n  11:1  error  new  r\n  \
+                      32:1  error  near a removed line  r\n  40:1  error  far  r\n";
+        let r = read(
+            repo,
+            &check(CheckKind::Eslint, "web"),
+            Some(1),
+            eslint,
+            &changed,
+            &lines,
+        );
+        assert_eq!(r.errors.len(), 2, "{:?}", r.errors);
+        assert!(r.errors[0].ends_with("11:1  error  new  r"), "{:?}", r.errors);
+        assert_eq!(r.old, 2);
+        // a file the diff does not list (untracked: all new) counts on every line
+        let untracked = ChangedLines::parse("+++ b/web/src/other.ts\n@@ -1 +1 @@\n");
+        let r = read(
+            repo,
+            &check(CheckKind::Eslint, "web"),
+            Some(1),
+            eslint,
+            &changed,
+            &untracked,
+        );
+        assert_eq!(r.errors.len(), 4);
 
         let prettier = "Checking formatting...\n[warn] src/a.ts\n[warn] Code style issues found in the above file. Run Prettier with --write to fix.\n";
         let r = read(
@@ -629,6 +839,7 @@ mod tests {
             Some(1),
             prettier,
             &changed,
+            &none,
         );
         assert_eq!(r.errors, vec!["src/a.ts: chưa đúng định dạng prettier"]);
 
@@ -639,16 +850,113 @@ mod tests {
             Some(1),
             "npm ERR! could not determine executable to run",
             &changed,
+            &none,
         );
         assert!(r.broken.as_deref().unwrap().contains("could not determine"));
-        let r = read(repo, &check(CheckKind::Other, ""), Some(1), "boom", &changed);
+        let r = read(
+            repo,
+            &check(CheckKind::Other, ""),
+            Some(1),
+            "boom",
+            &changed,
+            &none,
+        );
         assert_eq!(r.errors, vec!["boom"]);
-        assert!(read(repo, &check(CheckKind::Other, ""), Some(0), "fine", &changed).ok());
         assert!(
-            read(repo, &check(CheckKind::Tsc, ""), None, "", &changed)
+            read(
+                repo,
+                &check(CheckKind::Other, ""),
+                Some(0),
+                "fine",
+                &changed,
+                &none
+            )
+            .ok()
+        );
+        assert!(
+            read(repo, &check(CheckKind::Tsc, ""), None, "", &changed, &none)
                 .broken
                 .is_some()
         );
+    }
+
+    /// Prettier on stdin: upper-cases the text (= the old text was "off prettier") unless it is
+    /// already upper case.
+    struct Upper;
+    impl CheckRunner for Upper {
+        fn run(
+            &self,
+            _repo: &Path,
+            check: &Check,
+            _timeout: Duration,
+            _stop: &AtomicBool,
+        ) -> Result<(Option<i32>, String), String> {
+            assert!(
+                check.args.contains(&"--stdin-filepath".to_owned()),
+                "{:?}",
+                check.args
+            );
+            Ok((Some(0), check.stdin.clone().unwrap_or_default().to_uppercase()))
+        }
+    }
+
+    #[test]
+    fn a_file_off_prettier_before_the_task_is_not_the_tasks_to_reformat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(repo.join("web/src")).unwrap();
+        std::fs::write(repo.join("web/src/messy.ts"), "messy\n").unwrap();
+        std::fs::write(repo.join("web/src/clean.ts"), "CLEAN\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["switch", "-q", "-c", "task"]);
+        std::fs::write(repo.join("web/src/new.ts"), "new\n").unwrap();
+        let check = Check {
+            label: "prettier · web".into(),
+            program: "npx".into(),
+            args: vec![],
+            kind: CheckKind::Prettier,
+            dir: "web".into(),
+            stdin: None,
+        };
+        let mut r = CheckResult {
+            errors: ["src\\messy.ts", "src/clean.ts", "src/new.ts"]
+                .iter()
+                .map(|f| format!("{f}{PRETTIER_SUFFIX}"))
+                .collect(),
+            ..CheckResult::default()
+        };
+        let go = AtomicBool::new(false);
+        forgive_old_format(repo, "main", &check, &mut r, &Upper, Duration::from_secs(5), &go);
+        assert_eq!(
+            r.errors,
+            vec![
+                format!("src/clean.ts{PRETTIER_SUFFIX}"),
+                format!("src/new.ts{PRETTIER_SUFFIX}")
+            ],
+            "messy was off before the task; clean was fine and new is the task's own"
+        );
+        assert_eq!(r.old, 1);
     }
 
     #[test]
@@ -667,7 +975,7 @@ mod tests {
         ];
         assert_eq!(
             summary(&results),
-            "1 lỗi (tsc, eslint), bỏ qua 2 lỗi cũ ở file khác"
+            "1 lỗi (tsc, eslint), bỏ qua 2 lỗi cũ (ở file khác hoặc dòng task không sửa)"
         );
         assert_eq!(report(&results), "### eslint · web\na.ts: 1:1 error x");
     }

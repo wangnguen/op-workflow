@@ -476,9 +476,14 @@ pub fn save_dev_server(
         let entry = object_at(repos, &key);
         match server.filter(|s| !s.url.trim().is_empty()) {
             Some(s) => {
+                let commands: Vec<serde_json::Value> = s
+                    .commands
+                    .iter()
+                    .map(|c| serde_json::json!({"command": c.command.trim(), "dir": c.dir.trim(), "wait": c.wait.trim()}))
+                    .collect();
                 entry.insert(
                     "devServer".into(),
-                    serde_json::json!({"command": s.command.trim(), "url": s.url.trim(), "dir": s.dir.trim()}),
+                    serde_json::json!({"url": s.url.trim(), "commands": commands}),
                 );
             }
             None => {
@@ -722,15 +727,33 @@ mod tests {
     fn the_dev_server_is_remembered_per_repo_and_cleared() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
+        // a dev server saved before the list (one command + dir) still reads
         std::fs::write(
             &path,
-            r#"{"repos":{"~/code/web":{"allowBash":["npm run lint *"]}}}"#,
+            r#"{"repos":{"~/code/web":{"allowBash":["npm run lint *"],
+                "devServer":{"command":"pnpm dev","url":"http://localhost:5173","dir":"web"}}}}"#,
         )
         .unwrap();
+        let old = Config::load(&path).unwrap().repos["~/code/web"]
+            .dev_server
+            .clone()
+            .unwrap();
+        assert_eq!(old.commands.len(), 1);
+        assert_eq!(
+            (old.commands[0].command.as_str(), old.commands[0].dir.as_str()),
+            ("pnpm dev", "web")
+        );
+        let cmd = |command: &str, dir: &str, wait: &str| opw_domain::view::DevCommand {
+            command: command.into(),
+            dir: dir.into(),
+            wait: wait.into(),
+        };
         let server = opw_domain::view::DevServer {
-            command: " npm run dev ".into(),
             url: "http://localhost:5173".into(),
-            dir: "web".into(),
+            commands: vec![
+                cmd("npm run dev", "api", "http://localhost:3000"),
+                cmd(" npm run dev ", "web", ""),
+            ],
         };
         let home = dirs::home_dir().unwrap().join("code").join("web");
         save_dev_server(&path, &home.to_string_lossy(), Some(&server)).unwrap();
@@ -738,8 +761,11 @@ mod tests {
         let repo = &cfg.repos["~/code/web"];
         let saved = repo.dev_server.clone().unwrap();
         assert_eq!(
-            (saved.command.as_str(), saved.dir.as_str()),
-            ("npm run dev", "web")
+            saved.commands,
+            [
+                cmd("npm run dev", "api", "http://localhost:3000"),
+                cmd("npm run dev", "web", ""),
+            ]
         );
         assert_eq!(repo.allow_bash, ["npm run lint *"]);
         save_dev_server(&path, "~/code/web", None).unwrap();

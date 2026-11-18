@@ -145,15 +145,19 @@ const ANALYZE_JSON: &str = "After the plan, end your message with one fenced ```
 {\"questions\": [{\"text\": \"...\", \"options\": [\"...\", \"...\"]}],\n \
 \"harness\": {\"recommend\": true, \"reason\": \"...\", \"checks\": [\"...\"]},\n \
 \"browserTest\": {\"recommend\": false, \"reason\": \"...\", \"scenario\": [\"...\"],\n  \
-\"devServer\": {\"command\": \"npm run dev\", \"dir\": \"\", \"url\": \"http://localhost:5173\"}}}\n\
+\"devServer\": {\"url\": \"http://localhost:5173\", \
+\"commands\": [{\"command\": \"npm run dev\", \"dir\": \"\", \"wait\": \"\"}]}}}\n\
 - questions: what you need the user to decide before coding (in Vietnamese), each with 2-3 short \
 suggested answers; an empty list when nothing is unclear. Do not repeat them in the plan.\n\
 - harness: whether this task is worth a throwaway test harness outside the repository (pure \
 logic, data shaping, edge cases you can run without the app); `checks` = what it would check.\n\
 - browserTest: whether the change should be tried in a real browser (UI, a page flow); \
 `scenario` = the steps and what to expect; `devServer` = how this repository runs locally, from \
-its README, CLAUDE.md and package.json scripts: the command that starts the dev server, the \
-folder to run it from (relative to the repository root, \"\" for the root) and the URL to open. \
+its README, CLAUDE.md and package.json scripts: `url` = the page to open; `commands` = every \
+command that must run for that page to work, in start order (often just the dev server; an API \
+server the dev server proxies to goes first), each with `dir` = the folder to run it from \
+(relative to the repository root, \"\" for the root) and `wait` = the port or URL that answers \
+once it is up (\"\" = the page URL; only the last command may leave it empty). \
 Leave devServer null when you are not sure; the user confirms it before the app runs anything.\n\
 Write reason, checks and scenario in Vietnamese.";
 

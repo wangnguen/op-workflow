@@ -36,10 +36,10 @@ use opw_context::prompts::{self, FixItem};
 use opw_domain::finding::{Severity, fingerprint};
 use opw_domain::view::{
     AgentKind, AgentQuestionView, AgentView, AlertKind, ApiError, CarryOn, ChatItem, ChatKind, ChatView,
-    Decision, DevServer, FindingDecision, FindingView, FlowAction, FlowError, FlowStatus, GateKind, GateView,
-    LogLine, PlanQuestion, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote, RunState, RunSummary,
-    RunView, SessionStatus, StepProposal, StepRef, StepView, TaskColumn, TaskDetail, TestCase, TestView,
-    ToolEvent,
+    Decision, DevCommand, DevServer, FindingDecision, FindingView, FlowAction, FlowError, FlowStatus,
+    GateKind, GateView, LogLine, PlanQuestion, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote,
+    RunState, RunSummary, RunView, SessionStatus, StepProposal, StepRef, StepView, TaskColumn, TaskDetail,
+    TestCase, TestView, ToolEvent,
 };
 use opw_domain::workflow::{AfterFix, Phase, StepKind, StepState, Workflow, WorkflowEvent};
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
@@ -2092,7 +2092,7 @@ fn apply_action(
             );
             Ok(false)
         }
-        FlowAction::SetDevServer { command, url, dir } => {
+        FlowAction::SetDevServer { url, commands } => {
             if entry
                 .run
                 .as_ref()
@@ -2103,25 +2103,16 @@ fn apply_action(
                     "Test trình duyệt đang chạy: bấm Dừng trước khi đổi lệnh chạy app",
                 ));
             }
-            let server = DevServer {
-                command: command.trim().to_owned(),
-                url: url.trim().to_owned(),
-                dir: dir.trim().trim_matches(['/', '\\']).to_owned(),
-            };
+            let server = devserver::tidy(url, commands);
             devserver::check(&server).map_err(|e| ApiError::new("devserver.invalid", e))?;
             let text = if server.url.is_empty() {
                 "Bỏ lệnh chạy app: Test trình duyệt để AI tự bật app".to_owned()
-            } else if server.command.is_empty() {
+            } else if server.commands.is_empty() {
                 format!("Test trình duyệt dùng app đang chạy ở {}", server.url)
             } else {
                 format!(
-                    "Test trình duyệt: app chạy `{}`{} rồi mở {}",
-                    server.command,
-                    if server.dir.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" trong {}", server.dir)
-                    },
+                    "Test trình duyệt: app chạy {} rồi mở {}",
+                    devserver::what_runs(&server),
                     server.url
                 )
             };
@@ -3773,6 +3764,7 @@ fn run_checks(
     let mut round = 0_usize;
     loop {
         let changed = checks::changed_files(repo, base);
+        let lines = checks::ChangedLines::of(repo, base);
         let list = checks::plan(repo, &config.checks, &changed);
         if list.is_empty() {
             return Ok(ChecksDone {
@@ -3790,7 +3782,19 @@ fn run_checks(
         for check in &list {
             inner.on_tool(wp_id, step, "Kiểm tra", &check.label);
             let r = match checker.run(repo, check, timeout, &claim.stop) {
-                Ok((code, output)) => checks::read(repo, check, code, &output, &changed),
+                Ok((code, output)) => {
+                    let mut r = checks::read(repo, check, code, &output, &changed, &lines);
+                    checks::forgive_old_format(
+                        repo,
+                        base,
+                        check,
+                        &mut r,
+                        checker.as_ref(),
+                        timeout,
+                        &claim.stop,
+                    );
+                    r
+                }
                 Err(why) => CheckResult {
                     label: check.label.clone(),
                     broken: Some(why),
@@ -4002,6 +4006,7 @@ fn harness_command(
         args: args.to_vec(),
         kind: CheckKind::Harness,
         dir: state.dir.clone(),
+        stdin: None,
     };
     inner.on_tool(ctx.row.wp_id, StepKind::Harness, "Harness", &state.command());
     let (code, output) = checker.run(repo, &check, timeout, &claim.stop).map_err(|why| {
@@ -4279,7 +4284,10 @@ fn run_browser_test(
         }
     }
     if session.server.as_mut().is_some_and(|p| p.exited().is_some()) {
-        session.server = None;
+        // one of them died: stop the rest too, then all start again below
+        if let Some(p) = session.server.take() {
+            p.stop();
+        }
     }
     if let (Some(d), None) = (&server, &session.server) {
         match start_app(inner, ctx, claim, repo, d, &shots) {
@@ -4458,28 +4466,19 @@ fn start_app(
         .lock()
         .map(|s| s.clone())
         .map_err(|_| flow_error("devserver.start", "Không bật được dev server"))?;
-    let what = if server.command.is_empty() {
-        server.url.as_str()
-    } else {
-        server.command.as_str()
-    };
-    inner.on_tool(wp_id, StepKind::BrowserTest, "Dev server", what);
+    inner.on_tool(
+        wp_id,
+        StepKind::BrowserTest,
+        "Dev server",
+        &devserver::what_runs(server),
+    );
     let log = shots.join("dev-server.log");
     match devserver::bring_up(&*starter, repo, server, &log, devserver::READY_WAIT, &claim.stop) {
-        Ok(Up::Running) => {
-            let line = format!("Dùng app đang chạy ở {} (app không tắt nó)", server.url);
-            inner.log(wp_id, Some(StepKind::BrowserTest), "info", &line, false);
-            Ok(None)
-        }
-        Ok(Up::Started(p, after)) => {
-            let line = format!(
-                "Dev server: app chạy `{}`, {} mở sau {} giây",
-                server.command,
-                server.url,
-                after.as_secs()
-            );
-            inner.log(wp_id, Some(StepKind::BrowserTest), "info", &line, false);
-            Ok(Some(p))
+        Ok(Up { started, lines }) => {
+            for line in &lines {
+                inner.log(wp_id, Some(StepKind::BrowserTest), "info", line, false);
+            }
+            Ok(started)
         }
         Err((code, message)) => Err(flow_error(code, message)),
     }
@@ -4606,9 +4605,16 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                         reason: p.reason,
                         checks: p.checks,
                         dev_server: p.dev_server.map(|d| DevServer {
-                            command: d.command,
                             url: d.url,
-                            dir: d.dir,
+                            commands: d
+                                .commands
+                                .into_iter()
+                                .map(|c| DevCommand {
+                                    command: c.command,
+                                    dir: c.dir,
+                                    wait: c.wait,
+                                })
+                                .collect(),
                         }),
                     })
                 })
@@ -5113,7 +5119,10 @@ mod tests {
             jobs: Mutex::new(Vec::new()),
             missing,
         });
-        (Flow::new(s.store.clone(), fake.clone(), None), fake)
+        let flow = Flow::new(s.store.clone(), fake.clone(), None);
+        // never a real Chrome or dev server in tests (it made the browser test slow and flaky)
+        flow.set_app_starter(Arc::new(FakeStarter::default()));
+        (flow, fake)
     }
 
     /// Wait until no step runs for this task.
@@ -6308,11 +6317,13 @@ mod tests {
         flow.set_check_runner(Arc::new(FakeChecks {
             calls: AtomicUsize::new(0),
             answer: |n, check: &checks::Check| {
-                assert_eq!(check.args, vec!["eslint", "a.ts"]);
+                // `npx eslint {files}` from config: `--` added before the tool (npm 11)
+                assert_eq!(check.args, vec!["--", "eslint", "a.ts"]);
                 Ok(if n == 0 {
                     (
                         Some(1),
-                        "a.ts\n  1:1  error  'x' is unused  no-unused-vars\n".to_owned(),
+                        // line 2 is the one the fake coder added (errors on other lines are old)
+                        "a.ts\n  2:1  error  'x' is unused  no-unused-vars\n".to_owned(),
                     )
                 } else {
                     (Some(0), String::new())
@@ -6348,7 +6359,7 @@ mod tests {
         let jobs = fake.jobs.lock().unwrap().clone();
         let fix = jobs[2].stdin.as_deref().unwrap();
         assert!(
-            fix.contains("<check_output>\n### npx eslint {files}\na.ts: 1:1  error  'x' is unused"),
+            fix.contains("<check_output>\n### npx eslint {files}\na.ts: 2:1  error  'x' is unused"),
             "{fix}"
         );
         // the code session goes on
@@ -6614,14 +6625,25 @@ mod tests {
             .and_then(|p| p.dev_server.clone())
             .unwrap();
         assert_eq!(
-            (proposed.command.as_str(), proposed.dir.as_str()),
-            ("npm run dev", "web")
+            proposed.commands,
+            [DevCommand {
+                command: "npm run dev".into(),
+                dir: "web".into(),
+                wait: String::new(),
+            }]
         );
         assert_eq!(d.dev_server, None);
         let set = |command: &str, url: &str, dir: &str| FlowAction::SetDevServer {
-            command: command.into(),
             url: url.into(),
-            dir: dir.into(),
+            commands: if command.is_empty() {
+                Vec::new()
+            } else {
+                vec![DevCommand {
+                    command: command.into(),
+                    dir: dir.into(),
+                    wait: String::new(),
+                }]
+            },
         };
         assert_eq!(
             flow.act(ctx.clone(), set("npm run dev", "localhost:5173", "web"))

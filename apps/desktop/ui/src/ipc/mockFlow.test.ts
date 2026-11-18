@@ -107,7 +107,7 @@ describe("12-step flow in the preview", () => {
     mockFlowAction(9, { type: "pickFindings", fix: true });
     d = finishStep(9);
     expect([d.current, d.gate?.kind, stateOf(d, "fix")]).toEqual(["fix", "afterFix", "waitingUser"]);
-    expect(d.runs.at(-1)?.note).toBe("lần sửa thứ 1: xử lý 1 lỗi; 2 file thay đổi (+41 −6); Kiểm tra lại: 0 lỗi (tsc, eslint, prettier), bỏ qua 3 lỗi cũ ở file khác");
+    expect(d.runs.at(-1)?.note).toBe("lần sửa thứ 1: xử lý 1 lỗi; 2 file thay đổi (+41 −6); Kiểm tra lại: 0 lỗi (tsc, eslint, prettier), bỏ qua 3 lỗi cũ (ở file khác hoặc dòng task không sửa)");
     d = mockFlowAction(9, { type: "afterFix", choice: "crossReview" });
     expect([d.current, d.steps.find((s) => s.kind === "crossReview")?.round]).toEqual(["crossReview", 1]);
 

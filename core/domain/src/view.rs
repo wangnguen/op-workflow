@@ -1143,15 +1143,51 @@ pub struct AgentQuestionView {
     pub browser_open: bool,
 }
 
-/// How Test trình duyệt reaches the app (part 6c): the command the app runs from `dir` (inside
-/// the repo, relative; empty = its root) and the URL it waits for. Empty command = the app is
-/// already running at the URL; empty URL = no dev server (the AI starts the app itself).
+/// How Test trình duyệt reaches the app (part 6c): the URL Chrome opens and the commands that
+/// make the app answer there (one `pnpm dev`, or an API then the web…),
+/// started top to bottom, each waited for. No command = the app is already running at the URL;
+/// empty URL = no dev server (the AI starts the app itself). Saves of one `command` + `dir`
+/// (before the list) read as a list of one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", from = "SavedDevServer")]
+pub struct DevServer {
+    pub url: String,
+    pub commands: Vec<DevCommand>,
+}
+
+/// A dev server as saved, old shape (one `command` + `dir`) or new (`commands`).
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct SavedDevServer {
+    url: String,
+    commands: Vec<DevCommand>,
+    command: String,
+    dir: String,
+}
+
+impl From<SavedDevServer> for DevServer {
+    fn from(s: SavedDevServer) -> Self {
+        let mut commands = s.commands;
+        if commands.is_empty() && !s.command.trim().is_empty() {
+            commands.push(DevCommand {
+                command: s.command,
+                dir: s.dir,
+                wait: String::new(),
+            });
+        }
+        DevServer { url: s.url, commands }
+    }
+}
+
+/// One command of a dev server: run from `dir` (inside the repo, relative; empty = its root),
+/// ready once `wait` answers (a port on localhost or a URL; empty = the dev server's URL). One
+/// that answers already is left as it is (the app neither starts nor stops it).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct DevServer {
+pub struct DevCommand {
     pub command: String,
-    pub url: String,
     pub dir: String,
+    pub wait: String,
 }
 
 /// What a review said about documentation and tests (the `/review-local` docs/test section).
@@ -1472,11 +1508,10 @@ pub enum FlowAction {
     /// too. An empty URL clears both (the AI starts the app itself again).
     SetDevServer {
         #[serde(default)]
-        command: String,
-        #[serde(default)]
         url: String,
+        /// Run top to bottom (an API, then the web…).
         #[serde(default)]
-        dir: String,
+        commands: Vec<DevCommand>,
     },
     /// Question gate: the user did what the AI asked (or answers it); the step goes on.
     AnswerAgent {

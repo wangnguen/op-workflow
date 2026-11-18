@@ -299,12 +299,21 @@ pub struct RawProposal {
     pub dev_server: Option<RawDevServer>,
 }
 
-/// `browserTest.devServer` of the analysis: command, folder inside the repo, URL.
+/// `browserTest.devServer` of the analysis: the URL and the commands that serve it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RawDevServer {
-    pub command: String,
     pub url: String,
+    /// `devServer.commands`, top to bottom (an older `command` + `dir` reads as one).
+    pub commands: Vec<RawDevCommand>,
+}
+
+/// One `devServer.commands` entry: command, folder inside the repo, port or URL it is ready at
+/// (empty = the dev server's URL).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RawDevCommand {
+    pub command: String,
     pub dir: String,
+    pub wait: String,
 }
 
 /// An analysis answer split into the plan the user reads and the trailing json block.
@@ -367,10 +376,35 @@ fn proposal(v: &Value, key: &'static str) -> Option<RawProposal> {
     let dev_server = p
         .get("devServer")
         .filter(|d| d.is_object())
-        .map(|d| RawDevServer {
-            command: string_at(d, "command"),
-            url: string_at(d, "url"),
-            dir: string_at(d, "dir"),
+        .map(|d| {
+            let mut commands: Vec<RawDevCommand> = d
+                .get("commands")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|c| RawDevCommand {
+                            command: string_at(c, "command"),
+                            dir: string_at(c, "dir"),
+                            wait: string_at(c, "wait"),
+                        })
+                        .filter(|c| !c.command.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            // the older shape: one command + dir
+            let one = string_at(d, "command");
+            if commands.is_empty() && !one.is_empty() {
+                commands.push(RawDevCommand {
+                    command: one,
+                    dir: string_at(d, "dir"),
+                    wait: String::new(),
+                });
+            }
+            RawDevServer {
+                url: string_at(d, "url"),
+                commands,
+            }
         })
         .filter(|d| !d.url.is_empty());
     Some(RawProposal {
@@ -591,10 +625,23 @@ mod tests {
         // how the repo runs locally, when the analysis knows
         let ui = "## Đề xuất\nx\n```json\n{\"browserTest\":{\"recommend\":true,\"scenario\":[\"mở /files\"],\
                   \"devServer\":{\"command\":\"npm run dev\",\"dir\":\"web\",\"url\":\"http://localhost:5173\"}}}\n```";
+        // (the older one-command shape still reads)
         let d = plan_answer(ui).proposals[0].dev_server.clone().unwrap();
+        assert_eq!(d.url, "http://localhost:5173");
+        let cmd = |command: &str, dir: &str, wait: &str| RawDevCommand {
+            command: command.into(),
+            dir: dir.into(),
+            wait: wait.into(),
+        };
+        assert_eq!(d.commands, [cmd("npm run dev", "web", "")]);
+        // an API then the web (a port may come as a number; rows without a command dropped)
+        let api = "```json\n{\"browserTest\":{\"recommend\":true,\"devServer\":{\"url\":\"http://localhost:3003\",\
+                   \"commands\":[{\"command\":\"npm run dev\",\"dir\":\"api\",\"wait\":3000},{\"command\":\"\",\"wait\":1},\
+                   {\"command\":\"npm run dev\",\"dir\":\"web\",\"wait\":\"\"}]}}}\n```";
+        let d = plan_answer(api).proposals[0].dev_server.clone().unwrap();
         assert_eq!(
-            (d.command.as_str(), d.dir.as_str(), d.url.as_str()),
-            ("npm run dev", "web", "http://localhost:5173")
+            d.commands,
+            [cmd("npm run dev", "api", "3000"), cmd("npm run dev", "web", "")]
         );
         let unsure = "```json\n{\"browserTest\":{\"recommend\":true,\"devServer\":null}}\n```";
         assert_eq!(plan_answer(unsure).proposals[0].dev_server, None);

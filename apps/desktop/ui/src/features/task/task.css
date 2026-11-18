@@ -1387,8 +1387,42 @@
 }
 .dev-server-fields {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 1.2fr);
+  /* the last track holds a command's up and remove buttons */
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 1.2fr) 58px;
   gap: 8px;
+}
+.dev-server-list-note {
+  font-size: 11.5px;
+}
+/* the URL Chrome opens: under the commands, as wide as their three fields */
+.dev-server-field--url {
+  grid-column: 1 / 4;
+}
+.dev-server-row {
+  animation: dev-server-row-in 160ms ease-out;
+}
+@keyframes dev-server-row-in {
+  from {
+    opacity: 0;
+  }
+}
+.dev-server-row-actions {
+  display: flex;
+  align-self: end;
+  justify-content: flex-end;
+  gap: 2px;
+}
+/* the chevron points right: turn it up */
+.dev-server-up svg {
+  transform: rotate(-90deg);
+}
+.dev-server-up--first {
+  visibility: hidden;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dev-server-row {
+    animation: none;
+  }
 }
 .dev-server-field {
   display: flex;
@@ -1419,6 +1453,9 @@
 @media (max-width: 760px) {
   .dev-server-fields {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .dev-server-field--url {
+    grid-column: auto;
   }
 }
 

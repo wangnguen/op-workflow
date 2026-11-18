@@ -936,11 +936,7 @@ impl AppService {
         let reopen = matches!(action, FlowAction::Reopen { .. });
         // the dev server the user confirms is remembered for the repo too
         let dev_server = match &action {
-            FlowAction::SetDevServer { command, url, dir } => Some(opw_domain::view::DevServer {
-                command: command.trim().to_owned(),
-                url: url.trim().to_owned(),
-                dir: dir.trim().trim_matches(['/', '\\']).to_owned(),
-            }),
+            FlowAction::SetDevServer { url, commands } => Some(devserver::tidy(url, commands)),
             _ => None,
         };
         flow.act(ctx.clone(), action)?;

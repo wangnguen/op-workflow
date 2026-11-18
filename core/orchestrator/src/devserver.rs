@@ -12,10 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use opw_agents::procs;
-use opw_domain::view::DevServer;
+use opw_domain::view::{DevCommand, DevServer};
 
 /// How long the app waits for the URL to answer after starting the command.
 pub const READY_WAIT: Duration = Duration::from_secs(180);
+/// At most this many commands for one dev server.
+pub const MAX_COMMANDS: usize = 5;
 const POLL: Duration = Duration::from_millis(500);
 const CONNECT: Duration = Duration::from_millis(400);
 /// The log's last bytes shown when the command stops before the URL answers.
@@ -40,29 +42,91 @@ pub trait AppProcess: Send {
     fn stop(self: Box<Self>) -> Option<String>;
 }
 
-/// Check what the user typed before it is saved or run. Empty URL = no dev server.
+/// What the user typed, trimmed: folders without leading / trailing slashes, a bare port to wait
+/// for written as `http://localhost:<port>`, rows left empty dropped.
+pub fn tidy(url: &str, commands: &[DevCommand]) -> DevServer {
+    let folder = |d: &str| d.trim().trim_matches(['/', '\\']).to_owned();
+    DevServer {
+        url: url.trim().to_owned(),
+        commands: commands
+            .iter()
+            .filter(|c| !c.command.trim().is_empty() || !c.wait.trim().is_empty())
+            .map(|c| DevCommand {
+                command: c.command.trim().to_owned(),
+                dir: folder(&c.dir),
+                wait: wait_url(&c.wait).unwrap_or_else(|| c.wait.trim().to_owned()),
+            })
+            .collect(),
+    }
+}
+
+/// What a command is waited for: a URL as written, or a bare port (`3000`, `:3000`) on
+/// localhost. `None` = neither.
+pub fn wait_url(wait: &str) -> Option<String> {
+    let wait = wait.trim();
+    let port = wait.strip_prefix(':').unwrap_or(wait);
+    if let Ok(port) = port.parse::<u16>() {
+        return (port > 0).then(|| format!("http://localhost:{port}"));
+    }
+    address(wait).map(|_| wait.to_owned())
+}
+
+/// Check what the user typed before it is saved or run. Empty URL = no dev server. A command
+/// may leave Chờ empty (= wait for the URL) only when it is the last one: the ones above it
+/// must say when they are up, or the next would never start.
 pub fn check(server: &DevServer) -> Result<(), String> {
     let url = server.url.trim();
     if url.is_empty() {
-        return Ok(());
+        return if server.commands.is_empty() {
+            Ok(())
+        } else {
+            Err("Có lệnh chạy thì cần URL của app để mở trong Chrome".into())
+        };
     }
     address(url).ok_or_else(|| format!("URL phải dạng http://localhost:5173 (đang là `{url}`)"))?;
-    let command = server.command.trim();
-    if command.contains(['\n', '\r']) || command.chars().count() > 300 {
-        return Err("Lệnh chạy app phải là một dòng, tối đa 300 ký tự".into());
+    if server.commands.len() > MAX_COMMANDS {
+        return Err(format!("Tối đa {MAX_COMMANDS} lệnh"));
     }
-    let dir = server.dir.trim();
-    if !dir.is_empty() {
-        let p = Path::new(dir);
-        let outside = p.is_absolute()
-            || dir.starts_with(['/', '\\'])
-            || p.components()
-                .any(|c| matches!(c, std::path::Component::ParentDir));
-        if outside || dir.contains(':') {
+    let last = server.commands.len().saturating_sub(1);
+    for (i, c) in server.commands.iter().enumerate() {
+        let n = i + 1;
+        if c.command.trim().is_empty() {
+            return Err(format!("Lệnh {n} chưa có lệnh"));
+        }
+        let command = c.command.trim();
+        if command.contains(['\n', '\r']) || command.chars().count() > 300 {
+            return Err(format!("Lệnh {n} phải là một dòng, tối đa 300 ký tự"));
+        }
+        check_dir(&c.dir).map_err(|e| format!("Lệnh {n}: {e}"))?;
+        let wait = c.wait.trim();
+        if wait.is_empty() && i != last {
             return Err(format!(
-                "Thư mục phải nằm trong repo, viết tương đối (ví dụ `apps/web`), đang là `{dir}`"
+                "Lệnh {n}: ghi cổng chờ (ví dụ 3000); chỉ lệnh cuối được để trống ô Chờ (chờ URL)"
             ));
         }
+        if !wait.is_empty() && wait_url(wait).is_none() {
+            return Err(format!(
+                "Lệnh {n}: ô Chờ là cổng (ví dụ 3000) hoặc URL (http://localhost:3000), đang là `{wait}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_dir(dir: &str) -> Result<(), String> {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return Ok(());
+    }
+    let p = Path::new(dir);
+    let outside = p.is_absolute()
+        || dir.starts_with(['/', '\\'])
+        || p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
+    if outside || dir.contains(':') {
+        return Err(format!(
+            "Thư mục phải nằm trong repo, viết tương đối (ví dụ `apps/web`), đang là `{dir}`"
+        ));
     }
     Ok(())
 }
@@ -98,15 +162,34 @@ pub fn address(url: &str) -> Option<(String, u16)> {
 }
 
 /// What [`bring_up`] did.
-pub enum Up {
-    /// The app was already running: used as it is, never stopped by the app.
-    Running,
-    /// The app started it; it answered after this long. Stop it when the step ends.
-    Started(Box<dyn AppProcess>, Duration),
+pub struct Up {
+    /// What the app started (all of it, as one): stop it when the step ends. `None` = everything
+    /// was running already and is left as it is.
+    pub started: Option<Box<dyn AppProcess>>,
+    /// One line per command for the step's log.
+    pub lines: Vec<String>,
 }
 
-/// Make sure the app answers at `server.url`: use it when it is up already, else run the command
-/// and wait up to `wait` for the URL. `Err` = (code, message) for the step's error.
+/// What the app runs, in order, for the tool line ("api: npm run dev → web: npm run dev"); the
+/// URL when there is no command.
+pub fn what_runs(server: &DevServer) -> String {
+    if server.commands.is_empty() {
+        return server.url.trim().to_owned();
+    }
+    server
+        .commands
+        .iter()
+        .map(|c| match c.dir.trim() {
+            "" => c.command.trim().to_owned(),
+            d => format!("{d}: {}", c.command.trim()),
+        })
+        .collect::<Vec<_>>()
+        .join(" → ")
+}
+
+/// Make sure the app answers at `server.url`: run its commands top to bottom, each one waited for
+/// (its Chờ, else the URL); one that already answers is used as it is. No command = the app must
+/// be running already. A failure stops what this call started. `Err` = (code, message).
 pub fn bring_up(
     starter: &dyn AppStarter,
     repo: &Path,
@@ -114,21 +197,152 @@ pub fn bring_up(
     log: &Path,
     wait: Duration,
     stop: &AtomicBool,
-) -> Result<Up, (&'static str, String)> {
-    let url = server.url.trim();
-    if starter.is_up(url) {
-        return Ok(Up::Running);
+) -> Result<Up, Failure> {
+    fn fail(started: Vec<Box<dyn AppProcess>>, e: Failure) -> Result<Up, Failure> {
+        for p in started.into_iter().rev() {
+            p.stop();
+        }
+        Err(e)
     }
-    let command = server.command.trim();
+    let url = server.url.trim();
+    let in_dir = |dir: &str| match dir.trim() {
+        "" => String::new(),
+        d => format!(" trong {d}"),
+    };
+    let many = server.commands.len() > 1;
+    let mut started: Vec<Box<dyn AppProcess>> = Vec::new();
+    let mut lines = Vec::new();
+    for (i, c) in server.commands.iter().enumerate() {
+        let target = match c.wait.trim() {
+            "" => url.to_owned(),
+            w => match wait_url(w) {
+                Some(u) => u,
+                None => {
+                    let e = format!("Lệnh {}: không biết chờ cổng / URL nào (`{w}`)", i + 1);
+                    return fail(started, ("devserver.invalid", e));
+                }
+            },
+        };
+        let log = if many {
+            numbered(log, i + 1)
+        } else {
+            log.to_path_buf()
+        };
+        match start_one(starter, repo, &c.command, &c.dir, &target, &log, wait, stop) {
+            Ok(Some((p, after))) => {
+                lines.push(format!(
+                    "Dev server: app chạy `{}`{}, {target} mở sau {} giây",
+                    c.command.trim(),
+                    in_dir(&c.dir),
+                    after.as_secs()
+                ));
+                started.push(p);
+            }
+            Ok(None) => lines.push(format!("Dùng {target} đang chạy sẵn (app không tắt nó)")),
+            Err(e) => return fail(started, e),
+        }
+    }
+    if server.commands.is_empty() {
+        if !starter.is_up(url) {
+            return Err((
+                "devserver.down",
+                format!(
+                    "Không mở được {url} và chưa có lệnh chạy app. Bật app rồi bấm Thử lại, hoặc ghi lệnh ở hộp Mở app để test (tab Plan)."
+                ),
+            ));
+        }
+        lines.push(format!("Dùng app đang chạy ở {url} (app không tắt nó)"));
+    } else if let Err(e) = wait_for(starter, url, wait, stop) {
+        // every command answered at its own port, the page itself did not
+        return fail(started, e);
+    }
+    let started = match started.len() {
+        0 => None,
+        1 => started.pop(),
+        _ => Some(Box::new(Group(started)) as Box<dyn AppProcess>),
+    };
+    Ok(Up { started, lines })
+}
+
+/// Wait up to `wait` for the URL once all commands run (it answers at once when the last command
+/// waited for it).
+fn wait_for(starter: &dyn AppStarter, url: &str, wait: Duration, stop: &AtomicBool) -> Result<(), Failure> {
+    let since = Instant::now();
+    loop {
+        if starter.is_up(url) {
+            return Ok(());
+        }
+        if stop.load(Ordering::Relaxed) {
+            return Err((
+                "step.stopped",
+                "Bạn đã dừng bước này. Bấm Thử lại để chạy lại.".into(),
+            ));
+        }
+        if since.elapsed() >= wait {
+            return Err((
+                "devserver.timeout",
+                format!(
+                    "Các lệnh đã chạy nhưng {url} vẫn chưa mở sau {} giây; app đã tắt những gì nó bật. Xem log dev-server trong thư mục browser-test của task rồi sửa lệnh / URL ở tab Plan.",
+                    wait.as_secs()
+                ),
+            ));
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// `dev-server.log` → `dev-server-2.log`, when there are several commands.
+fn numbered(log: &Path, n: usize) -> PathBuf {
+    let stem = log
+        .file_stem()
+        .map_or_else(|| "dev-server".into(), |s| s.to_string_lossy().into_owned());
+    log.with_file_name(format!("{stem}-{n}.log"))
+}
+
+/// Several commands the app started for one test, stopped together (last started first).
+struct Group(Vec<Box<dyn AppProcess>>);
+
+impl AppProcess for Group {
+    fn exited(&mut self) -> Option<Option<i32>> {
+        self.0.iter_mut().find_map(|p| p.exited())
+    }
+
+    fn stop(self: Box<Self>) -> Option<String> {
+        let lines: Vec<String> = self.0.into_iter().rev().filter_map(|p| p.stop()).collect();
+        (!lines.is_empty()).then(|| lines.join("; "))
+    }
+}
+
+/// A step error: (code, message).
+type Failure = (&'static str, String);
+/// A command the app started, and how long it took to answer.
+type Started = (Box<dyn AppProcess>, Duration);
+
+/// One command: `None` when its URL answers already, else started and waited for.
+#[allow(clippy::too_many_arguments)]
+fn start_one(
+    starter: &dyn AppStarter,
+    repo: &Path,
+    command: &str,
+    dir: &str,
+    url: &str,
+    log: &Path,
+    wait: Duration,
+    stop: &AtomicBool,
+) -> Result<Option<Started>, Failure> {
+    if starter.is_up(url) {
+        return Ok(None);
+    }
+    let command = command.trim();
     if command.is_empty() {
         return Err((
             "devserver.down",
             format!(
-                "Không mở được {url} và chưa có lệnh chạy app. Bật app rồi bấm Thử lại, hoặc ghi lệnh ở mục Test trình duyệt (tab Plan)."
+                "Không mở được {url} và chưa có lệnh chạy app. Bật app rồi bấm Thử lại, hoặc ghi lệnh ở hộp Mở app để test (tab Plan)."
             ),
         ));
     }
-    let cwd = match server.dir.trim() {
+    let cwd = match dir.trim() {
         "" => repo.to_path_buf(),
         d => repo.join(d),
     };
@@ -151,7 +365,7 @@ pub fn bring_up(
             ));
         }
         if starter.is_up(url) {
-            return Ok(Up::Started(proc, started.elapsed()));
+            return Ok(Some((proc, started.elapsed())));
         }
         if let Some(code) = proc.exited() {
             let code = code.map_or_else(|| "?".into(), |c| c.to_string());
@@ -405,28 +619,246 @@ mod tests {
         }
     }
 
+    /// A dev server command.
+    fn cmd(command: &str, dir: &str, wait: &str) -> DevCommand {
+        DevCommand {
+            command: command.into(),
+            dir: dir.into(),
+            wait: wait.into(),
+        }
+    }
+
+    fn server(url: &str, commands: Vec<DevCommand>) -> DevServer {
+        DevServer {
+            url: url.into(),
+            commands,
+        }
+    }
+
     #[test]
     fn what_the_user_types_is_checked() {
-        let s = |command: &str, url: &str, dir: &str| DevServer {
-            command: command.into(),
-            url: url.into(),
-            dir: dir.into(),
-        };
-        assert!(check(&s("npm run dev", "http://localhost:5173", "apps/web")).is_ok());
-        assert!(check(&s("", "", "")).is_ok(), "nothing = the AI starts the app");
+        let web = |dir: &str| cmd("npm run dev", dir, "");
+        assert!(check(&server("http://localhost:5173", vec![web("apps/web")])).is_ok());
         assert!(
-            check(&s("", "http://localhost:5173", "")).is_ok(),
+            check(&server("", vec![])).is_ok(),
+            "nothing = the AI starts the app"
+        );
+        assert!(
+            check(&server("http://localhost:5173", vec![])).is_ok(),
             "URL only = already running"
         );
+        // an API then the web: the API says when it is up, the last may wait for the URL
+        let api = cmd("npm run dev", "api", "3000");
+        assert!(check(&server("http://localhost:3003", vec![api.clone(), web("web")])).is_ok());
+        assert!(
+            check(&server(
+                "http://localhost:3003",
+                vec![
+                    cmd("npm run dev", "api", "http://localhost:3000/health"),
+                    web("web")
+                ]
+            ))
+            .is_ok()
+        );
         for bad in [
-            s("npm run dev", "localhost:5173", ""),
-            s("npm run dev\nrm -rf /", "http://localhost:5173", ""),
-            s("npm run dev", "http://localhost:5173", "../other"),
-            s("npm run dev", "http://localhost:5173", "C:\\other"),
-            s("npm run dev", "http://localhost:5173", "/etc"),
+            server("localhost:5173", vec![web("")]),
+            server(
+                "http://localhost:5173",
+                vec![cmd("npm run dev\nrm -rf /", "", "")],
+            ),
+            server("http://localhost:5173", vec![web("../other")]),
+            server("http://localhost:5173", vec![web("C:\\other")]),
+            server("http://localhost:5173", vec![web("/etc")]),
+            server("http://localhost:5173", vec![cmd("", "api", "3000")]),
+            // only the last command may leave Chờ empty
+            server("http://localhost:3003", vec![web("api"), web("web")]),
+            server(
+                "http://localhost:3003",
+                vec![cmd("npm run dev", "api", "localhost"), web("web")],
+            ),
+            server("http://localhost:3003", vec![api.clone(); MAX_COMMANDS + 1]),
+            server("", vec![web("web")]),
         ] {
             assert!(check(&bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn what_is_typed_is_tidied() {
+        let typed = [
+            cmd(" npm run dev ", "/api/", ":3000"),
+            DevCommand::default(),
+            cmd(" npm run dev ", "web\\", ""),
+        ];
+        let t = tidy(" http://localhost:3003 ", &typed);
+        assert_eq!(t.url, "http://localhost:3003");
+        assert_eq!(
+            t.commands,
+            vec![
+                cmd("npm run dev", "api", "http://localhost:3000"),
+                cmd("npm run dev", "web", ""),
+            ],
+            "empty rows dropped, a bare port waits on localhost"
+        );
+        assert_eq!(wait_url("3000").as_deref(), Some("http://localhost:3000"));
+        assert_eq!(
+            wait_url("http://127.0.0.1:4000/x").as_deref(),
+            Some("http://127.0.0.1:4000/x")
+        );
+        assert_eq!(wait_url("0"), None);
+        assert_eq!(wait_url("api"), None);
+        assert_eq!(what_runs(&t), "api: npm run dev → web: npm run dev");
+        assert_eq!(
+            what_runs(&server("http://localhost:3003", vec![])),
+            "http://localhost:3003"
+        );
+    }
+
+    #[test]
+    fn a_dev_server_saved_with_one_command_reads_as_a_list() {
+        let old: DevServer =
+            serde_json::from_str(r#"{"command":"pnpm dev","url":"http://localhost:5173","dir":"web"}"#)
+                .unwrap();
+        assert_eq!(
+            old,
+            server("http://localhost:5173", vec![cmd("pnpm dev", "web", "")])
+        );
+        let url_only: DevServer =
+            serde_json::from_str(r#"{"command":"","url":"http://localhost:5173","dir":""}"#).unwrap();
+        assert!(url_only.commands.is_empty());
+        let new = server(
+            "http://localhost:3003",
+            vec![cmd("npm run dev", "api", "http://localhost:3000")],
+        );
+        let back: DevServer = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back, new);
+    }
+
+    /// Up = running from the start, or its command was started (`runs`: URL → command).
+    struct Ports {
+        up: Vec<&'static str>,
+        runs: Vec<(&'static str, &'static str)>,
+        started: Mutex<Vec<(PathBuf, String)>>,
+        stopped: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct PortProc {
+        command: String,
+        stopped: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl AppProcess for PortProc {
+        fn exited(&mut self) -> Option<Option<i32>> {
+            None
+        }
+        fn stop(self: Box<Self>) -> Option<String> {
+            self.stopped.lock().unwrap().push(self.command.clone());
+            Some(format!("đã tắt {}", self.command))
+        }
+    }
+
+    impl AppStarter for Ports {
+        fn is_up(&self, url: &str) -> bool {
+            let started = self.started.lock().unwrap();
+            self.up.contains(&url)
+                || self
+                    .runs
+                    .iter()
+                    .any(|(u, c)| *u == url && started.iter().any(|(_, s)| s == c))
+        }
+        fn start(&self, cwd: &Path, command: &str, _log: &Path) -> Result<Box<dyn AppProcess>, String> {
+            self.started
+                .lock()
+                .unwrap()
+                .push((cwd.to_path_buf(), command.into()));
+            Ok(Box::new(PortProc {
+                command: command.into(),
+                stopped: self.stopped.clone(),
+            }))
+        }
+        fn open_browser(&self, _profile: &Path, _url: &str) -> Result<(Box<dyn AppProcess>, u16), String> {
+            Err("no browser in this test".into())
+        }
+    }
+
+    #[test]
+    fn several_commands_start_top_to_bottom_and_stop_together() {
+        let dir = tempfile::tempdir().unwrap();
+        for d in ["api", "web"] {
+            std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        }
+        let log = dir.path().join("dev-server.log");
+        let two = server(
+            "http://localhost:3003",
+            vec![cmd("ts-node-dev", "api", "3000"), cmd("vite", "web", "")],
+        );
+        let go = AtomicBool::new(false);
+        let ports = |up: Vec<&'static str>, runs: Vec<(&'static str, &'static str)>| Ports {
+            up,
+            runs,
+            started: Mutex::new(Vec::new()),
+            stopped: Arc::new(Mutex::new(Vec::new())),
+        };
+        let both = vec![
+            ("http://localhost:3000", "ts-node-dev"),
+            ("http://localhost:3003", "vite"),
+        ];
+        // nothing running: the API first (from its folder), then the web; stopped last-first
+        let fresh = ports(vec![], both.clone());
+        let up = bring_up(&fresh, dir.path(), &two, &log, READY_WAIT, &go).unwrap();
+        assert_eq!(
+            *fresh.started.lock().unwrap(),
+            vec![
+                (dir.path().join("api"), "ts-node-dev".to_owned()),
+                (dir.path().join("web"), "vite".to_owned()),
+            ]
+        );
+        assert_eq!(up.lines.len(), 2);
+        assert!(
+            up.lines[0].starts_with("Dev server: app chạy `ts-node-dev` trong api, http://localhost:3000"),
+            "{:?}",
+            up.lines
+        );
+        assert_eq!(
+            up.started.unwrap().stop().as_deref(),
+            Some("đã tắt vite; đã tắt ts-node-dev")
+        );
+        assert_eq!(*fresh.stopped.lock().unwrap(), ["vite", "ts-node-dev"]);
+        // the API runs already: left alone, only the web started
+        let api_up = ports(vec!["http://localhost:3000"], both.clone());
+        let up = bring_up(&api_up, dir.path(), &two, &log, READY_WAIT, &go).unwrap();
+        assert_eq!(api_up.started.lock().unwrap().len(), 1);
+        assert!(up.lines[0].contains("đang chạy sẵn"), "{:?}", up.lines);
+        up.started.unwrap().stop();
+        assert_eq!(*api_up.stopped.lock().unwrap(), ["vite"]);
+        // everything up: nothing to stop later
+        let all_up = ports(vec!["http://localhost:3000", "http://localhost:3003"], vec![]);
+        let up = bring_up(&all_up, dir.path(), &two, &log, READY_WAIT, &go).unwrap();
+        assert!(up.started.is_none());
+        // the web never answers: the API the app started is stopped too
+        let web_dead = ports(vec![], vec![("http://localhost:3000", "ts-node-dev")]);
+        let Err((code, _)) = bring_up(&web_dead, dir.path(), &two, &log, Duration::ZERO, &go) else {
+            panic!("should time out")
+        };
+        assert_eq!(code, "devserver.timeout");
+        assert_eq!(*web_dead.stopped.lock().unwrap(), ["vite", "ts-node-dev"]);
+        // every command waits on its own port and the page never answers: all stopped
+        let own_ports = server(
+            "http://localhost:3003",
+            vec![cmd("ts-node-dev", "api", "3000"), cmd("vite", "web", "5000")],
+        );
+        let no_page = ports(
+            vec![],
+            vec![
+                ("http://localhost:3000", "ts-node-dev"),
+                ("http://localhost:5000", "vite"),
+            ],
+        );
+        let Err((code, _)) = bring_up(&no_page, dir.path(), &own_ports, &log, Duration::ZERO, &go) else {
+            panic!("the page never answered")
+        };
+        assert_eq!(code, "devserver.timeout");
+        assert_eq!(*no_page.stopped.lock().unwrap(), ["vite", "ts-node-dev"]);
     }
 
     /// Up after `up_after` polls; the process ends with `exit` after `exit_after` polls.
@@ -492,22 +924,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("apps/web")).unwrap();
         let log = dir.path().join("dev.log");
-        let server = DevServer {
-            command: "npm run dev".into(),
-            url: "http://localhost:5173".into(),
-            dir: "apps/web".into(),
-        };
+        let one = server("http://localhost:5173", vec![cmd("npm run dev", "apps/web", "")]);
         let go = AtomicBool::new(false);
         // already up: nothing started
         let running = fake(Some(0), None);
-        assert!(matches!(
-            bring_up(&running, dir.path(), &server, &log, READY_WAIT, &go),
-            Ok(Up::Running)
-        ));
+        let up = bring_up(&running, dir.path(), &one, &log, READY_WAIT, &go).unwrap();
+        assert!(up.started.is_none());
         assert!(running.started.lock().unwrap().is_empty());
         // up on the third look: started from the package folder
         let later = fake(Some(2), None);
-        let Ok(Up::Started(proc, _)) = bring_up(&later, dir.path(), &server, &log, READY_WAIT, &go) else {
+        let Ok(Up {
+            started: Some(proc), ..
+        }) = bring_up(&later, dir.path(), &one, &log, READY_WAIT, &go)
+        else {
             panic!("not started")
         };
         assert_eq!(
@@ -518,23 +947,20 @@ mod tests {
         // the command dies first: its log tail in the error
         std::fs::write(&log, "Error: Cannot find module 'vite'").unwrap();
         let dies = fake(None, Some(1));
-        let Err((code, message)) = bring_up(&dies, dir.path(), &server, &log, READY_WAIT, &go) else {
+        let Err((code, message)) = bring_up(&dies, dir.path(), &one, &log, READY_WAIT, &go) else {
             panic!("should fail")
         };
         assert_eq!(code, "devserver.exited");
         assert!(message.contains("Cannot find module 'vite'"), "{message}");
         // never answers: stopped after the wait
         let never = fake(None, None);
-        let Err((code, _)) = bring_up(&never, dir.path(), &server, &log, Duration::ZERO, &go) else {
+        let Err((code, _)) = bring_up(&never, dir.path(), &one, &log, Duration::ZERO, &go) else {
             panic!("should time out")
         };
         assert_eq!(code, "devserver.timeout");
         assert_eq!(*never.stopped.lock().unwrap(), 1);
         // URL only and nothing answers
-        let url_only = DevServer {
-            command: String::new(),
-            ..server.clone()
-        };
+        let url_only = server("http://localhost:5173", vec![]);
         let Err((code, _)) = bring_up(&fake(None, None), dir.path(), &url_only, &log, READY_WAIT, &go) else {
             panic!("should fail")
         };
@@ -542,7 +968,7 @@ mod tests {
         // Dừng while waiting
         let stopped = AtomicBool::new(true);
         let waiting = fake(None, None);
-        let Err((code, _)) = bring_up(&waiting, dir.path(), &server, &log, READY_WAIT, &stopped) else {
+        let Err((code, _)) = bring_up(&waiting, dir.path(), &one, &log, READY_WAIT, &stopped) else {
             panic!("should stop")
         };
         assert_eq!(code, "step.stopped");
