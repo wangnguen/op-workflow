@@ -6,7 +6,7 @@ import { useNow } from "../../shared/hooks";
 import { modelText } from "../../shared/models";
 import { Icon } from "../../shared/ui/Icon";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
-import { runMs } from "./runs";
+import { runMs, showsDenials } from "./runs";
 import { TestsSection } from "./TestsSection";
 
 const t = vi.flow.progress;
@@ -23,7 +23,12 @@ interface Props {
   onOpenPath: (path: string) => void;
 }
 
-const ICON: Record<RunSummary["state"], StepState> = { running: "running", done: "done", failed: "failed" };
+const ICON: Record<RunSummary["state"], StepState> = {
+  running: "running",
+  done: "done",
+  failed: "failed",
+  waiting: "waitingUser",
+};
 
 /** Tiến trình: one row per run of a step (time, duration, cost, model, result in one line), the
  *  commands the CLI refused with "Cho phép lệnh này", and the detailed log folded below. */
@@ -139,7 +144,7 @@ function RunRow({ run: r, index, now, busy, taskRunning, onChat, onAllow, onResu
             </button>
           )}
         </div>
-        {r.denials.length > 0 && (
+        {showsDenials(r) && (
           <div className="tl-denied" role="group" aria-label={t.deniedTitle}>
             <div className="tl-denied-head" title={t.deniedNote}>
               <Icon name="alert" size={12} />

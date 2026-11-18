@@ -178,7 +178,8 @@ pub enum AfterFix {
 pub enum WorkflowEvent {
     Start,
     StepSucceeded(StepKind),
-    /// An optional step the task turned on that this build cannot run yet: passed as "bỏ qua".
+    /// Passed as "bỏ qua": an optional step with nothing to run (Kiểm tra without a command), or
+    /// Review chốt when the code has not changed since Tự review (its result stands).
     StepSkipped(StepKind),
     StepFailed(StepKind),
     Retry(StepKind),
@@ -453,7 +454,9 @@ impl Workflow {
                 self.ensure_current(cur, step)?;
                 self.on_step_succeeded(step)
             }
-            (Phase::Running(cur), E::StepSkipped(step)) if step.is_optional() => {
+            (Phase::Running(cur), E::StepSkipped(step))
+                if step.is_optional() || step == StepKind::FinalReview =>
+            {
                 self.ensure_current(cur, step)?;
                 self.set(step, StepState::Skipped);
                 match step.next() {
@@ -560,9 +563,9 @@ impl Workflow {
             // `Running` here also means "ready to run": the caller checks no step process is
             // running. Only a step the task already reached can be run again.
             (phase, E::Reopen(step)) if phase != Phase::NotStarted => {
-                if step == StepKind::Intake
-                    || matches!(self.state_of(step), StepState::Pending | StepState::Skipped)
-                {
+                // a Review chốt passed because the code had not changed can still be run by hand
+                let skipped = self.state_of(step) == StepState::Skipped && step != StepKind::FinalReview;
+                if step == StepKind::Intake || self.state_of(step) == StepState::Pending || skipped {
                     return Err(DomainError::NotCurrentStep(step));
                 }
                 for later in StepKind::ALL.into_iter().filter(|s| s.index() >= step.index()) {
@@ -1090,6 +1093,30 @@ mod tests {
         assert_eq!(again.phase(), Phase::Running(StepKind::ReviewLocal));
         assert_eq!(again.state_of(StepKind::Harness), StepState::Skipped);
         assert!(again.apply(E::StepSkipped(StepKind::ReviewLocal)).is_err());
+    }
+
+    /// Review chốt is passed when the code has not changed since Tự review; the user can still
+    /// run it by hand.
+    #[test]
+    fn final_review_can_be_passed_and_run_again_by_hand() {
+        let mut wf = Workflow::default();
+        wf.apply(E::Start).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Intake)).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Analyze)).unwrap();
+        wf.apply(E::PlanApproved).unwrap();
+        wf.apply(E::StepSucceeded(StepKind::Implement)).unwrap();
+        wf.apply(E::ReviewFinished { open: 0 }).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::CrossReview));
+        wf.apply(E::ReviewFinished { open: 0 }).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
+        wf.apply(E::StepSkipped(StepKind::FinalReview)).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::PushSummary));
+        assert_eq!(wf.state_of(StepKind::FinalReview), StepState::Skipped);
+        // other skipped steps stay closed, this one opens again
+        assert!(wf.clone().apply(E::Reopen(StepKind::Checks)).is_err());
+        wf.apply(E::Reopen(StepKind::FinalReview)).unwrap();
+        assert_eq!(wf.phase(), Phase::Running(StepKind::FinalReview));
+        assert_eq!(wf.state_of(StepKind::PushSummary), StepState::Pending);
     }
 
     /// A harness that FAILs and a browser test with NG cases stop at the findings gate like a

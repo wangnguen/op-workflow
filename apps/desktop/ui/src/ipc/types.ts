@@ -768,7 +768,8 @@ export interface LogLine {
   text: string;
 }
 
-export type RunState = "running" | "done" | "failed";
+/** `waiting` = the AI stopped to ask the user; the step is not over. */
+export type RunState = "running" | "done" | "failed" | "waiting";
 
 /** One run of a step, for the Tiến trình tab (oldest first). */
 export interface RunSummary {

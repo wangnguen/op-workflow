@@ -545,7 +545,7 @@ export const vi = {
       label: "Các lần chạy của task",
       empty: "Chưa chạy bước nào.",
       intakeNote: "tạo nhánh và brief",
-      state: { running: "đang chạy", done: "xong", failed: "lỗi" },
+      state: { running: "đang chạy", done: "xong", failed: "lỗi", waiting: "dừng, chờ bạn" },
       tokens: (inTok: string, outTok: string) => `${inTok} token vào · ${outTok} ra`,
       details: "Chi tiết",
       chat: "Xem chat",

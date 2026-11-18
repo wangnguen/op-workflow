@@ -556,6 +556,17 @@ impl Store {
         Ok(())
     }
 
+    /// How an ended run turned out once the app read its answer: `waiting` (the AI stopped to
+    /// ask the user), or `failed` (the process ended well but its answer could not be used).
+    /// A run still going is left alone.
+    pub fn set_step_run_state(&self, id: i64, state: &str) -> StorageResult<()> {
+        self.conn.execute(
+            "UPDATE step_run SET state = ?2 WHERE id = ?1 AND state <> 'running'",
+            params![id, state],
+        )?;
+        Ok(())
+    }
+
     pub fn end_step_run(&self, id: i64, end: &StepRunEnd<'_>) -> StorageResult<()> {
         self.conn.execute(
             "UPDATE step_run SET state = ?2, session_id = COALESCE(?3, session_id), cost_usd = ?4,
@@ -594,10 +605,12 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Finished step runs of every task, oldest first (Settings shows cost and time per step).
+    /// Finished step runs of every task, oldest first (Settings shows cost and time per step). A
+    /// run that stopped to ask the user ran in full too.
     pub fn done_step_runs(&self) -> StorageResult<Vec<StepRunRow>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {STEP_RUN_COLUMNS} FROM step_run WHERE state = 'done' AND ended_at IS NOT NULL ORDER BY id"
+            "SELECT {STEP_RUN_COLUMNS} FROM step_run WHERE state IN ('done', 'waiting') AND ended_at IS NOT NULL \
+             ORDER BY id"
         ))?;
         let rows = stmt.query_map([], step_run_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -826,6 +839,13 @@ mod tests {
             )
             .unwrap();
         store.set_step_run_note(id, "plan: 2 file sẽ sửa").unwrap();
+        // a run still going keeps "running"; an ended one takes what its answer meant
+        store.set_step_run_state(open, "waiting").unwrap();
+        assert_eq!(store.step_runs(187716).unwrap()[1].state, "running");
+        store.set_step_run_state(id, "waiting").unwrap();
+        assert_eq!(store.step_runs(187716).unwrap()[0].state, "waiting");
+        assert_eq!(store.done_step_runs().unwrap().len(), 1);
+        store.set_step_run_state(id, "done").unwrap();
         assert_eq!(store.fail_unfinished_runs("2026-11-14T10:00:00Z").unwrap(), 1);
         let runs = store.step_runs(187716).unwrap();
         assert_eq!(runs[0].session_id.as_deref(), Some("s-1"));

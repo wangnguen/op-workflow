@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RunSummary } from "../../ipc/types";
-import { chatRun, lastEnded, openDenials, outputHead, runMs } from "./runs";
+import { chatRun, lastEnded, openDenials, outputHead, runMs, showsDenials } from "./runs";
 
 const run = (over: Partial<RunSummary>): RunSummary => ({
   id: 1,
@@ -41,6 +41,14 @@ describe("Tiến trình and Chat helpers", () => {
       ],
     });
     expect(openDenials(r)).toBe(2);
+  });
+
+  it("shows refused commands only when the run did not end well", () => {
+    const refused = [{ tool: "Bash", input: "ls", chained: false, rules: [{ rule: "ls *", allowed: false }] }];
+    expect(showsDenials(run({ denials: refused }))).toBe(false);
+    expect(showsDenials(run({ denials: refused, state: "failed" }))).toBe(true);
+    expect(showsDenials(run({ denials: refused, state: "waiting" }))).toBe(true);
+    expect(showsDenials(run({ state: "failed" }))).toBe(false);
   });
 
   it("peeks at the first lines of a tool result", () => {

@@ -178,6 +178,17 @@ struct Saved {
     picked: Vec<StepKind>,
     /// "Tôi code xong" asked for the review: run it after Kiểm tra even without "Tự chạy".
     review_after_checks: bool,
+    /// The user wrote the code by hand ("Tôi code xong"): no code session for Tự review to go on
+    /// in (the session there is the analysis's).
+    coded_by_hand: bool,
+    /// The change as Tự review last saw it ([`change_mark`]): Review chốt is passed while the
+    /// code is still the same.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reviewed_change: Option<String>,
+    /// What Kiểm tra said the last time it ran (its own step, or again after a Sửa lỗi), for the
+    /// push summary's `## Testing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checks_note: Option<String>,
     /// Harness (step 5): what the AI built and how it ran last.
     harness: Option<HarnessState>,
     /// Test trình duyệt (step 10): how it went last.
@@ -1642,7 +1653,8 @@ impl Flow {
             log: entry.log.iter().cloned().collect(),
             runs: {
                 let allowed = ctx.repo_config().allow_bash;
-                runs.iter()
+                let mut list: Vec<RunSummary> = runs
+                    .iter()
                     .filter_map(|r| {
                         run_summary(
                             r,
@@ -1652,7 +1664,16 @@ impl Flow {
                             &allowed,
                         )
                     })
-                    .collect()
+                    .collect();
+                // only the run whose question is still open waits; one the user answered is over
+                let asking = entry.saved.workflow.phase() == Phase::Gate(GateKind::AgentQuestion);
+                let last = list.len().saturating_sub(1);
+                for (i, r) in list.iter_mut().enumerate() {
+                    if r.state == RunState::Waiting && !(asking && i == last) {
+                        r.state = RunState::Done;
+                    }
+                }
+                list
             },
             cost_usd: runs.iter().filter_map(|r| r.cost_usd).sum(),
             // the facade fills this from OpenProject and the last issue read
@@ -1870,6 +1891,7 @@ fn run_summary(
     let state = match row.state.as_str() {
         "done" => RunState::Done,
         "running" => RunState::Running,
+        "waiting" => RunState::Waiting,
         _ => RunState::Failed,
     };
     Some(RunSummary {
@@ -2323,6 +2345,7 @@ fn apply_action(
         FlowAction::SelfCodeDone => {
             event(entry, E::SelfCodeDone)?;
             entry.saved.review_after_checks = true;
+            entry.saved.coded_by_hand = true;
             push_log(
                 entry,
                 Some(StepKind::Implement),
@@ -2443,6 +2466,10 @@ fn apply_action(
                 }
                 if step == StepKind::Analyze {
                     entry.saved.feedback = None;
+                }
+                // asked for by hand: Review chốt runs even on code Tự review already saw
+                if step == StepKind::FinalReview {
+                    entry.saved.reviewed_change = None;
                 }
             }
             entry.saved.finished = false;
@@ -3042,6 +3069,16 @@ impl Inner {
         });
         if let (Some(id), Ok(store)) = (early.filter(|_| !early_note.is_empty()), self.store.lock()) {
             let _ = store.set_step_run_note(id, &early_note);
+        }
+        // the row tells how the step went, not only how the process ended: the AI stopped to ask,
+        // or the step failed after a clean exit (an answer the app could not use)
+        let row_state = match &result {
+            Ok(done) if matches!(done.event, WorkflowEvent::AgentAsked(_)) => Some("waiting"),
+            Err(_) => Some("failed"),
+            Ok(_) => None,
+        };
+        if let (Some(id), Some(state), Ok(store)) = (early, row_state, self.store.lock()) {
+            let _ = store.set_step_run_state(id, state);
         }
         // Dừng: the run's session, for "Chạy tiếp"
         let stopped_run = match &result {
@@ -4058,6 +4095,8 @@ fn run_checks(
                 "Bạn đã dừng bước này. Bấm Thử lại để chạy lại.",
             ));
         }
+        // the latest round is where the code stands now (the push summary reports it)
+        inner.with_saved(wp_id, |s| s.checks_note = Some(note.clone()));
         inner.log(
             wp_id,
             Some(step),
@@ -4188,6 +4227,151 @@ fn browser_profile(inner: &Inner, ctx: &TaskCtx, repo: &Path) -> PathBuf {
         Some(data) => data.join("browser-profiles").join(name),
         None => ctx.task_dir.join(browsertest::DIR).join("profile"),
     }
+}
+
+/// Review chốt passed because Tự review saw this very code.
+const FINAL_REVIEW_KEPT: &str = "bỏ qua: code không đổi từ lúc Tự review xong, giữ kết quả Tự review";
+
+/// FNV-1a 64, fed piece by piece.
+fn fnv(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Untracked files bigger than this count by size and time only (build output nobody ignored).
+const MARK_READ_BYTES: u64 = 8 * 1024 * 1024;
+
+/// A short mark of the task's change: the fork point of `base`, the diff of the tracked files
+/// and every untracked file's name and bytes. The same mark = the same code. `None` when git
+/// cannot tell (then nothing is passed on the strength of it).
+fn change_mark(repo: &Path, base: &str) -> Option<String> {
+    let git = Git::new(repo);
+    let fork = git.merge_base(base, "HEAD").ok()?;
+    let diff = git
+        .run(&[
+            "--no-optional-locks",
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--binary",
+            &fork,
+            "--",
+        ])
+        .ok()?;
+    let listed = git
+        .run(&[
+            "--no-optional-locks",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .ok()?;
+    let mut hash = fnv(
+        fnv(fnv(0xcbf2_9ce4_8422_2325, fork.as_bytes()), b"\0"),
+        diff.as_bytes(),
+    );
+    let mut names: Vec<&str> = listed.split('\0').filter(|n| !n.is_empty()).collect();
+    names.sort_unstable();
+    for name in names {
+        hash = fnv(fnv(fnv(hash, b"\0"), name.as_bytes()), b"\0");
+        let file = repo.join(name);
+        hash = match std::fs::metadata(&file) {
+            Ok(m) if m.len() > MARK_READ_BYTES => {
+                let at = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                fnv(hash, format!("{}@{at}", m.len()).as_bytes())
+            }
+            Ok(_) => fnv(hash, &std::fs::read(&file).unwrap_or_default()),
+            Err(_) => fnv(hash, b"?"),
+        };
+    }
+    Some(format!("{hash:016x}"))
+}
+
+/// After Tự review: remember the change it saw.
+fn mark_reviewed(inner: &Inner, wp_id: u64, step: StepKind, repo: &Path, base: &str) {
+    if step == StepKind::ReviewLocal {
+        let mark = change_mark(repo, base);
+        inner.with_saved(wp_id, |s| s.reviewed_change = mark);
+    }
+}
+
+/// Review chốt can be passed: Tự review saw this very code (any later fix, by any step or by
+/// hand, changes the mark).
+fn unchanged_since_self_review(inner: &Inner, wp_id: u64, repo: &Path, base: &str) -> bool {
+    let seen = inner.with_saved(wp_id, |s| s.reviewed_change.clone()).flatten();
+    seen.is_some_and(|seen| change_mark(repo, base).as_deref() == Some(seen.as_str()))
+}
+
+/// What the app really ran on the change, one line each, for the push summary's `## Testing`.
+fn checked_lines(s: &mut Saved) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(note) = s.checks_note.as_deref().filter(|n| !n.trim().is_empty()) {
+        lines.push(format!(
+            "Kiểm tra (type / lint / format on the lines the task changed): {note}"
+        ));
+    }
+    let names = |cases: Vec<&str>| cases.join(", ");
+    if let Some(h) = s
+        .harness
+        .as_ref()
+        .filter(|h| s.workflow.uses(StepKind::Harness) && h.runs > 0)
+    {
+        let verdict = if h.passed { "PASS" } else { "FAIL" };
+        let mut line = format!("Harness (a throwaway test outside the repo, run by the app): {verdict}");
+        if h.cases.is_empty() {
+            line.push_str(" (by exit code only)");
+        } else {
+            let ok = h.cases.iter().filter(|c| c.ok).count();
+            line.push_str(&format!(" {ok}/{}", h.cases.len()));
+        }
+        let failed: Vec<&str> = h
+            .cases
+            .iter()
+            .filter(|c| !c.ok)
+            .map(|c| c.name.as_str())
+            .collect();
+        if !failed.is_empty() {
+            line.push_str(&format!("; failed: {}", names(failed)));
+        }
+        lines.push(line);
+    }
+    if let Some(b) = s
+        .browser
+        .as_ref()
+        .filter(|b| s.workflow.uses(StepKind::BrowserTest) && b.runs > 0)
+    {
+        let tested = b.cases.iter().filter(|c| !c.untested).count();
+        let ok = b.cases.iter().filter(|c| c.ok && !c.untested).count();
+        let mut line = format!("Browser test (an AI used the running app in Chrome): OK {ok}/{tested}");
+        let ng: Vec<&str> = b
+            .cases
+            .iter()
+            .filter(|c| !c.ok && !c.untested)
+            .map(|c| c.name.as_str())
+            .collect();
+        let untested: Vec<&str> = b
+            .cases
+            .iter()
+            .filter(|c| c.untested)
+            .map(|c| c.name.as_str())
+            .collect();
+        if !ng.is_empty() {
+            line.push_str(&format!("; NG: {}", names(ng)));
+        }
+        if !untested.is_empty() {
+            line.push_str(&format!("; not tested: {}", names(untested)));
+        }
+        lines.push(line);
+    }
+    lines
 }
 
 /// The task's scratch folder (`<data dir>/scratch/<task>`): outside the repo and outside
@@ -4951,17 +5135,25 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             let code = code_job(claim, resume, &[], budget, &allowed, repo, timeout, prompt);
             let r = inner.run_ai(ctx, step, &code, claim)?;
             set_session(&r.session);
-            if note.is_some() {
-                inner.with_saved(wp_id, |s| s.note = None);
-            }
+            inner.with_saved(wp_id, |s| {
+                s.note = None;
+                s.coded_by_hand = false;
+            });
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Implement),
                 note: format!("{}{}", change_note(repo), denied_note(r.denials)),
                 cost: r.cost,
             })
         }
+        // Review chốt: the code is still what Tự review saw, so its result stands
+        StepKind::FinalReview if unchanged_since_self_review(inner, wp_id, repo, &base) => Ok(Done {
+            event: E::StepSkipped(StepKind::FinalReview),
+            note: FINAL_REVIEW_KEPT.into(),
+            cost: None,
+        }),
         StepKind::ReviewLocal | StepKind::FinalReview if codex => {
             // Codex cannot run the repo's /review-local: the app's review prompt, read only
+            let plan = ctx.read(PLAN_FILE).unwrap_or_default();
             let raw = codex_review(
                 inner,
                 ctx,
@@ -4969,9 +5161,11 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 &format!("codex-{}", step_key(step)),
                 &base,
                 &brief,
+                &plan,
             )?;
             let findings = inner.merge(ctx, step, 0, "codex", &raw)?;
             let (event, note) = review_event(step, &findings, &raw);
+            mark_reviewed(inner, wp_id, step, repo, &base);
             Ok(Done {
                 event,
                 note,
@@ -4984,23 +5178,53 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .join("commands")
                 .join("review-local.md")
                 .is_file();
+            let plan = ctx.read(PLAN_FILE).unwrap_or_default();
+            // Tự review goes on in the code session, like /review-local typed right after coding:
+            // it knows the task and why the code is so. Review chốt, code written by hand and
+            // code another AI wrote get a fresh session.
+            let by_hand = inner.with_saved(wp_id, |s| s.coded_by_hand).unwrap_or_default();
+            let resume = session
+                .as_deref()
+                .filter(|_| step == StepKind::ReviewLocal && !by_hand);
+            let path = |p: &Path| p.to_string_lossy().into_owned();
+            let (dir, brief_file, plan_file) = (
+                path(&ctx.task_dir),
+                path(&ctx.task_dir.join(BRIEF_FILE)),
+                path(&ctx.task_dir.join(PLAN_FILE)),
+            );
+            let task = claude::TaskFiles {
+                dir: &dir,
+                brief: &brief_file,
+                plan: &plan_file,
+            };
             let (args, stdin, source) = if has_command {
-                (claude::review_local_args(&base, budget), None, "review-local")
+                (
+                    claude::review_local_args(&base, budget, resume, Some(task)),
+                    None,
+                    "review-local",
+                )
             } else {
                 (
-                    claude::review_args(budget),
-                    Some(prompts::review(&base, &brief)),
+                    claude::review_args(budget, resume),
+                    Some(prompts::review(&base, &brief, &plan)),
                     "claude",
                 )
             };
             let r = inner.run_claude(ctx, step, &job(Provider::Claude, cl(args), stdin), claim)?;
+            if resume.is_some() {
+                set_session(&r.session_id);
+            }
             let raw = text::findings_from_text(&r.text).ok_or_else(unreadable_review)?;
             save_review_notes(ctx, step, &r.text);
             let findings = inner.merge(ctx, step, 0, source, &raw)?;
             let (event, note) = review_event(step, &findings, &raw);
+            mark_reviewed(inner, wp_id, step, repo, &base);
             Ok(Done {
                 event,
-                note,
+                note: match resume {
+                    Some(_) => format!("{note} (trong phiên Viết code)"),
+                    None => note,
+                },
                 cost: Some(r.cost_usd),
             })
         }
@@ -5106,15 +5330,25 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         StepKind::BrowserTest => run_browser_test(inner, ctx, claim, repo, &brief),
         StepKind::CrossReview => {
             let round = inner.round_of(wp_id);
+            // a fresh session that checks the change against the task as well as the code
+            let plan = ctx.read(PLAN_FILE).unwrap_or_default();
             let (raw, source, cost) = if codex {
-                let raw = codex_review(inner, ctx, claim, &format!("codex-r{round}"), &base, &brief)?;
+                let raw = codex_review(
+                    inner,
+                    ctx,
+                    claim,
+                    &format!("codex-r{round}"),
+                    &base,
+                    &brief,
+                    &plan,
+                )?;
                 (raw, "codex", None)
             } else {
-                let stdin = Some(prompts::review(&base, &brief));
+                let stdin = Some(prompts::review(&base, &brief, &plan));
                 let r = inner.run_claude(
                     ctx,
                     step,
-                    &job(Provider::Claude, cl(claude::review_args(budget)), stdin),
+                    &job(Provider::Claude, cl(claude::review_args(budget, None)), stdin),
                     claim,
                 )?;
                 let raw = text::findings_from_text(&r.text).ok_or_else(unreadable_review)?;
@@ -5141,9 +5375,15 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .join("commands")
                 .join("push-summary.md")
                 .is_file();
+            // the app's prompt knows the task and what was really tested on it
+            let app_prompt = || {
+                let plan = ctx.read(PLAN_FILE).unwrap_or_default();
+                let checked = inner.with_saved(wp_id, checked_lines).unwrap_or_default();
+                prompts::push_summary(&base, issue, &brief, &plan, &checked)
+            };
             let push = if codex {
                 // Codex cannot run the repo's /push-summary: the app's prompt
-                let stdin = Some(prompts::push_summary(&base, issue));
+                let stdin = Some(app_prompt());
                 job(Provider::Codex, codex_cut(cx(codex::push_args())), stdin)
             } else if has_command {
                 job(
@@ -5152,7 +5392,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     None,
                 )
             } else {
-                let stdin = Some(prompts::push_summary(&base, issue));
+                let stdin = Some(app_prompt());
                 job(
                     Provider::Claude,
                     cl(claude::push_summary_default_args(budget)),
@@ -5189,6 +5429,7 @@ fn codex_review(
     name: &str,
     base: &str,
     brief: &str,
+    plan: &str,
 ) -> Result<Vec<RawFinding>, FlowError> {
     let step = claim.step;
     let (_, timeout, _) = limits(step, &ctx.config);
@@ -5216,7 +5457,7 @@ fn codex_review(
         agent: Provider::Codex,
         args,
         cwd: repo,
-        stdin: Some(prompts::cross_review(base, brief)),
+        stdin: Some(prompts::cross_review(base, brief, plan)),
         timeout,
     };
     let (answer, _) = inner.run_codex(ctx, step, &job, claim)?;
@@ -6407,6 +6648,134 @@ mod tests {
                 .count(),
             0
         );
+        // code written by hand: no code session to go on in, so Tự review starts fresh (the
+        // session saved is the analysis's) with the brief and the plan
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let review = jobs.last().unwrap();
+        assert!(flag(review, "--resume").is_none(), "{review:?}");
+        assert!(review.stdin.as_deref().unwrap().contains("<plan>"));
+        assert!(
+            !d.runs
+                .last()
+                .unwrap()
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("phiên Viết code")
+        );
+    }
+
+    /// The mark Review chốt compares: any change to the code moves it, files git ignores do not.
+    #[test]
+    fn the_change_mark_follows_the_code() {
+        let Some(s) = setup() else { return };
+        let mark = || change_mark(&s.repo, "main").unwrap();
+        let clean = mark();
+        assert_eq!(mark(), clean);
+        std::fs::write(s.repo.join("a.ts"), "export const a = 2;\n").unwrap();
+        let edited = mark();
+        assert_ne!(edited, clean);
+        std::fs::write(s.repo.join("b.ts"), "export const b = 1;\n").unwrap();
+        let added = mark();
+        assert_ne!(added, edited);
+        std::fs::write(s.repo.join("b.ts"), "export const b = 2;\n").unwrap();
+        assert_ne!(mark(), added);
+        std::fs::write(s.repo.join("b.ts"), "export const b = 1;\n").unwrap();
+        assert_eq!(mark(), added);
+        // what git ignores is not the task's code
+        std::fs::write(s.repo.join(".gitignore"), "dist/\n").unwrap();
+        let ignored = mark();
+        std::fs::create_dir_all(s.repo.join("dist")).unwrap();
+        std::fs::write(s.repo.join("dist").join("out.js"), "x").unwrap();
+        assert_eq!(mark(), ignored);
+        // no base to compare with: nothing is passed on it
+        assert!(change_mark(&s.repo, "no-such-branch").is_none());
+    }
+
+    /// Tự review's high is fixed, so the code moved after it and Review chốt runs. Its answer has
+    /// no findings block: the step fails, and Tiến trình shows a failed run although the process
+    /// ended well.
+    #[test]
+    fn final_review_runs_after_a_fix_and_an_unreadable_answer_is_a_failed_run() {
+        let Some(s) = setup() else { return };
+        let (flow, _) = flow_with(&s, false, happy("Mọi thứ ổn."));
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        let mut d = run(&flow, &ctx, FlowAction::Run);
+        let mut fixed = false;
+        for _ in 0..14 {
+            let action = match (d.status, d.gate.as_ref().map(|g| g.kind)) {
+                (FlowStatus::Gate, Some(GateKind::Error)) => break,
+                (FlowStatus::Gate, Some(GateKind::PlanReview)) => FlowAction::ApprovePlan,
+                (FlowStatus::Gate, Some(GateKind::Findings)) if !fixed => {
+                    fixed = true;
+                    pick_all(&flow, &ctx);
+                    FlowAction::PickFindings { fix: true }
+                }
+                (FlowStatus::Gate, Some(GateKind::Findings)) => FlowAction::PickFindings { fix: false },
+                (FlowStatus::Gate, Some(GateKind::AfterFix)) => FlowAction::AfterFix {
+                    choice: AfterFix::Next,
+                },
+                (FlowStatus::Ready, _) => FlowAction::Run,
+                other => panic!("{other:?}: {:?}", d.error),
+            };
+            d = run(&flow, &ctx, action);
+        }
+        assert!(fixed);
+        assert_eq!(d.current, Some(StepKind::FinalReview), "{:?}", d.runs);
+        assert_eq!(d.error.as_ref().map(|e| e.code.as_str()), Some("findings.parse"));
+        let last = d.runs.last().unwrap();
+        assert_eq!((last.step, last.state), (StepKind::FinalReview, RunState::Failed));
+    }
+
+    /// The push summary's `## Testing` is built from what the app really ran.
+    #[test]
+    fn the_push_summary_hears_only_what_really_ran() {
+        let mut s = Saved::default();
+        assert!(checked_lines(&mut s).is_empty());
+        s.checks_note = Some("tsc, eslint: không có lỗi".into());
+        s.workflow.set_uses(StepKind::Harness, true);
+        s.workflow.set_uses(StepKind::BrowserTest, true);
+        let case = |name: &str, ok: bool| harness::Case {
+            name: name.into(),
+            ok,
+            detail: String::new(),
+        };
+        s.harness = Some(HarnessState {
+            passed: false,
+            cases: vec![case("2. rỗng", false), case("1. có org", true)],
+            runs: 2,
+            ..HarnessState::default()
+        });
+        let shot = |name: &str, ok: bool, untested: bool| browsertest::Case {
+            name: name.into(),
+            ok,
+            detail: String::new(),
+            screenshot: None,
+            file: None,
+            untested,
+        };
+        s.browser = Some(BrowserState {
+            cases: vec![
+                shot("1. mở", true, false),
+                shot("2. xoá", false, false),
+                shot("3. đổi role", false, true),
+            ],
+            runs: 1,
+            ..BrowserState::default()
+        });
+        let lines = checked_lines(&mut s);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].ends_with("tsc, eslint: không có lỗi"));
+        assert!(lines[1].contains("FAIL 1/2; failed: 2. rỗng"), "{}", lines[1]);
+        assert!(
+            lines[2].contains("OK 1/2; NG: 2. xoá; not tested: 3. đổi role"),
+            "{}",
+            lines[2]
+        );
+        // a test step the task turned off says nothing, even with an old result
+        s.workflow.set_uses(StepKind::BrowserTest, false);
+        assert_eq!(checked_lines(&mut s).len(), 2);
     }
 
     #[test]
@@ -6617,23 +6986,48 @@ mod tests {
 
         let jobs = fake.jobs.lock().unwrap().clone();
         let codex: Vec<&Job> = jobs.iter().filter(|j| j.agent == Provider::Codex).collect();
-        // Tự review, Review chéo, Review chốt, Push summary
-        assert_eq!(codex.len(), 4, "{jobs:#?}");
-        for review in &codex[..3] {
+        // Tự review, Review chéo, Push summary: Review chốt was passed, the code had not
+        // changed since Tự review
+        assert_eq!(codex.len(), 3, "{jobs:#?}");
+        let final_state = d.steps[StepKind::FinalReview.index() as usize - 1].state;
+        assert_eq!(final_state, StepState::Skipped);
+        assert!(
+            d.log.iter().any(|l| l.text.contains(FINAL_REVIEW_KEPT)),
+            "{:?}",
+            d.log
+        );
+        for review in &codex[..2] {
             assert!(review.args.iter().any(|a| a == "--output-schema"));
             assert!(!review.args.iter().any(|a| a == "/review-local"));
-            assert!(review.stdin.as_deref().unwrap().contains("matching the schema"));
+            let prompt = review.stdin.as_deref().unwrap();
+            assert!(prompt.contains("matching the schema") && prompt.contains("<plan>"));
         }
         assert_eq!(flag(codex[0], "--sandbox").as_deref(), Some("read-only"));
-        assert_eq!(flag(codex[2], "--sandbox").as_deref(), Some("workspace-write"));
         // each review keeps its own answer file
         let out = |j: &Job| flag(j, "-o").unwrap();
         assert!(out(codex[0]).ends_with("codex-reviewLocal.json"));
         assert!(out(codex[1]).ends_with("codex-r1.json"));
-        assert!(out(codex[2]).ends_with("codex-finalReview.json"));
-        let push_job = codex[3];
+        let push_job = codex[2];
         assert!(push_job.args.iter().any(|a| a == "--ephemeral"));
-        assert!(push_job.stdin.as_deref().unwrap().contains("(#279)"));
+        let push_prompt = push_job.stdin.as_deref().unwrap();
+        assert!(push_prompt.contains("(#279)") && push_prompt.contains("<plan>"));
+        assert!(push_prompt.contains("What the app ran on this change:\n- "));
+        // asked for by hand, Review chốt runs on the same code, in the mode Settings picked
+        let again = FlowAction::Reopen {
+            step: Some(StepKind::FinalReview),
+            note: None,
+        };
+        flow.act(ctx.clone(), again).unwrap();
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(d.status, FlowStatus::AwaitingPush, "{:?}", d.error);
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let codex: Vec<&Job> = jobs.iter().filter(|j| j.agent == Provider::Codex).collect();
+        let final_review = codex[3];
+        assert_eq!(
+            flag(final_review, "--sandbox").as_deref(),
+            Some("workspace-write")
+        );
+        assert!(out(final_review).ends_with("codex-finalReview.json"));
         assert!(
             d.log
                 .iter()
@@ -7263,6 +7657,16 @@ mod tests {
                 .iter()
                 .any(|st| st.kind == StepKind::BrowserTest && st.state == StepState::WaitingUser)
         );
+        // its row in Tiến trình says "dừng, chờ bạn", not "xong"
+        let asked = d.runs.iter().rfind(|r| r.step == StepKind::BrowserTest).unwrap();
+        assert_eq!(asked.state, RunState::Waiting);
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text.starts_with("Test trình duyệt dừng, chờ bạn: ")),
+            "{:?}",
+            d.log
+        );
         // nothing else is accepted at this gate
         assert_eq!(
             flow.act(ctx.clone(), FlowAction::ApprovePlan).unwrap_err().code,
@@ -7300,6 +7704,11 @@ mod tests {
                 .note
                 .as_deref()
                 .is_some_and(|n| n.starts_with("AI hỏi: Đăng nhập"))
+        );
+        // answered: that run is over now, the next one finished the test
+        assert_eq!(
+            (run_rows[0].state, run_rows[1].state),
+            (RunState::Done, RunState::Done)
         );
     }
 
@@ -8093,7 +8502,17 @@ mod tests {
 
         // the review is clean, then Codex keeps its thread for `codex resume`
         let d = run(&flow, &ctx, FlowAction::Run);
-        assert_eq!(d.runs[2].note.as_deref(), Some("không thấy lỗi"));
+        // Tự review goes on in the code session, read only, with the task's brief and plan
+        assert_eq!(
+            d.runs[2].note.as_deref(),
+            Some("không thấy lỗi (trong phiên Viết code)")
+        );
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let review = &jobs[2];
+        assert_eq!(flag(review, "--resume").as_deref(), Some("s-1"));
+        assert_eq!(flag(review, "--tools").as_deref(), Some("Read,Grep,Glob,Bash"));
+        let prompt = review.stdin.as_deref().unwrap();
+        assert!(prompt.contains("<plan>") && prompt.contains("a step of the plan left out"));
         let d = run(&flow, &ctx, FlowAction::Run);
         let cross = &d.runs[3];
         assert_eq!(cross.agent, AgentKind::Codex);
@@ -8215,13 +8634,13 @@ mod tests {
         assert_eq!((kept[1].id.as_str(), kept[1].ai_decides), ("q2", true));
         let job = Job {
             agent: Provider::Claude,
-            args: claude::review_local_args("main", 1.0),
+            args: claude::review_local_args("main", 1.0, Some("s-1"), None),
             cwd: PathBuf::new(),
             stdin: None,
             timeout: Duration::from_secs(1),
         };
         let prompt = prompt_of(&job);
-        assert!(prompt.starts_with("/review-local\n\nNon-interactive run."));
+        assert!(prompt.starts_with("/review-local Non-interactive run."));
     }
 
     #[test]

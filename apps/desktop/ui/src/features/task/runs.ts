@@ -27,6 +27,12 @@ export function chatRun(runs: RunSummary[], picked?: number): RunSummary | undef
 }
 
 /** Refused calls whose suggested rules are not all allowed yet (they need the user). */
+/** The refused commands are shown when the run did not end well (they may be why); after a
+ *  clean run the AI found another way, and the Chat tab still marks each one "Bị chặn". */
+export function showsDenials(run: Pick<RunSummary, "state" | "denials">): boolean {
+  return run.denials.length > 0 && run.state !== "done";
+}
+
 export function openDenials(run: RunSummary): number {
   return run.denials.filter((d) => d.rules.length === 0 || d.rules.some((r) => !r.allowed)).length;
 }

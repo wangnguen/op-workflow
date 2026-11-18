@@ -1233,6 +1233,8 @@ pub enum RunState {
     Running,
     Done,
     Failed,
+    /// The AI stopped to ask the user (question gate): the step is not over.
+    Waiting,
 }
 
 /// One run of a step, for the Tiến trình tab (oldest first).
