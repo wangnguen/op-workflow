@@ -6,6 +6,7 @@
 //! fix in step 9, after which the test runs again.
 
 use opw_agents::text::{self, RawFinding};
+use opw_domain::finding::fingerprint;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -13,6 +14,10 @@ use serde_json::Value;
 pub const DIR: &str = "browser-test";
 /// Cases kept in the step's view.
 const CASES_SHOWN: usize = 40;
+/// Changes to real data kept in the step's view.
+const CHANGES_SHOWN: usize = 20;
+/// Title of the finding of an NG case: this, then the case's name.
+pub const NG_TITLE: &str = "Test trình duyệt NG: ";
 
 /// One case as the AI reported it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +30,10 @@ pub struct Case {
     pub screenshot: Option<String>,
     /// Repository file the case is about (for the finding).
     pub file: Option<String>,
+    /// The AI could not run it (no data, an action the page did not take, out of budget): not
+    /// an NG, nothing to fix; `detail` says why.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub untested: bool,
 }
 
 /// What the AI said at the end of the step (its last ```json block).
@@ -33,13 +42,69 @@ pub struct Answer {
     pub summary: String,
     pub url: String,
     pub cases: Vec<Case>,
+    /// Real data the AI changed while testing (where, and whether it undid it).
+    pub changes: Vec<String>,
 }
 
 impl Answer {
-    /// OK when every case is; no case at all is not a test.
+    /// OK when every case ran and is OK; no case at all is not a test.
     pub fn passed(&self) -> bool {
-        !self.cases.is_empty() && self.cases.iter().all(|c| c.ok)
+        !self.cases.is_empty() && self.cases.iter().all(|c| c.ok && !c.untested)
     }
+
+    /// Cases that ran and failed.
+    pub fn ng(&self) -> usize {
+        self.cases.iter().filter(|c| !c.ok && !c.untested).count()
+    }
+
+    /// Cases the AI could not run.
+    pub fn untested(&self) -> Vec<&Case> {
+        self.cases.iter().filter(|c| c.untested).collect()
+    }
+}
+
+/// The number a case's name starts with ("6. Breadcrumb…", "6) …", "Ca 6: …"): the AI words a
+/// case differently from one run to the next, but keeps the scenario's numbering.
+pub fn case_number(name: &str) -> Option<u32> {
+    let name = name.trim();
+    let rest = ["Ca ", "ca ", "Case ", "case "]
+        .iter()
+        .find_map(|p| name.strip_prefix(p))
+        .unwrap_or(name);
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let after = rest[digits.len()..].chars().next();
+    if digits.is_empty() || !matches!(after, None | Some('.' | ')' | ':' | ' ' | '-')) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The fingerprint of a finding this step reported: by the case's number when it has one (the
+/// same case worded differently next run is the same finding), else as any finding.
+pub fn fingerprint_of(r: &RawFinding) -> String {
+    match r.title.strip_prefix(NG_TITLE).and_then(case_number) {
+        Some(n) => fingerprint("browser", &format!("ca {n}")),
+        None => fingerprint(&r.file, &r.title),
+    }
+}
+
+/// Fingerprints of the cases the AI could not run: their findings from an earlier run are
+/// neither fixed nor confirmed.
+pub fn untested_fingerprints(answer: &Answer) -> Vec<String> {
+    answer
+        .untested()
+        .into_iter()
+        .map(|c| {
+            fingerprint_of(&RawFinding {
+                severity: String::new(),
+                file: c.file.clone().unwrap_or_else(|| "browser".into()),
+                line: None,
+                title: format!("{NG_TITLE}{}", c.name),
+                detail: String::new(),
+                suggestion: String::new(),
+            })
+        })
+        .collect()
 }
 
 fn string(v: &Value, key: &str) -> String {
@@ -104,29 +169,48 @@ pub fn answer(text: &str) -> Option<Answer> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .map(|c| Case {
-            name: string(c, "name"),
-            ok: c.get("ok").and_then(Value::as_bool).unwrap_or(false),
-            detail: string(c, "detail"),
-            screenshot: Some(string(c, "screenshot"))
-                .filter(|s| !s.is_empty() && std::path::Path::new(s).is_file()),
-            file: Some(string(c, "file")).filter(|f| !f.is_empty()),
+        .map(|c| {
+            let untested = c.get("untested").and_then(Value::as_bool).unwrap_or(false);
+            Case {
+                name: string(c, "name"),
+                ok: !untested && c.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                detail: string(c, "detail"),
+                screenshot: Some(string(c, "screenshot"))
+                    .filter(|s| !s.is_empty() && std::path::Path::new(s).is_file()),
+                file: Some(string(c, "file")).filter(|f| !f.is_empty()),
+                untested,
+            }
         })
         .filter(|c| !c.name.is_empty())
+        .collect();
+    let changes = v
+        .get("changes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
         .collect();
     Some(Answer {
         summary: string(&v, "summary"),
         url: string(&v, "url"),
         cases,
+        changes,
     })
 }
 
-/// NG cases as findings for the findings gate.
+/// At most [`CHANGES_SHOWN`] changes to real data.
+pub fn shown_changes(answer: &Answer) -> Vec<String> {
+    answer.changes.iter().take(CHANGES_SHOWN).cloned().collect()
+}
+
+/// NG cases as findings for the findings gate (a case not tested is not one).
 pub fn findings(answer: &Answer) -> Vec<RawFinding> {
     answer
         .cases
         .iter()
-        .filter(|c| !c.ok)
+        .filter(|c| !c.ok && !c.untested)
         .map(|c| {
             let mut detail = c.detail.clone();
             if let Some(shot) = &c.screenshot {
@@ -136,7 +220,7 @@ pub fn findings(answer: &Answer) -> Vec<RawFinding> {
                 severity: "high".into(),
                 file: c.file.clone().unwrap_or_else(|| "browser".into()),
                 line: None,
-                title: format!("Test trình duyệt NG: {}", c.name),
+                title: format!("{NG_TITLE}{}", c.name),
                 detail: detail.trim().to_owned(),
                 suggestion: String::new(),
             }
@@ -144,17 +228,30 @@ pub fn findings(answer: &Answer) -> Vec<RawFinding> {
         .collect()
 }
 
-/// "OK 4/4", "NG 1/4".
+/// "OK 4/4", "NG 1/4", "OK 4/4, 2 chưa test" (out of the cases that ran).
 pub fn tally(answer: &Answer) -> String {
+    let untested = answer.untested().len();
+    let ran = answer.cases.len() - untested;
+    if ran == 0 {
+        return format!("chưa test được ca nào ({untested} ca)");
+    }
     let ok = answer.cases.iter().filter(|c| c.ok).count();
-    let word = if answer.passed() { "OK" } else { "NG" };
-    format!("{word} {ok}/{}", answer.cases.len())
+    let word = if answer.ng() > 0 { "NG" } else { "OK" };
+    let mut out = format!("{word} {ok}/{ran}");
+    if untested > 0 {
+        out.push_str(&format!(", {untested} chưa test"));
+    }
+    out
 }
 
-/// At most [`CASES_SHOWN`] cases, NG ones first.
+/// At most [`CASES_SHOWN`] cases: NG first, then the ones not tested, then OK.
 pub fn shown(answer: &Answer) -> Vec<Case> {
     let mut cases = answer.cases.clone();
-    cases.sort_by_key(|c| c.ok);
+    cases.sort_by_key(|c| match (c.ok, c.untested) {
+        (false, false) => 0,
+        (_, true) => 1,
+        (true, false) => 2,
+    });
     cases.truncate(CASES_SHOWN);
     cases
 }
@@ -190,6 +287,54 @@ mod tests {
         assert_eq!(shown(&a)[0].name, "user chưa có org");
         assert!(answer("```json\n{\"result\":\"ok\"}\n```").is_none());
         assert!(!Answer::default().passed());
+    }
+
+    #[test]
+    fn a_case_not_tested_is_no_ng_and_the_same_case_keeps_its_finding() {
+        let text = "```json\n{\"result\":\"ng\",\"cases\":[\
+            {\"name\":\"1. Danh sách\",\"ok\":true},\
+            {\"name\":\"4. Xuất Excel\",\"ok\":false,\"detail\":\"không bắt được file\",\"untested\":true},\
+            {\"name\":\"6. Xoá hàng loạt\",\"ok\":false,\"untested\":true}],\
+            \"changes\":[\"Thêm giangtest_bl5 vào người nhận (chưa bấm 登録)\", \" \"]}\n```";
+        let a = answer(text).unwrap();
+        assert_eq!((a.ng(), a.untested().len()), (0, 2));
+        assert!(!a.passed());
+        assert!(findings(&a).is_empty());
+        assert_eq!(tally(&a), "OK 1/1, 2 chưa test");
+        assert_eq!(a.changes, ["Thêm giangtest_bl5 vào người nhận (chưa bấm 登録)"]);
+        // NG first, then not tested, then OK
+        assert_eq!(shown(&a)[0].name, "4. Xuất Excel");
+        assert_eq!(shown(&a)[2].name, "1. Danh sách");
+        let none = answer("```json\n{\"cases\":[{\"name\":\"x\",\"untested\":true}]}\n```").unwrap();
+        assert_eq!(tally(&none), "chưa test được ca nào (1 ca)");
+
+        // the same case worded otherwise next run is the same finding
+        let ng = |name: &str, file: &str| RawFinding {
+            severity: "high".into(),
+            file: file.into(),
+            line: None,
+            title: format!("{NG_TITLE}{name}"),
+            detail: String::new(),
+            suggestion: String::new(),
+        };
+        let a6 = fingerprint_of(&ng(
+            "6. Breadcrumb, xoá hàng loạt, đổi role: hiển thị lại",
+            "a.tsx",
+        ));
+        assert_eq!(
+            a6,
+            fingerprint_of(&ng("6. Breadcrumb/thư mục cha, xoá hàng loạt", "b.tsx"))
+        );
+        assert_eq!(untested_fingerprints(&a)[1], fingerprint_of(&ng("6) khác", "x")));
+        assert_ne!(a6, fingerprint_of(&ng("4. Xuất Excel", "a.tsx")));
+        // without a number: the name tells them apart, as before
+        assert_eq!(
+            fingerprint_of(&ng("chưa có org", "a.ts")),
+            fingerprint("a.ts", &format!("{NG_TITLE}chưa có org"))
+        );
+        assert_eq!(case_number("Ca 12: abc"), Some(12));
+        assert_eq!(case_number("3a. x"), None);
+        assert_eq!(case_number("abc"), None);
     }
 
     #[test]

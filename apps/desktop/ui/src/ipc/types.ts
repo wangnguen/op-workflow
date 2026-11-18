@@ -870,6 +870,9 @@ export interface DevServer {
   url: string;
   /** Run top to bottom (one `pnpm dev`, or an API then the web…); none = already running. */
   commands: DevCommand[];
+  /** "Cách vào chỗ test": how to reach the screen to test, in the user's words (the browser
+   *  test's prompt carries it); kept even without a URL */
+  howTo?: string;
 }
 
 /** One command: from `dir` (inside the repo, "" = its root), ready once `wait` answers (a port
@@ -963,6 +966,8 @@ export interface TestView {
   library?: string;
   /** browser test: the page the AI opened */
   url?: string;
+  /** browser test: real data the AI changed while testing (where; undone or not) */
+  changes?: string[];
 }
 
 export interface TestCase {
@@ -971,6 +976,8 @@ export interface TestCase {
   detail?: string;
   /** browser test: the screenshot of the case */
   screenshot?: string;
+  /** browser test: the AI could not run it (`detail` says why); not an NG */
+  untested?: boolean;
 }
 
 export type FlowAction =
@@ -986,7 +993,7 @@ export type FlowAction =
   | { type: "setUses"; step: StepKind; on: boolean }
   | { type: "selfCodeDone" }
   /** Test trình duyệt: the dev server the app starts (remembered for the repo); empty url = none */
-  | { type: "setDevServer"; url: string; commands: DevCommand[] }
+  | { type: "setDevServer"; url: string; commands: DevCommand[]; howTo?: string }
   /** question gate: the user did what the AI asked (or answers it); the step goes on */
   | { type: "answerAgent"; answer: string }
   /** findings gate: fix the picked findings, or go on without fixing */

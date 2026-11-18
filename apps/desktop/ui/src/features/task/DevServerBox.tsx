@@ -6,10 +6,12 @@ import { Icon } from "../../shared/ui/Icon";
 const t = vi.flow.devServer;
 /** At most this many commands (the Rust side checks it too). */
 export const MAX_COMMANDS = 5;
+/** Longest "Cách vào chỗ test" (characters; the Rust side checks it too). */
+export const MAX_HOW_TO = 2000;
 
 /** A row being edited, with a key that stays when rows above it go. */
 type Row = DevCommand & { key: number };
-type Draft = { url: string; commands: Row[] };
+type Draft = { url: string; commands: Row[]; howTo: string };
 let nextKey = 1;
 
 const row = (c: DevCommand): Row => ({ ...c, key: nextKey++ });
@@ -18,6 +20,7 @@ const emptyRow = (): Row => row({ command: "", dir: "", wait: "" });
 const toDraft = (s: DevServer): Draft => ({
   url: s.url,
   commands: s.commands.length ? s.commands.map(row) : [emptyRow()],
+  howTo: s.howTo ?? "",
 });
 const blank = (c: DevCommand) => !c.command.trim() && !c.wait.trim();
 
@@ -28,6 +31,7 @@ export function tidy(s: DevServer): DevServer {
     commands: s.commands
       .filter((c) => !blank(c))
       .map((c) => ({ command: c.command.trim(), dir: c.dir.trim(), wait: c.wait.trim() })),
+    howTo: (s.howTo ?? "").trim(),
   };
 }
 
@@ -51,6 +55,7 @@ export function waitOk(wait: string): boolean {
 /** The first thing to fix before the app can use what is typed (numbers as on screen). Only
  *  the last command may leave Chờ empty (= wait for the URL). */
 export function serverProblem(s: DevServer): string | undefined {
+  if ((s.howTo ?? "").trim().length > MAX_HOW_TO) return t.howToLong(MAX_HOW_TO);
   const url = urlProblem(s.url);
   if (url) return url;
   const filled = s.commands.map((c, i) => ({ c, n: i + 1 })).filter(({ c }) => !blank(c));
@@ -81,7 +86,7 @@ export function DevServerBox({
 }) {
   const proposed = d.proposals?.find((p) => p.step === "browserTest")?.devServer;
   const current = d.devServer;
-  const start: DevServer = current ?? proposed ?? { url: "", commands: [] };
+  const start: DevServer = current ?? proposed ?? { url: "", commands: [], howTo: "" };
   const [draft, setDraft] = useState<Draft>(() => toDraft(start));
   // what is in use changed (saved, cleared, a new analysis): show it (not on mount, so the rows
   // keep their keys and do not fade in twice)
@@ -94,7 +99,7 @@ export function DevServerBox({
   }, [startKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const problem = serverProblem(draft);
-  const changed = current ? !same(draft, current) : draft.url.trim() !== "";
+  const changed = current ? !same(draft, current) : draft.url.trim() !== "" || draft.howTo.trim() !== "";
   const ready = !disabled && changed && !problem;
   const save = () => onAction({ type: "setDevServer", ...tidy(draft) });
   const onEnter = (e: React.KeyboardEvent) => e.key === "Enter" && ready && save();
@@ -107,6 +112,10 @@ export function DevServerBox({
   const setUrl = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setDraft((d) => ({ ...d, url: value }));
+  };
+  const setHowTo = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setDraft((d) => ({ ...d, howTo: value }));
   };
   const addRow = () => setDraft((d) => ({ ...d, commands: [...d.commands, emptyRow()] }));
   const removeRow = (key: number) => setDraft((d) => ({ ...d, commands: d.commands.filter((r) => r.key !== key) }));
@@ -122,11 +131,13 @@ export function DevServerBox({
       return { ...d, commands };
     });
   const status = current
-    ? current.commands.length === 0
-      ? t.running
-      : d.devServerFromRepo
-        ? t.fromRepo
-        : t.inUse
+    ? !current.url
+      ? t.howToOnly
+      : current.commands.length === 0
+        ? t.running
+        : d.devServerFromRepo
+          ? t.fromRepo
+          : t.inUse
     : proposed
       ? t.proposed
       : t.none;
@@ -193,6 +204,19 @@ export function DevServerBox({
           />
         </label>
       </div>
+      <label className="dev-server-field dev-server-field--howto">
+        <span className="faint">{t.howTo}</span>
+        <textarea
+          className="input dev-server-howto"
+          value={draft.howTo}
+          rows={3}
+          placeholder={t.howToPlaceholder}
+          disabled={disabled}
+          aria-invalid={draft.howTo.trim().length > MAX_HOW_TO ? true : undefined}
+          onChange={setHowTo}
+        />
+        <span className="faint dev-server-howto-note">{t.howToNote}</span>
+      </label>
       <div className="dev-server-foot">
         <span className={problem ? "dev-server-note dev-server-note--warn" : "dev-server-note faint"}>{problem ?? t.note}</span>
         <button className="btn btn--ghost btn--sm" disabled={disabled || rows.length >= MAX_COMMANDS} title={t.addHint} onClick={addRow}>
@@ -203,7 +227,7 @@ export function DevServerBox({
             className="btn btn--ghost btn--sm"
             disabled={disabled}
             title={t.clearHint}
-            onClick={() => onAction({ type: "setDevServer", url: "", commands: [] })}
+            onClick={() => onAction({ type: "setDevServer", url: "", commands: [], howTo: "" })}
           >
             {t.clear}
           </button>

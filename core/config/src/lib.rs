@@ -474,17 +474,18 @@ pub fn save_dev_server(
             .cloned()
             .unwrap_or_else(|| repo.to_owned());
         let entry = object_at(repos, &key);
-        match server.filter(|s| !s.url.trim().is_empty()) {
+        match server.filter(|s| !s.url.trim().is_empty() || !s.how_to.trim().is_empty()) {
             Some(s) => {
                 let commands: Vec<serde_json::Value> = s
                     .commands
                     .iter()
                     .map(|c| serde_json::json!({"command": c.command.trim(), "dir": c.dir.trim(), "wait": c.wait.trim()}))
                     .collect();
-                entry.insert(
-                    "devServer".into(),
-                    serde_json::json!({"url": s.url.trim(), "commands": commands}),
-                );
+                let mut server = serde_json::json!({"url": s.url.trim(), "commands": commands});
+                if !s.how_to.trim().is_empty() {
+                    server["howTo"] = s.how_to.trim().into();
+                }
+                entry.insert("devServer".into(), server);
             }
             None => {
                 entry.remove("devServer");
@@ -754,6 +755,7 @@ mod tests {
                 cmd("npm run dev", "api", "http://localhost:3000"),
                 cmd(" npm run dev ", "web", ""),
             ],
+            how_to: "Mở /files bằng tài khoản test".into(),
         };
         let home = dirs::home_dir().unwrap().join("code").join("web");
         save_dev_server(&path, &home.to_string_lossy(), Some(&server)).unwrap();

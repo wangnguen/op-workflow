@@ -936,14 +936,19 @@ impl AppService {
         let reopen = matches!(action, FlowAction::Reopen { .. });
         // the dev server the user confirms is remembered for the repo too
         let dev_server = match &action {
-            FlowAction::SetDevServer { url, commands } => Some(devserver::tidy(url, commands)),
+            FlowAction::SetDevServer {
+                url,
+                commands,
+                how_to,
+            } => Some(devserver::tidy(url, commands, how_to)),
             _ => None,
         };
         flow.act(ctx.clone(), action)?;
         if let (Some(server), Some(repo), Some(path)) =
             (dev_server, ctx.row.repo.as_deref(), self.config_path.as_deref())
         {
-            opw_config::save_dev_server(path, repo, Some(&server).filter(|s| !s.url.is_empty()))
+            let keep = Some(&server).filter(|s| !s.url.is_empty() || !s.how_to.is_empty());
+            opw_config::save_dev_server(path, repo, keep)
                 .map_err(|e| ApiError::new("config.write", e.to_string()))?;
             self.reload_config();
             // the detail reads the repo's dev server from the config just written

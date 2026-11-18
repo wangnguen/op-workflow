@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { serverProblem, tidy, urlProblem, waitOk } from "./DevServerBox";
+import { MAX_HOW_TO, serverProblem, tidy, urlProblem, waitOk } from "./DevServerBox";
 
 describe("dev server commands", () => {
   const api = { command: "npm run dev", dir: "api", wait: "3000" };
@@ -31,7 +31,13 @@ describe("dev server commands", () => {
   it("saves trimmed rows, empty ones dropped", () => {
     expect(
       tidy({ url: ` ${url} `, commands: [{ command: " a ", dir: " api ", wait: " 3000 " }, { command: "", dir: "x", wait: "" }, web] }),
-    ).toEqual({ url, commands: [{ command: "a", dir: "api", wait: "3000" }, web] });
+    ).toEqual({ url, commands: [{ command: "a", dir: "api", wait: "3000" }, web], howTo: "" });
+  });
+
+  it("keeps how to reach the screen, also without a URL, within its length", () => {
+    expect(tidy({ url: "", commands: [], howTo: "  bấm … → 統合 " })).toEqual({ url: "", commands: [], howTo: "bấm … → 統合" });
+    expect(serverProblem({ url: "", commands: [], howTo: "thư mục test 4348" })).toBeUndefined();
+    expect(serverProblem({ url, commands: [web], howTo: "x".repeat(MAX_HOW_TO + 1) })).toBe(`Cách vào chỗ test tối đa ${MAX_HOW_TO} ký tự`);
   });
 });
 

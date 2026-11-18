@@ -18,6 +18,8 @@ use opw_domain::view::{DevCommand, DevServer};
 pub const READY_WAIT: Duration = Duration::from_secs(180);
 /// At most this many commands for one dev server.
 pub const MAX_COMMANDS: usize = 5;
+/// Longest "Cách vào chỗ test" (characters): a few lines of steps, not a document.
+pub const MAX_HOW_TO: usize = 2000;
 const POLL: Duration = Duration::from_millis(500);
 const CONNECT: Duration = Duration::from_millis(400);
 /// The log's last bytes shown when the command stops before the URL answers.
@@ -44,10 +46,11 @@ pub trait AppProcess: Send {
 
 /// What the user typed, trimmed: folders without leading / trailing slashes, a bare port to wait
 /// for written as `http://localhost:<port>`, rows left empty dropped.
-pub fn tidy(url: &str, commands: &[DevCommand]) -> DevServer {
+pub fn tidy(url: &str, commands: &[DevCommand], how_to: &str) -> DevServer {
     let folder = |d: &str| d.trim().trim_matches(['/', '\\']).to_owned();
     DevServer {
         url: url.trim().to_owned(),
+        how_to: how_to.trim().replace("\r\n", "\n"),
         commands: commands
             .iter()
             .filter(|c| !c.command.trim().is_empty() || !c.wait.trim().is_empty())
@@ -75,6 +78,9 @@ pub fn wait_url(wait: &str) -> Option<String> {
 /// may leave Chờ empty (= wait for the URL) only when it is the last one: the ones above it
 /// must say when they are up, or the next would never start.
 pub fn check(server: &DevServer) -> Result<(), String> {
+    if server.how_to.chars().count() > MAX_HOW_TO {
+        return Err(format!("Cách vào chỗ test tối đa {MAX_HOW_TO} ký tự"));
+    }
     let url = server.url.trim();
     if url.is_empty() {
         return if server.commands.is_empty() {
@@ -632,6 +638,7 @@ mod tests {
         DevServer {
             url: url.into(),
             commands,
+            how_to: String::new(),
         }
     }
 
@@ -690,7 +697,15 @@ mod tests {
             DevCommand::default(),
             cmd(" npm run dev ", "web\\", ""),
         ];
-        let t = tidy(" http://localhost:3003 ", &typed);
+        let t = tidy(
+            " http://localhost:3003 ",
+            &typed,
+            " Bấm \"…\" trên dòng thư mục\r\n→ 統合 ",
+        );
+        assert_eq!(t.how_to, "Bấm \"…\" trên dòng thư mục\n→ 統合");
+        // only how to reach the screen: the AI starts the app, but knows where to go
+        assert!(check(&tidy("", &[], "thư mục test 4348")).is_ok());
+        assert!(check(&tidy("", &[], &"x".repeat(MAX_HOW_TO + 1))).is_err());
         assert_eq!(t.url, "http://localhost:3003");
         assert_eq!(
             t.commands,

@@ -134,11 +134,16 @@ describe("mock workflow (browser preview)", () => {
     expect(asked.agentQuestion).toMatchObject({ step: "browserTest", browserOpen: true });
     expect(asked.gate?.message).toMatch(/^AI hỏi: Trang yêu cầu đăng nhập/);
     expect(() => mockFlowAction(7, { type: "approvePlan" })).toThrow();
-    // the user logs in and goes on: OK, with its result card; then Review chốt
+    // the user logs in and goes on: no NG (one case could not be tested, test data changed),
+    // with its result card; then Review chốt
     mockFlowAction(7, { type: "answerAgent", answer: "" });
     const tried = step(7);
     expect([tried.status, tried.current]).toEqual(["ready", "finalReview"]);
-    expect(tried.tests?.find((x) => x.step === "browserTest")).toMatchObject({ passed: true, url: "http://localhost:5173/files" });
+    const card = tried.tests?.find((x) => x.step === "browserTest");
+    expect(card).toMatchObject({ passed: false, url: "http://localhost:5173/files" });
+    expect(card?.cases.filter((c) => c.untested)).toHaveLength(1);
+    expect(card?.changes).toHaveLength(1);
+    expect(tried.log.some((l) => l.text.startsWith("Test trình duyệt dừng, chờ bạn: AI hỏi:"))).toBe(true);
     // Review chốt reports a medium: its own gate, leading to the push summary
     mockFlowAction(7, { type: "run" });
     const last = step(7);

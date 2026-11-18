@@ -1288,6 +1288,10 @@
 .tl-test--fail {
   box-shadow: inset 3px 0 0 var(--st-failed);
 }
+/* nothing failed, but some cases could not be tested */
+.tl-test--partial {
+  box-shadow: inset 3px 0 0 var(--st-waiting);
+}
 .tl-test-head {
   display: flex;
   flex-wrap: wrap;
@@ -1322,6 +1326,29 @@
 }
 .tl-case--bad {
   color: var(--st-failed);
+}
+.tl-case--untested {
+  color: var(--st-waiting);
+}
+.tl-case-tag {
+  margin-right: 6px;
+  color: var(--st-waiting);
+  font-weight: 600;
+}
+.tl-test-changes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.tl-test-changes ul {
+  margin: 0;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+}
+.tl-actions-note {
+  font-size: 11.5px;
 }
 .tl-case > svg {
   flex: none;
@@ -1397,6 +1424,17 @@
 /* the URL Chrome opens: under the commands, as wide as their three fields */
 .dev-server-field--url {
   grid-column: 1 / 4;
+}
+/* how to reach the screen: a few lines, under the URL */
+.dev-server-howto {
+  min-height: 56px;
+  resize: vertical;
+  /* words, not code: the app's font (a textarea defaults to monospace) */
+  font-family: inherit;
+  line-height: 1.45;
+}
+.dev-server-howto-note {
+  font-size: 11.5px;
 }
 .dev-server-row {
   animation: dev-server-row-in 160ms ease-out;

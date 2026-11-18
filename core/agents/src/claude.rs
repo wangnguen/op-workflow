@@ -441,13 +441,19 @@ pub fn code_args(resume: Option<&str>, budget_usd: f64, allowed_bash: &[String])
 }
 
 /// Commands a harness may run besides the repo's `allowBash`: build and run TypeScript /
-/// JavaScript outside the repo.
-pub const HARNESS_BASH: [&str; 5] = [
+/// JavaScript outside the repo, and look at the change (read-only git, `ls`); git writes stay
+/// refused by `--disallowedTools`.
+pub const HARNESS_BASH: [&str; 10] = [
     "node *",
     "npx tsc *",
     "npx tsx *",
     "npx ts-node *",
     "npx vitest *",
+    "git diff*",
+    "git status*",
+    "git log *",
+    "git show *",
+    "ls*",
 ];
 
 /// [5] Harness, headless: like a code step (edits accepted, Bash only from the allow list, git
@@ -482,16 +488,21 @@ pub fn harness_args(budget_usd: f64, allowed_bash: &[String], dirs: &[String]) -
 }
 
 /// The only MCP server of the browser test: Chrome DevTools MCP (the version Claude Code's own
-/// plugin uses), headless, in a throwaway profile so it never fights over the user's Chrome. Used
-/// when the app cannot open the test's own Chrome window.
-pub const BROWSER_MCP: &str = r#"{"mcpServers":{"chrome-devtools":{"command":"npx","args":["-y","chrome-devtools-mcp@1.11.0","--isolated","--headless"]}}}"#;
-
-/// Chrome DevTools MCP attached to the Chrome window the app opened for the test (its own
-/// profile, debugging port `port`), so the window stays open while the AI waits for the user.
-pub fn browser_mcp(port: u16) -> String {
-    format!(
-        r#"{{"mcpServers":{{"chrome-devtools":{{"command":"npx","args":["-y","chrome-devtools-mcp@1.11.0","--browserUrl","http://127.0.0.1:{port}"]}}}}}}"#
-    )
+/// plugin uses). With `port` it attaches to the Chrome window the app opened for the test (its
+/// own profile, that debugging port), so the window stays open while the AI waits for the user;
+/// without it, headless in a throwaway profile, so it never fights over the user's Chrome.
+/// `files` is the folder its screenshots and saved responses go to: the server writes only to
+/// the OS temp folder and the folders it is given (`--filesystem-root`, from 1.11).
+pub fn browser_mcp(port: Option<u16>, files: &str) -> String {
+    let mut args = vec!["-y".to_owned(), "chrome-devtools-mcp@1.11.0".to_owned()];
+    match port {
+        Some(port) => args.extend(["--browserUrl".to_owned(), format!("http://127.0.0.1:{port}")]),
+        None => args.extend(["--isolated".to_owned(), "--headless".to_owned()]),
+    }
+    if !files.trim().is_empty() {
+        args.extend(["--filesystem-root".to_owned(), files.to_owned()]);
+    }
+    serde_json::json!({ "mcpServers": { "chrome-devtools": { "command": "npx", "args": args } } }).to_string()
 }
 
 /// Commands a browser test may run besides the repo's `allowBash`: start the app, see it answer.
@@ -821,6 +832,8 @@ mod tests {
         // the repo's own rules are added once
         assert_eq!(allowed.matches("Bash(npx tsc *)").count(), 1);
         assert!(allowed.ends_with("Bash(npm test *)"));
+        // looking at the change is allowed by default; git writes stay refused
+        assert!(allowed.contains("Bash(git diff*) Bash(git status*)") && allowed.contains("Bash(ls*)"));
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "--disallowedTools" && w[1].contains("git push"))
@@ -852,21 +865,28 @@ mod tests {
             &["C:/mem".into()],
         );
         assert!(none.windows(2).any(|w| w == ["--add-dir", "C:/mem"]));
-        let attached: serde_json::Value = serde_json::from_str(&browser_mcp(51234)).unwrap();
+        let shots = "C:\\Users\\me\\tasks\\WP-1\\browser-test";
+        let attached: serde_json::Value = serde_json::from_str(&browser_mcp(Some(51234), shots)).unwrap();
+        let args = &attached["mcpServers"]["chrome-devtools"]["args"];
         assert!(
-            attached["mcpServers"]["chrome-devtools"]["args"]
-                .to_string()
+            args.to_string()
                 .contains("\"--browserUrl\",\"http://127.0.0.1:51234\"")
         );
+        // screenshots may be written to the task folder (a Windows path survives the JSON)
+        let list: Vec<&str> = args
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str())
+            .collect();
+        assert!(list.windows(2).any(|w| w == ["--filesystem-root", shots]));
         assert!(none.windows(2).any(|w| w == ["--tools", "Read,Grep,Glob"]));
         let allowed = &none[none.iter().position(|a| a == "--allowedTools").unwrap() + 1];
         assert_eq!(allowed, "mcp__chrome-devtools");
-        let mcp: serde_json::Value = serde_json::from_str(BROWSER_MCP).unwrap();
-        assert!(
-            mcp["mcpServers"]["chrome-devtools"]["args"]
-                .to_string()
-                .contains("--isolated")
-        );
+        let mcp: serde_json::Value = serde_json::from_str(&browser_mcp(None, shots)).unwrap();
+        let args = mcp["mcpServers"]["chrome-devtools"]["args"].to_string();
+        assert!(args.contains("--isolated") && args.contains("--filesystem-root"));
+        assert!(!browser_mcp(None, "").contains("--filesystem-root"));
     }
 
     #[test]

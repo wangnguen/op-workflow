@@ -16,11 +16,26 @@ interface Props {
   onOpenPath: (path: string) => void;
 }
 
-/** "PASS 3/3", "FAIL 1/3", "NG 1/4". */
+/** How the last run went: every case passed, one failed, or none failed but some could not
+ *  be tested (browser test). */
+export function testOutcome(test: TestView): "pass" | "fail" | "partial" {
+  if (test.passed) return "pass";
+  const failed = test.cases.some((c) => !c.ok && !c.untested);
+  return !failed && test.cases.some((c) => c.untested) ? "partial" : "fail";
+}
+
+/** "PASS 3/3", "FAIL 1/3", "NG 1/4", "OK 4/4 · 2 chưa test" (out of the cases that ran). */
 export function testTally(test: TestView): string {
+  const untested = test.cases.filter((c) => c.untested).length;
+  const ran = test.cases.length - untested;
   const ok = test.cases.filter((c) => c.ok).length;
-  const word = test.passed ? (test.step === "browserTest" ? "OK" : "PASS") : test.step === "browserTest" ? "NG" : "FAIL";
-  return test.cases.length > 0 ? `${word} ${ok}/${test.cases.length}` : word;
+  const browser = test.step === "browserTest";
+  const outcome = testOutcome(test);
+  const word = outcome === "fail" ? (browser ? "NG" : "FAIL") : browser ? "OK" : "PASS";
+  if (test.cases.length === 0) return word;
+  if (ran === 0) return t.noneTested;
+  const tally = `${word} ${ok}/${ran}`;
+  return untested > 0 ? `${tally} · ${t.untestedCount(untested)}` : tally;
 }
 
 const lastPart = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
@@ -36,13 +51,21 @@ export function TestsSection({ tests, busy, onAction, onOpenPath }: Props) {
   );
 }
 
+/** What Làm tiếp → Test trình duyệt tells the AI to do: only the cases it could not run. */
+export function retestNote(test: TestView): string {
+  return t.retestNote(test.cases.filter((c) => c.untested).map((c) => c.name));
+}
+
 function TestCard({ test, busy, onAction, onOpenPath }: { test: TestView } & Omit<Props, "tests">) {
+  const outcome = testOutcome(test);
+  const untested = test.cases.some((c) => c.untested);
+  const chip = { pass: "chip--done", fail: "chip--failed", partial: "chip--warn" }[outcome];
   return (
-    <article className={`tl-test tl-test--${test.passed ? "pass" : "fail"}`}>
+    <article className={`tl-test tl-test--${outcome}`}>
       <div className="tl-test-head">
-        <StatusIcon state={test.passed ? "done" : "failed"} size={15} />
+        <StatusIcon state={outcome === "pass" ? "done" : outcome === "fail" ? "failed" : "waitingUser"} size={15} />
         <strong>{stepLabel[test.step]}</strong>
-        <span className={`chip ${test.passed ? "chip--done" : "chip--failed"}`}>{testTally(test)}</span>
+        <span className={`chip ${chip}`}>{testTally(test)}</span>
         <span className="faint tl-test-when">
           {t.runs(test.runs)} · {formatHourMinute(test.at)}
         </span>
@@ -54,6 +77,30 @@ function TestCard({ test, busy, onAction, onOpenPath }: { test: TestView } & Omi
             <CaseRow key={`${c.name}-${i}`} c={c} onOpenPath={onOpenPath} />
           ))}
         </ul>
+      )}
+      {test.changes && test.changes.length > 0 && (
+        <div className="tl-test-changes">
+          <span className="faint">{t.changes}</span>
+          <ul>
+            {test.changes.map((c, i) => (
+              <li key={`${i}-${c}`}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {untested && (
+        <div className="tl-actions">
+          <button
+            className="btn btn--ghost btn--xs"
+            disabled={busy !== undefined}
+            title={t.retestHint}
+            onClick={() => onAction({ type: "reopen", step: "browserTest", note: retestNote(test) })}
+          >
+            <Icon name="refresh" size={11} />
+            {t.retest}
+          </button>
+          <span className="faint tl-actions-note">{t.retestNote2}</span>
+        </div>
       )}
       {test.negative !== undefined && (
         <p className={`note${test.negative ? "" : " note--warn"}`}>
@@ -106,10 +153,12 @@ function TestCard({ test, busy, onAction, onOpenPath }: { test: TestView } & Omi
 }
 
 function CaseRow({ c, onOpenPath }: { c: TestCase; onOpenPath: (path: string) => void }) {
+  const tone = c.untested ? " tl-case--untested" : c.ok ? "" : " tl-case--bad";
   return (
-    <li className={`tl-case${c.ok ? "" : " tl-case--bad"}`}>
-      <Icon name={c.ok ? "check" : "close"} size={12} />
+    <li className={`tl-case${tone}`}>
+      <Icon name={c.untested ? "alert" : c.ok ? "check" : "close"} size={12} />
       <span className="tl-case-text">
+        {c.untested && <span className="tl-case-tag">{t.untested}</span>}
         <span>{c.name}</span>
         {c.detail && <span className="faint"> — {c.detail}</span>}
       </span>

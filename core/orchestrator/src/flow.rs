@@ -310,6 +310,8 @@ struct BrowserState {
     cases: Vec<browsertest::Case>,
     at: String,
     runs: u32,
+    /// Real data the AI changed while testing.
+    changes: Vec<String>,
 }
 
 impl BrowserState {
@@ -326,6 +328,7 @@ impl BrowserState {
                     ok: c.ok,
                     detail: c.detail.clone(),
                     screenshot: c.screenshot.clone(),
+                    untested: c.untested,
                 })
                 .collect(),
             at: self.at.clone(),
@@ -336,6 +339,7 @@ impl BrowserState {
             negative_detail: String::new(),
             library: None,
             url: Some(self.url.clone()).filter(|u| !u.is_empty()),
+            changes: self.changes.clone(),
         }
     }
 }
@@ -358,6 +362,7 @@ impl HarnessState {
                     ok: c.ok,
                     detail: c.detail.clone(),
                     screenshot: None,
+                    untested: false,
                 })
                 .collect(),
             at: self.at.clone(),
@@ -368,6 +373,7 @@ impl HarnessState {
             negative_detail: self.negative_detail.clone(),
             library: self.library.clone(),
             url: None,
+            changes: Vec::new(),
         }
     }
 }
@@ -509,9 +515,12 @@ pub fn permission_default(step: StepKind, agent: AgentKind) -> Option<&'static s
 }
 
 /// The dev server Test trình duyệt uses: the task's own, else the one remembered for the repo
-/// (`true`). `None` = the AI starts the app itself.
+/// (`true`). `None`, or one with no URL (only how to reach the screen) = the AI starts the app
+/// itself.
 fn dev_server_of(ctx: &TaskCtx, saved: &Saved) -> Option<(DevServer, bool)> {
-    let usable = |d: &DevServer| !d.url.trim().is_empty() && devserver::check(d).is_ok();
+    let usable = |d: &DevServer| {
+        (!d.url.trim().is_empty() || !d.how_to.trim().is_empty()) && devserver::check(d).is_ok()
+    };
     saved
         .dev_server
         .clone()
@@ -769,8 +778,22 @@ fn finding_view(f: &FindingRow) -> FindingView {
     }
 }
 
+/// The fingerprint of a finding `step` reported. A browser test's NG case goes by its number,
+/// since the AI words the same case differently from one run to the next.
+fn raw_fingerprint(step: StepKind, r: &RawFinding) -> String {
+    if step == StepKind::BrowserTest {
+        browsertest::fingerprint_of(r)
+    } else {
+        fingerprint(&r.file, &r.title)
+    }
+}
+
 /// Merge what a review reported into the stored findings. Reported again → open (unless the
-/// user accepted or deferred it); being fixed and not reported again → fixed.
+/// user accepted or deferred it); being fixed and not reported again → fixed, unless it is one
+/// of `untested` (a browser test case the AI could not run this time): that one is open again.
+/// A harness or browser test reports every failure each run, so its own open finding it does
+/// not report again passes now: fixed too.
+#[allow(clippy::too_many_arguments)]
 fn merge_findings(
     store: &Store,
     wp_id: u64,
@@ -778,6 +801,7 @@ fn merge_findings(
     round: u8,
     source: &str,
     raw: &[RawFinding],
+    untested: &[String],
     at: &str,
 ) -> opw_storage::StorageResult<()> {
     let existing: HashMap<String, FindingRow> = store
@@ -787,7 +811,7 @@ fn merge_findings(
         .collect();
     let mut seen = HashSet::new();
     for r in raw {
-        let fp = fingerprint(&r.file, &r.title);
+        let fp = raw_fingerprint(step, r);
         if !seen.insert(fp.clone()) {
             continue;
         }
@@ -821,9 +845,17 @@ fn merge_findings(
         }
     };
     for old in existing.values() {
-        if old.state == "fixing" && ours(old) && !seen.contains(&old.fingerprint) {
+        let passes_now = test_step(Some(step_key(step))) && old.state == "open";
+        if (old.state == "fixing" || passes_now) && ours(old) && !seen.contains(&old.fingerprint) {
+            // not tested this time: nobody knows whether the fix worked
+            let state = if untested.contains(&old.fingerprint) {
+                "open"
+            } else {
+                "fixed"
+            };
             store.upsert_finding(&FindingRow {
-                state: "fixed".into(),
+                state: state.into(),
+                chosen: state == "fixed" && old.chosen,
                 ..old.clone()
             })?;
         }
@@ -2092,7 +2124,11 @@ fn apply_action(
             );
             Ok(false)
         }
-        FlowAction::SetDevServer { url, commands } => {
+        FlowAction::SetDevServer {
+            url,
+            commands,
+            how_to,
+        } => {
             if entry
                 .run
                 .as_ref()
@@ -2103,9 +2139,9 @@ fn apply_action(
                     "Test trình duyệt đang chạy: bấm Dừng trước khi đổi lệnh chạy app",
                 ));
             }
-            let server = devserver::tidy(url, commands);
+            let server = devserver::tidy(url, commands, how_to);
             devserver::check(&server).map_err(|e| ApiError::new("devserver.invalid", e))?;
-            let text = if server.url.is_empty() {
+            let mut text = if server.url.is_empty() {
                 "Bỏ lệnh chạy app: Test trình duyệt để AI tự bật app".to_owned()
             } else if server.commands.is_empty() {
                 format!("Test trình duyệt dùng app đang chạy ở {}", server.url)
@@ -2116,7 +2152,11 @@ fn apply_action(
                     server.url
                 )
             };
-            entry.saved.dev_server = (!server.url.is_empty()).then_some(server);
+            if !server.how_to.is_empty() {
+                text.push_str(&format!("; cách vào chỗ test: {}", short(&server.how_to)));
+            }
+            let keep = !server.url.is_empty() || !server.how_to.is_empty();
+            entry.saved.dev_server = keep.then_some(server);
             push_log(entry, Some(StepKind::BrowserTest), "info", &text);
             Ok(false)
         }
@@ -2908,8 +2948,19 @@ impl Inner {
         entry.saved.since = Some(now());
         // `note` goes on the run's row (Tiến trình), `text` into the log
         let mut note = String::new();
+        let asked = matches!(&result, Ok(done) if matches!(done.event, WorkflowEvent::AgentAsked(_)));
         let (kind, text) = match result {
             Ok(done) => match entry.saved.workflow.apply(done.event) {
+                // the AI stopped to ask: the step is not over, it waits for the user
+                Ok(()) if asked => {
+                    entry.saved.error = None;
+                    note.clone_from(&done.note);
+                    let cost = done.cost.map(|c| format!(" ({})", usd(c))).unwrap_or_default();
+                    (
+                        "info",
+                        format!("{} dừng, chờ bạn: {}{cost}", step_label(step), done.note),
+                    )
+                }
                 Ok(()) => {
                     entry.saved.error = None;
                     if entry.saved.cut.as_ref().is_some_and(|c| c.step == step) {
@@ -3570,11 +3621,24 @@ impl Inner {
         source: &str,
         raw: &[RawFinding],
     ) -> Result<Vec<FindingRow>, FlowError> {
+        self.merge_untested(ctx, step, round, source, raw, &[])
+    }
+
+    /// [`Self::merge`] where `untested` cases (fingerprints) ran no test this time.
+    fn merge_untested(
+        &self,
+        ctx: &TaskCtx,
+        step: StepKind,
+        round: u8,
+        source: &str,
+        raw: &[RawFinding],
+        untested: &[String],
+    ) -> Result<Vec<FindingRow>, FlowError> {
         let store = self
             .store
             .lock()
             .map_err(|_| flow_error("storage", "Dữ liệu cục bộ đang bị khoá"))?;
-        merge_findings(&store, ctx.row.wp_id, step, round, source, raw, &now())
+        merge_findings(&store, ctx.row.wp_id, step, round, source, raw, untested, &now())
             .and_then(|()| store.findings(ctx.row.wp_id))
             .map_err(|e| flow_error("storage", e.to_string()))
     }
@@ -3659,8 +3723,8 @@ fn usd(cost: f64) -> String {
 
 /// The state-machine event of a finished review, and a line for the log. What it reported and
 /// the user has not accepted or deferred before stops the flow at the findings gate.
-fn review_event(findings: &[FindingRow], raw: &[RawFinding]) -> (WorkflowEvent, String) {
-    let reported: HashSet<String> = raw.iter().map(|r| fingerprint(&r.file, &r.title)).collect();
+fn review_event(step: StepKind, findings: &[FindingRow], raw: &[RawFinding]) -> (WorkflowEvent, String) {
+    let reported: HashSet<String> = raw.iter().map(|r| raw_fingerprint(step, r)).collect();
     let open = findings
         .iter()
         .filter(|f| reported.contains(&f.fingerprint) && !settled(&f.state))
@@ -4138,7 +4202,7 @@ fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Resu
         }
         let tally = keep_harness(inner, wp_id, state, &outcome);
         // FAIL cases the user has not accepted or deferred stop at the findings gate
-        let (event, _) = review_event(&inner.findings(wp_id), &raw);
+        let (event, _) = review_event(StepKind::Harness, &inner.findings(wp_id), &raw);
         Done {
             event,
             note: format!("{tally}{negative}{extra}"),
@@ -4232,7 +4296,7 @@ fn run_browser_test(
 ) -> Result<Done, FlowError> {
     let wp_id = ctx.row.wp_id;
     let (budget, timeout, _) = limits(StepKind::BrowserTest, &ctx.config);
-    let (scenario, runs) = inner
+    let (scenario, runs, note) = inner
         .with_saved(wp_id, |s| {
             let scenario: Vec<String> = s
                 .proposals
@@ -4245,7 +4309,7 @@ fn run_browser_test(
                         .collect::<Vec<_>>()
                 })
                 .collect();
-            (scenario, s.browser.as_ref().map_or(0, |b| b.runs))
+            (scenario, s.browser.as_ref().map_or(0, |b| b.runs), s.note.clone())
         })
         .unwrap_or_default();
     let shots = ctx.task_dir.join(browsertest::DIR);
@@ -4258,10 +4322,15 @@ fn run_browser_test(
     allowed.extend(repo_config.allow_bash.iter().cloned());
     let plan = ctx.read(PLAN_FILE).unwrap_or_default();
     // the dev server the user confirmed: the app starts it (or finds it running) before the AI
-    let server = inner
+    let configured = inner
         .with_saved(wp_id, |s| dev_server_of(ctx, s))
         .flatten()
         .map(|(d, _)| d);
+    let how_to = configured
+        .as_ref()
+        .map(|d| d.how_to.trim().to_owned())
+        .filter(|h| !h.is_empty());
+    let server = configured.filter(|d| !d.url.trim().is_empty());
     // the user answered what the AI asked: go on in that session, with the window left open
     let answered = inner
         .with_saved(wp_id, |s| {
@@ -4324,10 +4393,8 @@ fn run_browser_test(
             None => {}
         }
     }
-    let mcp_json = match &session.chrome {
-        Some((_, port)) => claude::browser_mcp(*port),
-        None => claude::BROWSER_MCP.to_owned(),
-    };
+    // screenshots go to the task folder: the MCP server writes only where it is told
+    let mcp_json = claude::browser_mcp(session.chrome.as_ref().map(|(_, port)| *port), &path(&shots));
     if let Err(e) = std::fs::write(&mcp, mcp_json) {
         session.close(inner, wp_id);
         return Err(flow_error(
@@ -4342,14 +4409,16 @@ fn run_browser_test(
     };
     let prompt = match &answered {
         Some(a) => prompts::browser_answer(a.answer.as_deref().unwrap_or_default(), restarted),
-        None => prompts::browser_test(
-            &plan,
+        None => prompts::browser_test(&prompts::BrowserTest {
+            plan: &plan,
             brief,
-            &scenario,
-            &path(&shots),
+            scenario: &scenario,
+            shots: &path(&shots),
             app,
-            memory.as_deref().map(path).as_deref(),
-        ),
+            memory: memory.as_deref().map(path).as_deref(),
+            how_to: how_to.as_deref(),
+            note: note.as_deref(),
+        }),
     };
     let dirs: Vec<String> = memory.iter().map(|m| path(m)).collect();
     let mut args = claude::with_mode(
@@ -4425,24 +4494,63 @@ fn run_browser_test(
             "AI không báo ca test nào. Xem tab Chat rồi bấm Thử lại.",
         ));
     }
+    // what the user wrote with Làm tiếp was for this run
+    inner.with_saved(wp_id, |s| {
+        if note.is_some() {
+            s.note = None;
+        }
+        s.browser = Some(BrowserState {
+            passed: answer.passed(),
+            summary: answer.summary.clone(),
+            url: answer.url.clone(),
+            cases: browsertest::shown(&answer),
+            at: now(),
+            runs: runs + 1,
+            changes: browsertest::shown_changes(&answer),
+        });
+    });
+    for change in &answer.changes {
+        inner.log(
+            wp_id,
+            Some(StepKind::BrowserTest),
+            "info",
+            &format!("AI đã thay đổi dữ liệu thật: {}", short(change)),
+            false,
+        );
+    }
+    let untested = answer.untested();
+    for c in &untested {
+        let why = if c.detail.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", short(&c.detail))
+        };
+        inner.log(
+            wp_id,
+            Some(StepKind::BrowserTest),
+            "info",
+            &format!("Chưa test được: {}{why}", c.name),
+            false,
+        );
+    }
+    if untested.len() == answer.cases.len() {
+        return Err(flow_error(
+            "browser.untested",
+            "AI không test được ca nào (lý do ở tab Tiến trình). Sửa Cách vào chỗ test ở tab Plan nếu cần, rồi bấm Thử lại.",
+        ));
+    }
     let raw = browsertest::findings(&answer);
-    let findings = inner.merge(ctx, StepKind::BrowserTest, 0, "browserTest", &raw)?;
-    let (event, _) = review_event(&findings, &raw);
+    let skipped = browsertest::untested_fingerprints(&answer);
+    let findings = inner.merge_untested(ctx, StepKind::BrowserTest, 0, "browserTest", &raw, &skipped)?;
+    let (event, _) = review_event(StepKind::BrowserTest, &findings, &raw);
     let pictures = answer.cases.iter().filter(|c| c.screenshot.is_some()).count();
-    let note = if pictures > 0 {
-        format!("{}, {pictures} ảnh", browsertest::tally(&answer))
-    } else {
-        browsertest::tally(&answer)
-    };
-    let state = BrowserState {
-        passed: answer.passed(),
-        summary: answer.summary.clone(),
-        url: answer.url.clone(),
-        cases: browsertest::shown(&answer),
-        at: now(),
-        runs: runs + 1,
-    };
-    inner.with_saved(wp_id, |s| s.browser = Some(state));
+    let mut note = browsertest::tally(&answer);
+    if pictures > 0 {
+        note.push_str(&format!(", {pictures} ảnh"));
+    }
+    if !answer.changes.is_empty() {
+        note.push_str(&format!(", đổi {} dữ liệu thật", answer.changes.len()));
+    }
     Ok(Done {
         event,
         note: format!("{note}{app_note}"),
@@ -4606,6 +4714,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                         checks: p.checks,
                         dev_server: p.dev_server.map(|d| DevServer {
                             url: d.url,
+                            how_to: String::new(),
                             commands: d
                                 .commands
                                 .into_iter()
@@ -4680,7 +4789,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 &brief,
             )?;
             let findings = inner.merge(ctx, step, 0, "codex", &raw)?;
-            let (event, note) = review_event(&findings, &raw);
+            let (event, note) = review_event(step, &findings, &raw);
             Ok(Done {
                 event,
                 note,
@@ -4706,7 +4815,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             let raw = text::findings_from_text(&r.text).ok_or_else(unreadable_review)?;
             save_review_notes(ctx, step, &r.text);
             let findings = inner.merge(ctx, step, 0, source, &raw)?;
-            let (event, note) = review_event(&findings, &raw);
+            let (event, note) = review_event(step, &findings, &raw);
             Ok(Done {
                 event,
                 note,
@@ -4831,7 +4940,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 (raw, "claude", Some(r.cost_usd))
             };
             let findings = inner.merge(ctx, step, round, source, &raw)?;
-            let (event, note) = review_event(&findings, &raw);
+            let (event, note) = review_event(step, &findings, &raw);
             Ok(Done {
                 event,
                 note: format!("vòng {round}: {note}"),
@@ -5630,6 +5739,7 @@ mod tests {
         );
         // the same medium reported again later is not asked about again
         let (_, note) = review_event(
+            StepKind::FinalReview,
             &flow.inner.findings(1),
             &[RawFinding {
                 severity: "medium".into(),
@@ -6644,6 +6754,7 @@ mod tests {
                     wait: String::new(),
                 }]
             },
+            how_to: String::new(),
         };
         assert_eq!(
             flow.act(ctx.clone(), set("npm run dev", "localhost:5173", "web"))
@@ -6657,9 +6768,22 @@ mod tests {
                 .code,
             "devserver.invalid"
         );
-        flow.act(ctx.clone(), set(" npm run dev ", "http://localhost:5173", "web/"))
-            .unwrap();
+        // with how to reach the screen: it goes into the browser test's prompt
+        let how_to = "Mở /files bằng tài khoản test";
+        let with_how = match set(" npm run dev ", "http://localhost:5173", "web/") {
+            FlowAction::SetDevServer { url, commands, .. } => FlowAction::SetDevServer {
+                url,
+                commands,
+                how_to: format!(" {how_to} "),
+            },
+            _ => unreachable!(),
+        };
+        flow.act(ctx.clone(), with_how).unwrap();
         let d = flow.detail(&ctx);
+        let proposed = DevServer {
+            how_to: how_to.into(),
+            ..proposed
+        };
         assert_eq!(d.dev_server, Some(proposed.clone()));
         assert!(!d.dev_server_from_repo);
 
@@ -6702,6 +6826,12 @@ mod tests {
             prompt.contains("already running at http://localhost:5173"),
             "{prompt}"
         );
+        assert!(
+            prompt.contains("<how_to>\nMở /files bằng tài khoản test\n</how_to>"),
+            "{prompt}"
+        );
+        // the MCP server may write screenshots into the task folder
+        assert!(mcp.contains("--filesystem-root"), "{mcp}");
         let run_row = d.runs.iter().find(|r| r.step == StepKind::BrowserTest).unwrap();
         assert!(
             run_row
@@ -6863,11 +6993,19 @@ mod tests {
                 std::fs::write(&shot, b"png").unwrap();
                 let shot = shot.to_string_lossy().replace('\\', "\\\\");
                 let n = tests.fetch_add(1, Ordering::SeqCst);
-                let first_ok = if n == 0 { "false" } else { "true" };
+                let first = match n {
+                    0 => format!("{{\"name\":\"1. chưa có org\",\"ok\":false,\"detail\":\"trang trắng\",\"screenshot\":\"{shot}\",\"file\":\"a.ts\"}}"),
+                    1 => "{\"name\":\"1. Mở /files khi chưa có org\",\"ok\":false,\"untested\":true,\"detail\":\"không có user chưa có org\"}".to_owned(),
+                    _ => "{\"name\":\"1. chưa có org\",\"ok\":true}".to_owned(),
+                };
+                let changes = if n == 1 {
+                    "\"Thêm người nhận A (đã bỏ lại)\""
+                } else {
+                    ""
+                };
                 out(&result_line(&format!(
                     "```json\n{{\"result\":\"ng\",\"summary\":\"thử 2 ca\",\"url\":\"http://localhost:5173/files\",\"cases\":[\
-                     {{\"name\":\"chưa có org\",\"ok\":{first_ok},\"detail\":\"trang trắng\",\"screenshot\":\"{shot}\",\"file\":\"a.ts\"}},\
-                     {{\"name\":\"có org\",\"ok\":true}}]}}\n```"
+                     {first},{{\"name\":\"2. có org\",\"ok\":true}}],\"changes\":[{changes}]}}\n```"
                 )));
                 ok()
             }
@@ -6920,7 +7058,7 @@ mod tests {
         let f = d
             .findings
             .iter()
-            .find(|f| f.title == "Test trình duyệt NG: chưa có org")
+            .find(|f| f.title == "Test trình duyệt NG: 1. chưa có org")
             .unwrap();
         assert_eq!((f.file.as_str(), f.source.as_str()), ("a.ts", "browserTest"));
         let note = d
@@ -6953,8 +7091,8 @@ mod tests {
                 choice: AfterFix::Next,
             },
         );
-        // answering the gate starts the browser test at once; this time it is OK, and Review
-        // chốt (step 11) comes next to look at the fix too
+        // answering the gate starts the browser test at once; case 1 could not be tested this
+        // time: no NG (Review chốt, step 11, is next), but the fix is not called done either
         assert_eq!(
             (d.current, d.status),
             (Some(StepKind::FinalReview), FlowStatus::Ready),
@@ -6969,12 +7107,72 @@ mod tests {
             Some(10)
         );
         let view = d.tests.iter().find(|t| t.step == StepKind::BrowserTest).unwrap();
-        assert!(view.passed && view.runs == 2);
-        assert!(
+        assert!(!view.passed && view.runs == 2);
+        assert!(view.cases[0].untested && view.cases[0].detail == "không có user chưa có org");
+        assert_eq!(view.changes, ["Thêm người nhận A (đã bỏ lại)"]);
+        let browser_findings = |d: &TaskDetail| -> Vec<(String, opw_domain::finding::FindingState)> {
             d.findings
                 .iter()
                 .filter(|f| f.source == "browserTest")
-                .all(|f| f.state == opw_domain::finding::FindingState::Fixed)
+                .map(|f| (f.title.clone(), f.state))
+                .collect()
+        };
+        assert_eq!(
+            browser_findings(&d),
+            [(
+                "Test trình duyệt NG: 1. chưa có org".to_owned(),
+                opw_domain::finding::FindingState::Open
+            )]
+        );
+        let note = d
+            .runs
+            .iter()
+            .rev()
+            .find(|r| r.step == StepKind::BrowserTest)
+            .and_then(|r| r.note.clone());
+        assert_eq!(note.as_deref(), Some("OK 1/1, 1 chưa test, đổi 1 dữ liệu thật"));
+        assert!(d.log.iter().any(|l| l.text == "Chưa test được: 1. Mở /files khi chưa có org (không có user chưa có org)"));
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text == "AI đã thay đổi dữ liệu thật: Thêm người nhận A (đã bỏ lại)")
+        );
+
+        // Làm tiếp from Test trình duyệt with a note: it reaches the prompt; case 1 is OK now
+        let mut d = run(
+            &flow,
+            &ctx,
+            FlowAction::Reopen {
+                step: Some(StepKind::BrowserTest),
+                note: Some("Chỉ test lại ca 1".into()),
+            },
+        );
+        if d.status == FlowStatus::Ready && d.current == Some(StepKind::BrowserTest) {
+            d = run(&flow, &ctx, FlowAction::Run);
+        }
+        assert_eq!(
+            (d.current, d.status),
+            (Some(StepKind::FinalReview), FlowStatus::Ready),
+            "{:?}",
+            d.error
+        );
+        let jobs = fake.jobs.lock().unwrap().clone();
+        let last = jobs.iter().rev().find(|j| kind(j) == "browser").unwrap();
+        assert!(
+            last.stdin
+                .as_deref()
+                .unwrap()
+                .contains("<user_note>\nChỉ test lại ca 1\n</user_note>")
+        );
+        let view = d.tests.iter().find(|t| t.step == StepKind::BrowserTest).unwrap();
+        assert!(view.passed && view.runs == 3 && view.changes.is_empty());
+        // a case that failed before and passes now is fixed
+        assert_eq!(
+            browser_findings(&d),
+            [(
+                "Test trình duyệt NG: 1. chưa có org".to_owned(),
+                opw_domain::finding::FindingState::Fixed
+            )]
         );
     }
 

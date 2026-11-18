@@ -1153,6 +1153,10 @@ pub struct AgentQuestionView {
 pub struct DevServer {
     pub url: String,
     pub commands: Vec<DevCommand>,
+    /// "Cách vào chỗ test": how to reach the screen to test (a menu, a test folder, an
+    /// account…), in the user's words. The browser test's prompt carries it as is.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub how_to: String,
 }
 
 /// A dev server as saved, old shape (one `command` + `dir`) or new (`commands`).
@@ -1163,6 +1167,7 @@ struct SavedDevServer {
     commands: Vec<DevCommand>,
     command: String,
     dir: String,
+    how_to: String,
 }
 
 impl From<SavedDevServer> for DevServer {
@@ -1175,7 +1180,11 @@ impl From<SavedDevServer> for DevServer {
                 wait: String::new(),
             });
         }
-        DevServer { url: s.url, commands }
+        DevServer {
+            url: s.url,
+            commands,
+            how_to: s.how_to,
+        }
     }
 }
 
@@ -1461,6 +1470,9 @@ pub struct TestView {
     /// Browser test: the page the AI opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Browser test: real data the AI changed while testing (where; undone or not).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
 }
 
 /// One case of a harness or browser test.
@@ -1474,6 +1486,9 @@ pub struct TestCase {
     /// Browser test: the screenshot of the case (a file in the task folder).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<String>,
+    /// Browser test: the AI could not run it (`detail` says why); not an NG.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untested: bool,
 }
 
 /// A button in the task window or on the card.
@@ -1506,12 +1521,16 @@ pub enum FlowAction {
     SetUses { step: StepKind, on: bool },
     /// Test trình duyệt: the dev server the app starts for this task, remembered for the repo
     /// too. An empty URL clears both (the AI starts the app itself again).
+    #[serde(rename_all = "camelCase")]
     SetDevServer {
         #[serde(default)]
         url: String,
         /// Run top to bottom (an API, then the web…).
         #[serde(default)]
         commands: Vec<DevCommand>,
+        /// How to reach the screen to test, in the user's words (the browser test's prompt).
+        #[serde(default)]
+        how_to: String,
     },
     /// Question gate: the user did what the AI asked (or answers it); the step goes on.
     AnswerAgent {

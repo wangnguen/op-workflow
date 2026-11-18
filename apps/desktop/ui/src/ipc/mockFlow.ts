@@ -448,6 +448,8 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo", seeded
       f.plan = PLAN;
       f.push = pushView();
       f.notes = { ...NOTES };
+      // the browser test of this demo could not run one case (Tiến trình shows it)
+      f.tests = [browserView(2)];
       f.current = "pushSummary";
       f.phase = "awaitingPush";
       f.round = 1;
@@ -737,10 +739,12 @@ function complete(f: Flow): void {
     endRun(f, "failed", f.error.message);
     return;
   }
-  const done = (note: string) => {
+  const done = (note: string, asked = false) => {
     const run = endRun(f, "done", note);
     const cost = run?.costUsd ? ` ($${run.costUsd.toFixed(2)})` : "";
-    log(f, "ok", `${LABEL[step]} xong: ${note}${cost}`, step);
+    // like the Rust side: an AI that stops to ask has not finished its step
+    if (asked) log(f, "info", `${LABEL[step]} dừng, chờ bạn: ${note}${cost}`, step);
+    else log(f, "ok", `${LABEL[step]} xong: ${note}${cost}`, step);
   };
   switch (step) {
     case "analyze": {
@@ -790,13 +794,13 @@ function complete(f: Flow): void {
         f.ask = { question: "Trang yêu cầu đăng nhập: đăng nhập tài khoản test trong cửa sổ Chrome test rồi bấm Tiếp tục.", url: "http://localhost:5173/login" };
         toGate(f, "agentQuestion", "browserTest");
         f.states.browserTest = "waitingUser";
-        done(`AI hỏi: ${f.ask.question} (cửa sổ Chrome test vẫn mở)`);
+        done(`AI hỏi: ${f.ask.question} (cửa sổ Chrome test vẫn mở)`, true);
         return;
       }
       f.ask = undefined;
       f.states.browserTest = "done";
       f.tests = [...f.tests.filter((x) => x.step !== "browserTest"), browserView(n)];
-      done("OK 2/2, 1 ảnh");
+      done(n === 2 ? "OK 2/2, 1 chưa test, 1 ảnh, đổi 1 dữ liệu thật" : "OK 2/2, 1 ảnh");
       enter(f, "finalReview");
       return;
     }
@@ -853,11 +857,14 @@ function harnessView(f: Flow, runs: number): TestView {
   };
 }
 
-/** The demo browser test: two cases of the plan's scenario, OK, one screenshot. */
+/** The demo browser test: the plan's scenario with one screenshot. The first run could not
+ *  test one case and changed test data; the next ones are all OK. */
 function browserView(runs: number): TestView {
+  // run 1 stopped to ask for a login: run 2 is the first with cases
+  const first = runs === 2;
   return {
     step: "browserTest",
-    passed: true,
+    passed: !first,
     summary: "Mở trang Files bằng user chưa có org và user có org; danh sách hiện đúng, không còn trang trắng.",
     cases: [
       {
@@ -866,10 +873,21 @@ function browserView(runs: number): TestView {
         screenshot: "C:\\Users\\me\\Desktop\\op-workflow-tasks\\WP-187716\\browser-test\\1.png",
       },
       { name: "user có org: thấy 12 file của org", ok: true },
+      ...(first
+        ? [
+            {
+              name: "3. Xoá hàng loạt rồi xem lại danh sách",
+              ok: false,
+              untested: true,
+              detail: "Nút xoá hàng loạt không nhận thao tác; không có thư mục test được phép xoá.",
+            },
+          ]
+        : []),
     ],
     at: iso(Date.now()),
     runs,
     url: "http://localhost:5173/files",
+    ...(first ? { changes: ["Thêm user test-2 vào người nhận thông báo của thư mục test (đã bỏ lại)"] } : {}),
   };
 }
 
@@ -1106,7 +1124,9 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
           return { command: c.command.trim(), dir: c.dir.trim(), wait: /^\d+$/.test(port) ? `http://localhost:${port}` : c.wait.trim() };
         });
       if (!url && commands.length) throw fail("devserver.invalid", "Có lệnh chạy thì cần URL của app để mở trong Chrome");
-      f.devServer = url ? { url, commands } : undefined;
+      const howTo = (action.howTo ?? "").trim().replace(/\r\n/g, "\n");
+      if (howTo.length > 2000) throw fail("devserver.invalid", "Cách vào chỗ test tối đa 2000 ký tự");
+      f.devServer = url || howTo ? { url, commands, ...(howTo ? { howTo } : {}) } : undefined;
       const runs = commands.map((c) => (c.dir ? `${c.dir}: ${c.command}` : c.command));
       log(
         f,
