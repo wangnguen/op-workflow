@@ -33,6 +33,7 @@ import { ContinueDialog } from "./ContinueDialog";
 import { CopyPush } from "./CopyPush";
 import { DiffTab } from "./DiffTab";
 import { FinishDialog } from "./FinishDialog";
+import { BudgetChoices, PlanChangedChoices } from "./GateChoices";
 import { Markdown } from "../../shared/Markdown";
 import { modelText } from "../../shared/models";
 import { Icon } from "../../shared/ui/Icon";
@@ -441,7 +442,8 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
     const kind = d.gate.kind;
     // the user pressed Dừng: not an error, the step waits for them
     const stopped = kind === "error" && d.error?.code === "step.stopped";
-    const failed = kind === "error" && !stopped;
+    const planChanged = kind === "planChanged";
+    const failed = kind === "error" && !stopped && !planChanged;
     icon = <StatusIcon state={failed ? "failed" : "waitingUser"} size={15} />;
     tone = failed ? "error" : "gate";
     text = (
@@ -457,7 +459,11 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
         {d.quotaNote && <QuotaLine note={d.quotaNote} />}
       </>
     );
-    if (stopped) {
+    if (planChanged) {
+      actions = <PlanChangedChoices disabled={disabled} onAction={onAction} />;
+    } else if (kind === "error" && d.error?.code === "step.budget") {
+      actions = <BudgetChoices disabled={disabled} canGoOn={d.canGoOn === true} budget={d.continuationBudgetUsd} onAction={onAction} />;
+    } else if (stopped) {
       actions = <GoOnStopped disabled={disabled} canGoOn={d.canGoOn === true} onAction={onAction} />;
     } else if (kind === "error") {
       actions = (
@@ -467,18 +473,10 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
               {t.login}
             </button>
           )}
-          {d.error?.code === "mcp.planStale" ? (
-            <button className="btn btn--primary btn--sm" disabled={disabled}
-              onClick={() => onAction({ type: "reopen", step: "analyze" })}>
-              <Icon name="refresh" size={12} />
-              {t.reanalyze}
-            </button>
-          ) : (
-            <button className="btn btn--primary btn--sm" disabled={disabled} onClick={() => onAction({ type: "retry" })}>
-              <Icon name="refresh" size={12} />
-              {t.retry}
-            </button>
-          )}
+          <button className="btn btn--primary btn--sm" disabled={disabled} onClick={() => onAction({ type: "retry" })}>
+            <Icon name="refresh" size={12} />
+            {t.retry}
+          </button>
         </>
       );
     } else if (kind === "planReview") {

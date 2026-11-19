@@ -187,6 +187,9 @@ impl AppService {
             let dir = data_dir.as_ref()?;
             let launcher = CliLauncher::new(dir.join("guard-hooks")).ok()?;
             let flow = Flow::new(store.clone(), Arc::new(launcher), Some(dir.join("runs")));
+            if let Some(path) = &config_path {
+                flow.set_config_path(path.clone());
+            }
             let quota = live.clone();
             flow.set_quota_sink(move |snap| quota.observe_claude(snap));
             let gauges = live.clone();
@@ -1347,6 +1350,7 @@ impl AppService {
         let section = opw_context::render_comment_section(&items, &[]);
         std::fs::write(&file, opw_context::replace_comment_section(&brief, &section))
             .map_err(|e| ApiError::new("brief.write", format!("Không ghi được brief: {e}")))?;
+        flow.brief_refreshed(&ctx);
         if let Some(store) = &self.store {
             if let Ok(store) = store.lock() {
                 let detail = format!("{} comment", list.len());
@@ -1769,6 +1773,7 @@ impl AppService {
             tasks_dir_suggested: folders::desktop_suggestion().map(|p| p.to_string_lossy().into_owned()),
             notify: config.notify,
             steps: steps::settings(&config, &self.done_step_runs()),
+            verify_mcp: config.steps.verify_mcp,
             claude_active_probe_sec: config.quota.claude_active_probe_sec,
             claude_probe_min: config.quota.claude_probe_min,
             on_close: config.on_close,
@@ -1818,6 +1823,44 @@ impl AppService {
                 effort: req.effort.as_deref(),
                 permission_mode: req.permission_mode.as_deref(),
             },
+        )
+        .map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        Ok(self.settings())
+    }
+
+    pub fn set_verify_mcp(&self, on: bool) -> Result<SettingsView, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn cài đặt"))?;
+        opw_config::save_verify_mcp(path, on).map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        Ok(self.settings())
+    }
+
+    pub fn set_step_limits(
+        &self,
+        req: &opw_domain::view::StepLimitsRequest,
+    ) -> Result<SettingsView, ApiError> {
+        if !steps::ai_steps().any(|s| s == req.step)
+            || req.max_budget_usd.is_some_and(|v| !v.is_finite() || v <= 0.0)
+            || req.timeout_min == Some(0)
+        {
+            return Err(ApiError::new(
+                "step.limits",
+                "Trần chi phí và thời gian phải lớn hơn 0; để trống để dùng mặc định.",
+            ));
+        }
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn cài đặt"))?;
+        opw_config::save_step_limits(
+            path,
+            flow::step_key(req.step),
+            req.max_budget_usd,
+            req.timeout_min,
         )
         .map_err(|e| ApiError::new("config.write", e.to_string()))?;
         self.reload_config();
@@ -2053,6 +2096,49 @@ struct TaskComments<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_step_settings_validate_and_save_limits_separately() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"steps":{"analyze":{"model":"chosen","effort":"high"}}}"#,
+        )
+        .unwrap();
+        let service = AppService {
+            config_path: Some(path),
+            ..AppService::default()
+        };
+        service.reload_config();
+        assert!(service.settings().verify_mcp);
+        assert!(!service.set_verify_mcp(false).unwrap().verify_mcp);
+        let mut req = opw_domain::view::StepLimitsRequest {
+            step: StepKind::Analyze,
+            max_budget_usd: Some(7.0),
+            timeout_min: Some(32),
+        };
+        let view = service.set_step_limits(&req).unwrap();
+        let row = view.steps.iter().find(|s| s.step == StepKind::Analyze).unwrap();
+        assert_eq!(row.model.as_deref(), Some("chosen"));
+        assert_eq!(row.effort.as_deref(), Some("high"));
+        assert_eq!(row.max_budget_usd, Some(7.0));
+        assert_eq!(row.timeout_min, Some(32));
+        assert_eq!(row.default_budget_usd, 5.0);
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            req.max_budget_usd = Some(invalid);
+            assert!(service.set_step_limits(&req).is_err());
+        }
+        req.max_budget_usd = None;
+        req.timeout_min = Some(0);
+        assert!(service.set_step_limits(&req).is_err());
+        req.timeout_min = None;
+        let view = service.set_step_limits(&req).unwrap();
+        let row = view.steps.iter().find(|s| s.step == StepKind::Analyze).unwrap();
+        assert_eq!((row.max_budget_usd, row.timeout_min), (None, None));
+        req.step = StepKind::Checks;
+        assert!(service.set_step_limits(&req).is_err());
+    }
 
     #[test]
     fn quota_alerts_are_batched_and_fluctuating_sources_do_not_repeat_them() {

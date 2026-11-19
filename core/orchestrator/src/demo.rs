@@ -268,6 +268,7 @@ fn active_system(frame: u64) -> Option<TaskSystem> {
         since: DEMO_TIME.into(),
         message: match kind {
             GateKind::PlanReview => "Plan đã sẵn sàng, chờ bạn duyệt".into(),
+            GateKind::PlanChanged => "Brief đã đổi sau khi bạn duyệt plan".into(),
             GateKind::Findings => "Review báo lỗi: chọn lỗi cho AI sửa".into(),
             GateKind::AfterFix => "Sửa lỗi xong: Review chéo lại?".into(),
             GateKind::AgentQuestion => "AI đang hỏi bạn".into(),

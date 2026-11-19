@@ -218,7 +218,18 @@ export const vi = {
           ? "Chưa chạy lần nào"
           : [`${runs} lần chạy`, cost && `TB ${cost}`, time && `TB ${time}`].filter(Boolean).join(" · "),
       agentNote: "Đổi agent thì model, effort và quyền về mặc định.",
-      saved: "Đã lưu vào config.json",
+      saved: "Đã lưu",
+      verifyMcp: "Xác minh kết luận của AI (MCP)",
+      mcpOn: "Mỗi bước AI phải nộp kết luận cho app qua MCP. Thiếu kết luận hoặc AI báo chưa xong thì bước dừng. Áp dụng từ lần chạy sau.",
+      mcpOff: "App đọc câu trả lời cuối của AI như trước. Các kiểm tra repo, plan và điều kiện hoàn tất task vẫn áp dụng. Áp dụng từ lần chạy sau.",
+      budget: "Trần chi phí ($)",
+      timeout: "Thời gian tối đa (phút)",
+      budgetHint: "Chỉ áp dụng cho Claude. Để trống để dùng mặc định của app.",
+      timeoutHint: "Áp dụng cho cả hai AI. Để trống để dùng mặc định của app.",
+      saveLimits: "Lưu giới hạn",
+      agentHint: "AI thực hiện bước này. Đổi AI đưa model, effort và quyền về mặc định.",
+      modelHint: "Để Theo máy để dùng model mặc định của CLI.",
+      effortHint: "Chọn mức suy luận mà model hỗ trợ.",
       flags:
         "Cờ: Claude --model / --effort / --permission-mode, Codex -m / -c model_reasoning_effort / --sandbox. Đổi agent thì model, effort và quyền về mặc định.",
     },
@@ -453,8 +464,21 @@ export const vi = {
     stop: "Dừng",
     stopHint: "Dừng tiến trình AI của bước này. Sau đó gõ hướng dẫn rồi Chạy tiếp (AI làm tiếp trong phiên đó), hoặc Chạy lại từ đầu.",
     retry: "Thử lại",
-    reanalyze: "Quay lại Phân tích",
     retryFresh: "Chạy lại từ đầu",
+    /** the brief or the plan changed after the plan was approved */
+    planChanged: {
+      reanalyze: "Phân tích lại",
+      reanalyzeHint: "AI nhận plan cũ và phần thay đổi để chỉ sửa phần bị ảnh hưởng.",
+      keep: "Giữ plan, chạy tiếp",
+      keepHint: "Duyệt brief và plan hiện tại, rồi tiếp tục tại bước hoặc lựa chọn đang chờ.",
+    },
+    /** a Claude step reached its cost cap */
+    budget: {
+      retryFreshHint: "Mở phiên mới và chạy lại bước này với giới hạn hiện tại.",
+      goOn: (usd?: number) => (usd === undefined ? "Chạy tiếp" : `Chạy tiếp (thêm $${usd})`),
+      goOnHint: "Tiếp đúng phiên vừa dừng. Đổi trần tại Cài đặt → Các bước AI.",
+      goOnGone: "Phiên vừa dừng không còn để tiếp tục. Chọn Chạy lại từ đầu.",
+    },
     stoppedLabel: "Đã dừng, chờ bạn",
     retryFreshHint: "Chạy lại bước này bằng phiên mới, như chưa chạy lần nào (bỏ những gì AI làm dở trong phiên vừa dừng)",
     guidePlaceholder: "Hướng dẫn cho AI (không bắt buộc)",
@@ -972,7 +996,7 @@ export const stepHint: Record<StepKind, string> = {
   analyze: "AI đọc brief và code, viết plan; bạn duyệt plan trước khi code",
   implement: "AI code theo plan đã duyệt",
   checks:
-    "App tự chạy tsc, eslint, prettier trên file đã đổi ngay sau Viết code và sau mỗi lần Sửa lỗi (không tốn token). Lỗi ở file đã đổi thì AI sửa, tối đa 2 lần (eslint chỉ tính dòng task đã sửa); lỗi cũ ở file khác bỏ qua. Lệnh riêng của repo: `repos.<repo>.checks` trong config.json",
+    "App tự chạy tsc, eslint, prettier trên file đã đổi ngay sau Viết code và sau mỗi lần Sửa lỗi (không tốn token). Lỗi ở file đã đổi thì AI sửa, tối đa 2 lần (eslint chỉ tính dòng task đã sửa); lỗi cũ ở file khác bỏ qua. Xem lệnh và kết quả ở tab Tiến trình.",
   harness:
     "Không bắt buộc (bật/tắt ở cổng Duyệt plan): AI dựng harness ngoài repo trong thư mục scratch của task, dùng lại thư viện harness của chính repo, kèm negative control. App chạy harness, lỗi FAIL vào cổng chọn lỗi; sau mỗi lần Sửa lỗi app tự chạy lại (không tốn token). Harness dùng lại được thì lưu vào thư viện.",
   reviewLocal: "/review-local (hoặc prompt review của app) lần đầu, ngay sau khi code",
@@ -1023,6 +1047,7 @@ export const agentLabel: Record<AgentKind, string> = {
 
 export const gateLabel: Record<GateKind, string> = {
   planReview: "Duyệt plan",
+  planChanged: "Brief đã đổi, chờ bạn",
   findings: "Chọn lỗi cần sửa",
   afterFix: "Review chéo lại?",
   agentQuestion: "AI đang hỏi",

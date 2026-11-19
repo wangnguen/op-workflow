@@ -115,6 +115,10 @@
   /* the gates with three answers wrap instead of squeezing the message */
   max-width: min(640px, 64%);
 }
+.task-gate-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; width: 440px; max-width: 100%; }
+.task-gate-choice { display: flex; flex-direction: column; gap: 5px; }
+.task-gate-choice small { min-height: 4lh; line-height: 1.4; }
+.task-status-text > span { white-space: pre-line; max-height: 160px; overflow-y: auto; }
 .task-auto {
   display: inline-flex;
   align-items: center;

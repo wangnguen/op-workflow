@@ -13,6 +13,7 @@ export const asTab = (s: string | undefined): TaskTab | undefined =>
 /** The tab that shows what the task needs right now: a gate's own tab, the brief before the
  *  first step, otherwise the Tiến trình timeline. */
 export function defaultTab(d: TaskDetail): TaskTab {
+  if (d.gate?.kind === "planChanged") return "brief";
   if (d.gate?.kind === "planReview" || d.gate?.kind === "selfCode") return "plan";
   if (d.gate?.kind === "findings") return "findings";
   if (d.status === "awaitingPush" || d.status === "done") return "push";

@@ -98,6 +98,8 @@ fn main() {
             settings_api::reveal_path,
             settings_api::set_tasks_dir,
             settings_api::set_step_choice,
+            settings_api::set_verify_mcp,
+            settings_api::set_step_limits,
             settings_api::set_quota_probe,
             settings_api::step_models,
             settings_api::set_harness_dir,

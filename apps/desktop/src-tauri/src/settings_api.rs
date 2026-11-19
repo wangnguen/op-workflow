@@ -61,6 +61,19 @@ pub fn set_step_choice(
     service.set_step_choice(&choice)
 }
 
+#[tauri::command]
+pub fn set_verify_mcp(service: State<'_, AppService>, on: bool) -> Result<SettingsView, ApiError> {
+    service.set_verify_mcp(on)
+}
+
+#[tauri::command]
+pub fn set_step_limits(
+    service: State<'_, AppService>,
+    limits: opw_domain::view::StepLimitsRequest,
+) -> Result<SettingsView, ApiError> {
+    service.set_step_limits(&limits)
+}
+
 /// Settings → Hạn mức: how often Claude is probed while Claude Code is in use (seconds, 0 =
 /// off) and otherwise (minutes).
 #[tauri::command]

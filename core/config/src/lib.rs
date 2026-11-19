@@ -168,9 +168,11 @@ pub struct StepConfig {
 }
 
 /// Steps 2-8 (`steps` in config).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StepsConfig {
+    #[serde(default = "enabled")]
+    pub verify_mcp: bool,
     /// Run the next step by itself when one finishes. Off by default: PLAN.md §12 asks for a few
     /// real tasks in "stop after each step" mode first. Each task can turn it on for itself.
     pub auto_advance: bool,
@@ -187,6 +189,58 @@ pub struct StepsConfig {
     /// Step 11: the AI tries the change in Chrome (Chrome DevTools MCP).
     pub browser_test: StepConfig,
     pub push_summary: StepConfig,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+impl Default for StepsConfig {
+    fn default() -> Self {
+        Self {
+            verify_mcp: true,
+            auto_advance: false,
+            analyze: StepConfig::default(),
+            implement: StepConfig::default(),
+            review_local: StepConfig::default(),
+            fix: StepConfig::default(),
+            cross_review: StepConfig::default(),
+            final_review: StepConfig::default(),
+            harness: StepConfig::default(),
+            browser_test: StepConfig::default(),
+            push_summary: StepConfig::default(),
+        }
+    }
+}
+
+pub fn save_verify_mcp(path: &Path, on: bool) -> ConfigResult<()> {
+    edit_file(path, |root| {
+        object_at(root, "steps").insert("verifyMcp".into(), Value::Bool(on));
+    })
+}
+
+pub fn save_step_limits(
+    path: &Path,
+    key: &str,
+    budget: Option<f64>,
+    minutes: Option<u32>,
+) -> ConfigResult<()> {
+    edit_file(path, |root| {
+        let step = object_at(object_at(root, "steps"), key);
+        for (name, value) in [
+            ("maxBudgetUsd", budget.map(Value::from)),
+            ("timeoutMin", minutes.map(Value::from)),
+        ] {
+            match value {
+                Some(value) => {
+                    step.insert(name.into(), value);
+                }
+                None => {
+                    step.remove(name);
+                }
+            }
+        }
+    })
 }
 
 /// What the user picked for one step in Settings → Các bước AI.
@@ -727,6 +781,36 @@ mod tests {
         assert_eq!((cfg.steps.fix.model, cfg.steps.fix.effort), (None, None));
         assert_eq!((cfg.steps.fix.agent, cfg.steps.fix.permission_mode), (None, None));
         assert_eq!(cfg.steps.fix.max_budget_usd, Some(3.0));
+    }
+
+    #[test]
+    fn mcp_toggle_and_limits_preserve_other_step_settings() {
+        assert!(Config::from_value(&serde_json::json!({})).steps.verify_mcp);
+        assert!(
+            Config::from_value(&serde_json::json!({"steps":{}}))
+                .steps
+                .verify_mcp
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"steps":{"autoAdvance":true,"analyze":{"model":"chosen","effort":"high","permissionMode":"plan"}}}"#).unwrap();
+        save_verify_mcp(&path, false).unwrap();
+        save_step_limits(&path, "analyze", Some(7.5), Some(35)).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(!cfg.steps.verify_mcp);
+        assert!(cfg.steps.auto_advance);
+        assert_eq!(cfg.steps.analyze.model.as_deref(), Some("chosen"));
+        assert_eq!(cfg.steps.analyze.effort.as_deref(), Some("high"));
+        assert_eq!(cfg.steps.analyze.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(cfg.steps.analyze.max_budget_usd, Some(7.5));
+        assert_eq!(cfg.steps.analyze.timeout_min, Some(35));
+        save_step_limits(&path, "analyze", None, None).unwrap();
+        save_verify_mcp(&path, true).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.steps.verify_mcp);
+        assert_eq!(cfg.steps.analyze.max_budget_usd, None);
+        assert_eq!(cfg.steps.analyze.timeout_min, None);
+        assert_eq!(cfg.steps.analyze.model.as_deref(), Some("chosen"));
     }
 
     #[test]

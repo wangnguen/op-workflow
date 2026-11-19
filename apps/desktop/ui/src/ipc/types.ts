@@ -31,7 +31,7 @@ export type TaskColumn = "inbox" | "active" | "awaitingPush" | "done";
 
 /** `findings`: a review reported findings, the user picks what the AI fixes. `afterFix`: a Sửa
  *  lỗi finished, "Review chéo lại?". */
-export type GateKind = "planReview" | "findings" | "afterFix" | "agentQuestion" | "error" | "selfCode";
+export type GateKind = "planReview" | "planChanged" | "findings" | "afterFix" | "agentQuestion" | "error" | "selfCode";
 
 /** The answer at the after-fix gate: Codex reviews again, go on (the final review; again after
  *  its own fix), or pick more findings of the review that was fixed. */
@@ -225,6 +225,7 @@ export interface SettingsView {
   notify?: NotifySettings;
   /** agent, model and effort of each AI step, with past cost and time */
   steps?: StepSetting[];
+  verifyMcp?: boolean;
   /** probe Claude this often (seconds) while Claude Code is in use outside the app; 0 = off */
   claudeActiveProbeSec?: number;
   /** probe Claude this often (minutes) when Claude Code is not in use */
@@ -275,6 +276,10 @@ export interface AgentModel {
 
 /** One AI step in Settings → Các bước AI; absent model/effort = the CLI's default. */
 export interface StepSetting {
+  maxBudgetUsd?: number;
+  timeoutMin?: number;
+  defaultBudgetUsd?: number;
+  defaultTimeoutMin?: number;
   step: StepKind;
   agent: AgentKind;
   /** the agent of this step can be switched (every AI step but Test trình duyệt) */
@@ -934,6 +939,7 @@ export interface TaskDetail {
   agentQuestion?: AgentQuestionView;
   /** stopped with Dừng, and the run's session can go on: "Chạy tiếp" with the user's words */
   canGoOn?: boolean;
+  continuationBudgetUsd?: number;
   findings: FindingView[];
   /** docs/test judgement of the latest review of each kind */
   reviewNotes?: ReviewNote[];
@@ -986,6 +992,7 @@ export interface TestCase {
 }
 
 export type FlowAction =
+  | { type: "keepPlan" }
   | { type: "run" }
   | { type: "stop" }
   | { type: "retry" }
@@ -1070,6 +1077,8 @@ export interface Commands {
   restore_alerts: AlertView[];
   set_notify: SettingsView;
   set_step_choice: SettingsView;
+  set_verify_mcp: SettingsView;
+  set_step_limits: SettingsView;
   set_quota_probe: SettingsView;
   step_models: StepModels;
   step_chat: ChatView;
@@ -1110,6 +1119,8 @@ export interface CommandArgs {
   restore_alerts: { ids: number[] };
   set_notify: { kind: NotifyKind; on: boolean };
   set_step_choice: { choice: StepChoiceRequest };
+  set_verify_mcp: { on: boolean };
+  set_step_limits: { limits: { step: StepKind; maxBudgetUsd?: number; timeoutMin?: number } };
   set_quota_probe: { activeSec: number; idleMin: number };
   step_models: { refresh: boolean };
   step_chat: { wpId: number; runId?: number };

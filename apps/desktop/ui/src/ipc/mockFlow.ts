@@ -296,6 +296,8 @@ interface Flow {
   auto: boolean;
   brief: string;
   plan?: string;
+  approvedBrief?: string;
+  planChange?: string;
   push?: PushView;
   findings: Finding[];
   log: LogLine[];
@@ -895,6 +897,7 @@ function browserView(runs: number): TestView {
 
 /** Advance time: finish a run that is over, start the next step when auto-advance is on. */
 function tick(f: Flow): void {
+  if (f.planChange && f.phase !== "running") return;
   if (f.quotaWaiting && f.phase === "ready" && f.quotaUntil !== undefined && Date.now() >= f.quotaUntil) {
     f.quotaWaiting = false;
     log(f, "info", "Hạn mức đã reset");
@@ -937,12 +940,14 @@ function steps(f: Flow): StepView[] {
 }
 
 function status(f: Flow): FlowStatus {
+  if (f.planChange && f.phase !== "running") return "gate";
   return f.phase;
 }
 
 const unanswered = (f: Flow) => f.questions.filter((q) => !answered(q)).length;
 
 function gateView(f: Flow): GateView | undefined {
+  if (f.planChange && f.phase !== "running") return { kind: "planChanged", since: f.gateSince, message: f.planChange };
   if (f.phase !== "gate" || !f.gate) return undefined;
   const open = f.findings.filter((x) => x.state === "open").length;
   const picked = f.findings.filter(toFix).length;
@@ -950,6 +955,7 @@ function gateView(f: Flow): GateView | undefined {
   const next = skipTarget(f);
   const ask = f.round === 0 ? "Chạy Review chéo (vòng 1)?" : `Chạy Review chéo lại (vòng ${f.round + 1})?`;
   const message: Record<GateKind, string> = {
+    planChanged: f.planChange ?? "Brief đã đổi sau khi bạn duyệt plan.",
     planReview: unanswered(f)
       ? `Plan đã xong, AI hỏi ${unanswered(f)} câu: trả lời (hoặc để AI tự quyết) rồi duyệt.`
       : "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.",
@@ -1007,7 +1013,7 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     current: f.current,
     steps: steps(f),
     gate: gateView(f),
-    error: f.error,
+    error: f.planChange && f.phase !== "running" ? { code: "plan.briefChanged", message: f.planChange } : f.error,
     round: f.round,
     autoAdvance: f.auto,
     brief: f.brief,
@@ -1061,7 +1067,17 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
   const f = flowOf(wpId);
   tick(f);
   const running = f.phase === "running";
+  if (f.planChange && !["keepPlan", "reopen", "setAuto", "stop"].includes(action.type)) {
+    throw fail("plan.briefChanged", "Brief đã đổi: chọn Phân tích lại hoặc Giữ plan, chạy tiếp.");
+  }
   switch (action.type) {
+    case "keepPlan":
+      if (running || !f.planChange) throw fail("flow.notNow", "Lúc này chưa giữ plan được");
+      f.approvedBrief = f.brief;
+      f.planChange = undefined;
+      log(f, "info", "Bạn giữ plan sau khi brief đổi");
+      if (f.phase === "ready") startRun(f);
+      break;
     case "run":
       if (running) throw fail("step.running", "Bước này đang chạy");
       if (f.phase === "gate" && f.gate === "error" && f.current) {
@@ -1116,6 +1132,7 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
         throw fail("plan.questions", `Còn ${unanswered(f)} câu hỏi chưa trả lời: trả lời hoặc chọn "${AI_DECIDES}" trước khi duyệt`);
       }
       if (f.plan) f.plan = planWithAnswers(f.plan, f.questions);
+      f.approvedBrief = f.brief;
       f.states.analyze = "done";
       log(f, "ok", "Bạn duyệt plan: AI viết code", "analyze");
       goTo(f, "implement");
@@ -1189,6 +1206,7 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
     }
     case "selfCode":
       if (f.gate !== "planReview") throw fail("flow.notNow", "Lúc này chưa chọn tự code được");
+      f.approvedBrief = f.brief;
       f.states.analyze = "done";
       f.states.implement = "waitingUser";
       toGate(f, "selfCode", "implement");
@@ -1292,6 +1310,9 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
     case "reopen": {
       if (running) throw fail("step.running", "Bước này đang chạy");
       const step = action.step;
+      const reanalyzeChanged = f.planChange !== undefined && step === "analyze";
+      if (f.planChange && step !== "analyze") throw fail("plan.briefChanged", "Chọn Phân tích lại hoặc Giữ plan, chạy tiếp.");
+      if (step === "analyze") { f.approvedBrief = undefined; f.planChange = undefined; }
       if (step && (step === "intake" || f.states[step] === "pending")) {
         throw fail("flow.invalid", `Task chưa tới bước ${LABEL[step]} nên chưa chạy lại từ đó được`);
       }
@@ -1319,6 +1340,7 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       }
       const text = step ? `Làm tiếp: chạy lại từ ${LABEL[step]}` : `Làm tiếp ở ${LABEL[f.current ?? "pushSummary"]}`;
       log(f, "info", note ? `${text}, kèm ghi chú: ${note}` : text, step);
+      if (reanalyzeChanged) startRun(f);
       break;
     }
     case "setAuto":
@@ -1417,7 +1439,11 @@ export function mockAllowBash(wpId: number, rule: string): TaskDetail {
 
 export function mockSaveBrief(wpId: number, text: string): TaskDetail {
   if (!text.trim()) throw fail("brief.empty", "Brief trống");
-  flowOf(wpId).brief = text;
+  const f = flowOf(wpId);
+  f.brief = text;
+  if (f.approvedBrief !== undefined && f.approvedBrief !== text && f.phase !== "done") {
+    f.planChange = "Brief đã đổi sau khi bạn duyệt plan.\nBrief / plan được sửa tay.";
+  }
   return mockTaskDetail(wpId);
 }
 

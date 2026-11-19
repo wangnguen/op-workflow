@@ -695,6 +695,19 @@
   align-items: center;
 }
 
+.set-mcp { padding: 12px 16px; }
+.set-mcp-label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.set-mcp-hint { margin: 6px 0 0; min-height: 3lh; }
+.set-mcp-hints { display: grid; }
+.set-mcp-hints > p { grid-area: 1 / 1; }
+.set-save-status { min-height: 3lh; margin: 6px 0; }
+.set-choice-hint { min-height: 3lh; max-width: 250px; white-space: normal; }
+.set-step-limits { align-items: flex-start; }
+.set-step-limits .input { width: 100%; }
+.set-step-limits > .set-step-field { flex: 1; min-width: 160px; }
+.set-step-limits > button { margin-top: 20px; }
+.set-reset-note { min-height: 2lh; }
+
 /* Repo & nhánh → Thư viện harness: the folder, changed in place */
 .set-harness {
   display: flex;

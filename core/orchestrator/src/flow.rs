@@ -172,12 +172,19 @@ struct Saved {
     fixes: u32,
     /// Feedback on the plan for the next analyze.
     feedback: Option<String>,
-    /// Why the previous draft failed its read-only verification.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    audit_feedback: Option<String>,
     /// Exact contents verified at the plan gate. Replaced when approved answers are appended.
     #[serde(skip_serializing_if = "Option::is_none")]
     verified_plan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approved_brief: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approved_plan: Option<String>,
+    /// Exact brief last written by Cập nhật brief, to distinguish edits inside its comments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refreshed_brief: Option<String>,
+    /// A question over the existing phase; keeping the plan restores that exact decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan_change: Option<String>,
     /// When the phase last changed.
     since: Option<String>,
     /// A process was running when this was saved.
@@ -220,7 +227,7 @@ struct Saved {
     /// The AI of a step stopped to ask the user (question gate), and the answer once given.
     #[serde(skip_serializing_if = "Option::is_none")]
     ask: Option<AskState>,
-    /// The user pressed Dừng: the run's session, when "Chạy tiếp" can go on in it.
+    /// Dừng or Claude's budget cap: the session that "Chạy tiếp" can resume.
     #[serde(skip_serializing_if = "Option::is_none")]
     stopped: Option<StoppedRun>,
     /// "Chạy tiếp": the next run of that step goes on in the stopped session with the user's words.
@@ -723,10 +730,10 @@ fn provider_of(agent: AgentKind) -> Provider {
 }
 
 /// Budget (USD) and timeout of a step: config first, then the app's defaults.
-fn limits(step: StepKind, config: &Config) -> (f64, Duration, &'static str) {
+pub(crate) fn limits(step: StepKind, config: &Config) -> (f64, Duration, &'static str) {
     let steps = &config.steps;
     let (cfg, budget, minutes, key): (&StepConfig, f64, u32, &str) = match step {
-        StepKind::Analyze => (&steps.analyze, 1.5, 20, "analyze"),
+        StepKind::Analyze => (&steps.analyze, 5.0, 20, "analyze"),
         StepKind::Implement => (&steps.implement, 5.0, 60, "implement"),
         StepKind::ReviewLocal => (&steps.review_local, 3.0, 30, "reviewLocal"),
         StepKind::FinalReview => (&steps.final_review, 3.0, 30, "finalReview"),
@@ -1042,6 +1049,7 @@ struct Inner {
     quitting: AtomicBool,
     quota_source: Mutex<Option<QuotaSource>>,
     require_mcp: bool,
+    config_path: Mutex<Option<PathBuf>>,
 }
 
 /// The workflow engine shared by the Tauri commands.
@@ -1099,8 +1107,6 @@ struct Claim {
     /// A run inside another step (the automatic repair of Kiểm tra, the review of a harness): the
     /// outer step reports to the app, and what this run gives back is checked by the app itself.
     nested: bool,
-    /// A fresh read-only analysis run that may verify the draft but cannot replace it.
-    plan_audit: bool,
 }
 
 /// What an AI run gave back, whichever CLI ran it.
@@ -1123,6 +1129,40 @@ struct Done {
 }
 
 impl Flow {
+    pub fn set_config_path(&self, path: PathBuf) {
+        *self.inner.config_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+    }
+
+    pub fn brief_refreshed(&self, ctx: &TaskCtx) {
+        self.inner
+            .with_saved(ctx.row.wp_id, |s| s.refreshed_brief = ctx.read(BRIEF_FILE));
+        self.observe_plan(ctx);
+    }
+
+    /// Reconcile file edits and refreshed comments without consuming the pending workflow decision.
+    pub fn observe_plan(&self, ctx: &TaskCtx) {
+        if !self.inner.require_mcp {
+            return;
+        }
+        let alert = {
+            let mut tasks = self.inner.lock_tasks();
+            let Some(entry) = tasks.get_mut(&ctx.row.wp_id) else {
+                return;
+            };
+            let previous = entry.saved.plan_change.clone();
+            let changed = notice_plan_change(entry, ctx);
+            if previous != entry.saved.plan_change {
+                self.inner.persist(ctx.row.wp_id, entry);
+            }
+            changed.then(|| plan_change_alert(ctx, entry.saved.plan_change.as_deref().unwrap_or_default()))
+        };
+        if let Some(alert) = alert {
+            if let Some(sink) = self.inner.alert_sink.lock().ok().and_then(|s| s.clone()) {
+                sink(alert);
+            }
+        }
+    }
+
     /// Load every saved workflow. A step that was running when the app closed is marked failed
     /// (its process is gone) so the user can retry it.
     pub fn new(store: Arc<Mutex<Store>>, launcher: Arc<dyn Launcher>, runs_dir: Option<PathBuf>) -> Self {
@@ -1216,6 +1256,7 @@ impl Flow {
                 quitting: AtomicBool::new(false),
                 quota_source: Mutex::new(None),
                 require_mcp,
+                config_path: Mutex::new(None),
             }),
         }
     }
@@ -1437,6 +1478,7 @@ impl Flow {
     /// A button of the task window or the card.
     pub fn act(&self, ctx: TaskCtx, action: FlowAction) -> Result<(), ApiError> {
         self.ensure(&ctx);
+        self.observe_plan(&ctx);
         let wp_id = ctx.row.wp_id;
         let start = {
             let mut tasks = self.inner.lock_tasks();
@@ -1533,6 +1575,7 @@ impl Flow {
     }
 
     pub fn card(&self, ctx: &TaskCtx) -> Option<CardFlow> {
+        self.observe_plan(ctx);
         let tasks = self.inner.lock_tasks();
         let entry = tasks.get(&ctx.row.wp_id)?;
         let runs = self.inner.runs(ctx.row.wp_id);
@@ -1542,21 +1585,33 @@ impl Flow {
         let state = match status {
             FlowStatus::Running => StepState::Running,
             FlowStatus::Ready => StepState::Pending,
-            FlowStatus::Gate if wf.phase() == Phase::Gate(GateKind::Error) => StepState::Failed,
+            FlowStatus::Gate
+                if entry.saved.plan_change.is_none() && wf.phase() == Phase::Gate(GateKind::Error) =>
+            {
+                StepState::Failed
+            }
             FlowStatus::Gate => StepState::WaitingUser,
             FlowStatus::AwaitingPush | FlowStatus::Done => StepState::Done,
             FlowStatus::NotStarted => StepState::Pending,
         };
-        let gate = match wf.phase() {
-            Phase::Gate(kind) => Some(kind),
-            _ => None,
-        };
-        let note = match (status, &entry.saved.error) {
-            (FlowStatus::Gate, Some(e)) if gate == Some(GateKind::Error) => Some(short(&e.message)),
-            (FlowStatus::Gate, _) => {
-                gate.map(|g| gate_message(g, entry, &self.inner.findings(ctx.row.wp_id)))
+        let gate = if entry.saved.plan_change.is_some() {
+            Some(GateKind::PlanChanged)
+        } else {
+            match wf.phase() {
+                Phase::Gate(kind) => Some(kind),
+                _ => None,
             }
-            _ => None,
+        };
+        let note = if let Some(message) = &entry.saved.plan_change {
+            Some(short(message))
+        } else {
+            match (status, &entry.saved.error) {
+                (FlowStatus::Gate, Some(e)) if gate == Some(GateKind::Error) => Some(short(&e.message)),
+                (FlowStatus::Gate, _) => {
+                    gate.map(|g| gate_message(g, entry, &self.inner.findings(ctx.row.wp_id)))
+                }
+                _ => None,
+            }
         };
         let cost: f64 = runs.iter().filter_map(|r| r.cost_usd).sum();
         Some(CardFlow {
@@ -1648,6 +1703,7 @@ impl Flow {
     /// Everything the task window shows. Reads the task files; call it off the UI thread.
     pub fn detail(&self, ctx: &TaskCtx) -> TaskDetail {
         self.ensure(ctx);
+        self.observe_plan(ctx);
         // Keep the run rows and phase in the same snapshot: finish writes its note before
         // releasing this lock and making the step appear idle.
         let tasks = self.inner.lock_tasks();
@@ -1672,7 +1728,19 @@ impl Flow {
             current: current_step(entry),
             steps: step_views(entry, &runs, &ctx.row.updated_at),
             gate: gate_view(entry, &findings),
-            error: entry.saved.error.clone(),
+            error: entry
+                .saved
+                .plan_change
+                .as_ref()
+                .map(|message| flow_error("plan.briefChanged", message.clone()))
+                .or_else(|| entry.saved.error.clone()),
+            continuation_budget_usd: entry
+                .saved
+                .error
+                .as_ref()
+                .filter(|e| e.code == "step.budget")
+                .and_then(|_| current_step(entry))
+                .map(|step| limits(ai_limit_step(step), &ctx.config).0),
             running: entry.run.as_ref().map(|r| RunView {
                 step: r.step,
                 agent: r.agent,
@@ -1713,7 +1781,7 @@ impl Flow {
                         .saved
                         .error
                         .as_ref()
-                        .is_some_and(|e| e.code == "step.stopped")
+                        .is_some_and(|e| matches!(e.code.as_str(), "step.stopped" | "step.budget"))
             }),
             uses: SWITCHABLE
                 .into_iter()
@@ -2137,10 +2205,94 @@ fn require_current_plan(saved: &Saved, ctx: &TaskCtx) -> Result<(), FlowError> {
     if saved.verified_plan.is_some() && saved.verified_plan == plan_stamp(ctx) {
         return Ok(());
     }
-    Err(flow_error(
-        "mcp.planStale",
-        "Brief hoặc plan đã đổi, hoặc plan chưa được xác minh. Quay lại Phân tích rồi duyệt plan mới.",
-    ))
+    Err(flow_error("plan.briefChanged", plan_change_message(saved, ctx)))
+}
+
+fn remember_plan(saved: &mut Saved, ctx: &TaskCtx) -> Result<(), FlowError> {
+    let brief = ctx
+        .read(BRIEF_FILE)
+        .ok_or_else(|| flow_error("brief.missing", "Không đọc được brief.md"))?;
+    let plan = ctx
+        .read(PLAN_FILE)
+        .filter(|p| !p.trim().is_empty())
+        .ok_or_else(|| flow_error("plan.missing", "Không đọc được plan.md"))?;
+    saved.verified_plan = Some(plan_digest(ctx, &brief, &plan));
+    saved.approved_brief = Some(brief);
+    saved.approved_plan = Some(plan);
+    saved.refreshed_brief = None;
+    saved.plan_change = None;
+    Ok(())
+}
+
+fn plan_change_message(saved: &Saved, ctx: &TaskCtx) -> String {
+    let current = ctx.read(BRIEF_FILE).unwrap_or_default();
+    let old = saved.approved_brief.as_deref().unwrap_or_default();
+    let comments = |brief: &str| {
+        brief
+            .split_once("## Comment trên OpenProject")
+            .map(|(_, rest)| rest.split("\n## ").next().unwrap_or_default().trim().to_owned())
+            .unwrap_or_default()
+    };
+    let fresh = comments(&current);
+    let before = comments(old);
+    let added: Vec<_> = fresh
+        .split("\n### ")
+        .filter(|part| !part.trim().is_empty() && !before.contains(part.trim()))
+        .collect();
+    let manual = opw_context::replace_comment_section(old, "").trim()
+        != opw_context::replace_comment_section(&current, "").trim()
+        || saved.approved_plan != ctx.read(PLAN_FILE)
+        || (before != fresh
+            && saved.refreshed_brief.as_ref().map(|b| comments(b)).as_deref() != Some(fresh.as_str()));
+    let mut message = String::from("Brief đã đổi sau khi bạn duyệt plan.");
+    if before != fresh && !added.is_empty() {
+        message.push_str("\nComment mới hoặc đã cập nhật trong brief:\n");
+        message.push_str(&added.join("\n### "));
+    }
+    if manual || before == fresh {
+        message.push_str("\nBrief / plan được sửa tay.");
+    }
+    message
+}
+
+/// Called only while idle, including immediately after a successful running step.
+fn notice_plan_change(entry: &mut Entry, ctx: &TaskCtx) -> bool {
+    if entry.run.is_some()
+        || entry.saved.finished
+        || entry.saved.verified_plan.is_none()
+        || matches!(
+            entry.saved.workflow.phase(),
+            Phase::NotStarted | Phase::Running(StepKind::Analyze) | Phase::Gate(GateKind::PlanReview)
+        )
+    {
+        return false;
+    }
+    if require_current_plan(&entry.saved, ctx).is_ok() {
+        return false;
+    }
+    let message = plan_change_message(&entry.saved, ctx);
+    let first = entry.saved.plan_change.is_none();
+    entry.saved.plan_change = Some(message);
+    if first {
+        push_log(
+            entry,
+            current_step(entry),
+            "info",
+            "Brief đã đổi sau khi bạn duyệt plan: chờ bạn chọn cách tiếp tục",
+        );
+    }
+    first
+}
+
+fn plan_change_alert(ctx: &TaskCtx, message: &str) -> FlowAlert {
+    FlowAlert {
+        wp_id: ctx.row.wp_id,
+        task_id: ctx.row.display_id.clone(),
+        kind: AlertKind::Gate,
+        title: format!("{} · Brief đã đổi, chờ bạn", ctx.row.display_id),
+        body: message.to_owned(),
+        tab: "brief",
+    }
 }
 
 fn validate_analysis(plan: &str, output: &str) -> Result<(), FlowError> {
@@ -2205,6 +2357,23 @@ fn apply_action(
     use WorkflowEvent as E;
     let running = entry.run.is_some();
     let phase = entry.saved.workflow.phase();
+    if entry.saved.plan_change.is_some()
+        && !matches!(
+            action,
+            FlowAction::KeepPlan
+                | FlowAction::Reopen {
+                    step: Some(StepKind::Analyze),
+                    ..
+                }
+                | FlowAction::SetAuto { .. }
+                | FlowAction::Stop
+        )
+    {
+        return Err(ApiError::new(
+            "plan.briefChanged",
+            "Brief đã đổi: chọn Phân tích lại hoặc Giữ plan, chạy tiếp.",
+        ));
+    }
     let event = |entry: &mut Entry, e: WorkflowEvent| -> Result<(), ApiError> {
         entry
             .saved
@@ -2215,6 +2384,19 @@ fn apply_action(
         Ok(())
     };
     match action {
+        FlowAction::KeepPlan => {
+            if running || entry.saved.plan_change.is_none() {
+                return Err(not_now("giữ plan"));
+            }
+            remember_plan(&mut entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
+            push_log(
+                entry,
+                current_step(entry),
+                "info",
+                "Bạn giữ plan sau khi brief đổi",
+            );
+            Ok(matches!(phase, Phase::Running(_)))
+        }
         FlowAction::Run => {
             if running {
                 return Err(ApiError::new("step.running", "Bước này đang chạy"));
@@ -2268,7 +2450,7 @@ fn apply_action(
                     .saved
                     .error
                     .as_ref()
-                    .is_some_and(|e| e.code == "step.stopped");
+                    .is_some_and(|e| matches!(e.code.as_str(), "step.stopped" | "step.budget"));
             let stopped = entry
                 .saved
                 .stopped
@@ -2279,7 +2461,7 @@ fn apply_action(
                 Some(h) if stopped.step == StepKind::Harness && !h.reviewed && !h.run.is_empty() => {
                     other_agent(h.builder.unwrap_or_else(|| ctx.agent_for(StepKind::Harness)))
                 }
-                _ => ctx.agent_for(stopped.step),
+                _ => ctx.agent_for(ai_limit_step(stopped.step)),
             };
             if agent != stopped.agent {
                 return Err(ApiError::new(
@@ -2321,9 +2503,6 @@ fn apply_action(
             if phase != Phase::Gate(GateKind::PlanReview) {
                 return Err(not_now("duyệt plan"));
             }
-            if require_mcp {
-                require_current_plan(&entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
-            }
             let open = entry.saved.questions.iter().filter(|q| !q.answered()).count();
             if open > 0 {
                 return Err(ApiError::new(
@@ -2338,7 +2517,7 @@ fn apply_action(
                     .map_err(|e| ApiError::new(e.code, e.message))?;
             }
             if require_mcp {
-                entry.saved.verified_plan = plan_stamp(ctx);
+                remember_plan(&mut entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
             }
             event(entry, E::PlanApproved)?;
             push_log(
@@ -2501,8 +2680,11 @@ fn apply_action(
             Ok(false)
         }
         FlowAction::SelfCode => {
+            if phase != Phase::Gate(GateKind::PlanReview) {
+                return Err(not_now("tự code"));
+            }
             if require_mcp {
-                require_current_plan(&entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
+                remember_plan(&mut entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
             }
             event(entry, E::SelfCode)?;
             push_log(
@@ -2638,6 +2820,7 @@ fn apply_action(
             if phase == Phase::NotStarted {
                 return Err(not_now("làm tiếp"));
             }
+            let reanalyze_changed = entry.saved.plan_change.is_some() && *step == Some(StepKind::Analyze);
             if let Some(step) = *step {
                 event(entry, E::Reopen(step))?;
                 // the Sửa lỗi count starts over with the review loop
@@ -2645,8 +2828,8 @@ fn apply_action(
                     entry.saved.fixes = 0;
                 }
                 if step == StepKind::Analyze {
-                    entry.saved.feedback = None;
-                    entry.saved.audit_feedback = None;
+                    entry.saved.feedback = entry.saved.plan_change.take().map(|change|
+                        format!("Brief có comment mới hoặc thay đổi sau khi duyệt plan. Chỉ sửa phần bị ảnh hưởng.\n{change}"));
                     entry.saved.verified_plan = None;
                 }
                 // asked for by hand: Review chốt runs even on code Tự review already saw
@@ -2676,7 +2859,7 @@ fn apply_action(
                 None => text,
             };
             push_log(entry, *step, "info", &text);
-            Ok(false)
+            Ok(reanalyze_changed)
         }
         FlowAction::SetAuto { on } => {
             entry.saved.auto = Some(*on);
@@ -2745,6 +2928,9 @@ fn stop_alert(ctx: &TaskCtx, step: StepKind, entry: &Entry, text: &str) -> Optio
         .is_some_and(|e| e.code == "step.stopped")
     {
         return None;
+    }
+    if let Some(message) = &entry.saved.plan_change {
+        return Some(plan_change_alert(ctx, message));
     }
     let task_id = ctx.row.display_id.clone();
     let title_of = |what: &str| format!("{task_id} · {what}");
@@ -2829,6 +3015,9 @@ fn status_of(entry: &Entry) -> FlowStatus {
     }
     if entry.run.is_some() {
         return FlowStatus::Running;
+    }
+    if entry.saved.plan_change.is_some() {
+        return FlowStatus::Gate;
     }
     match entry.saved.workflow.phase() {
         Phase::NotStarted => FlowStatus::NotStarted,
@@ -2935,6 +3124,7 @@ fn rounds_note(round: u8) -> String {
 fn gate_message(kind: GateKind, entry: &Entry, findings: &[FindingRow]) -> String {
     let wf = &entry.saved.workflow;
     match kind {
+        GateKind::PlanChanged => entry.saved.plan_change.clone().unwrap_or_default(),
         GateKind::PlanReview => {
             let open = entry.saved.questions.iter().filter(|q| !q.answered()).count();
             if open > 0 {
@@ -2979,6 +3169,17 @@ fn gate_message(kind: GateKind, entry: &Entry, findings: &[FindingRow]) -> Strin
 }
 
 fn gate_view(entry: &Entry, findings: &[FindingRow]) -> Option<GateView> {
+    if entry.run.is_none() {
+        if let Some(message) = &entry.saved.plan_change {
+            return Some(GateView {
+                kind: GateKind::PlanChanged,
+                since: entry.saved.since.clone().unwrap_or_default(),
+                message: message.clone(),
+                review: None,
+                next: current_step(entry),
+            });
+        }
+    }
     if entry.run.is_some() {
         return None;
     }
@@ -3214,7 +3415,6 @@ impl Inner {
                 choice,
                 mode,
                 nested: false,
-                plan_audit: false,
             },
             text,
         ))
@@ -3269,7 +3469,7 @@ impl Inner {
         }
         // Dừng: the run's session, for "Chạy tiếp"
         let stopped_run = match &result {
-            Err(e) if e.code == "step.stopped" && !quitting => {
+            Err(e) if matches!(e.code.as_str(), "step.stopped" | "step.budget") && !quitting => {
                 early.and_then(|id| self.runs(wp_id).into_iter().find(|r| r.id == id))
             }
             _ => None,
@@ -3301,7 +3501,6 @@ impl Inner {
                     }
                     if step == StepKind::Analyze {
                         entry.saved.feedback = None;
-                        entry.saved.audit_feedback = None;
                     }
                     note.clone_from(&done.note);
                     let cost = done.cost.map(|c| format!(" ({})", usd(c))).unwrap_or_default();
@@ -3316,21 +3515,28 @@ impl Inner {
                     ("error", text)
                 }
             },
+            Err(err) if err.code == "plan.briefChanged" => {
+                entry.saved.plan_change = Some(err.message.clone());
+                ("info", err.message)
+            }
             Err(mut err) => {
                 let _ = entry.saved.workflow.apply(WorkflowEvent::StepFailed(step));
-                if err.code == "step.stopped" && !quitting {
+                if matches!(err.code.as_str(), "step.stopped" | "step.budget") && !quitting {
                     entry.saved.go_on = None;
                     entry.saved.stopped = stopped_run.as_ref().and_then(|row| {
                         let agent = agent_of_row(row);
                         let session = row.session_id.clone().filter(|s| !s.is_empty())?;
-                        can_go_on(step, agent).then_some(StoppedRun { step, agent, session })
+                        (can_go_on(step, agent) || (err.code == "step.budget" && agent == AgentKind::Claude))
+                            .then_some(StoppedRun { step, agent, session })
                     });
-                    err.message = if entry.saved.stopped.is_some() {
-                        STOPPED_GO_ON
-                    } else {
-                        STOPPED_AGAIN
+                    if err.code == "step.stopped" {
+                        err.message = if entry.saved.stopped.is_some() {
+                            STOPPED_GO_ON
+                        } else {
+                            STOPPED_AGAIN
+                        }
+                        .to_owned();
                     }
-                    .to_owned();
                 }
                 let text = format!("{} lỗi: {}", step_label(step), err.message);
                 note = short(&err.message);
@@ -3362,7 +3568,9 @@ impl Inner {
                 .harness
                 .as_ref()
                 .is_some_and(|h| h.reviewed && !h.run.is_empty());
-        let go_on = kind == "ok"
+        let changed = self.require_mcp && notice_plan_change(entry, ctx);
+        let go_on = entry.saved.plan_change.is_none()
+            && kind == "ok"
             && match entry.saved.workflow.phase() {
                 Phase::Running(StepKind::Checks) => true,
                 // after a fix of what the harness found, the app runs it again: no tokens either
@@ -3399,7 +3607,8 @@ impl Inner {
             }
             _ => None,
         };
-        let mut alert = None;
+        let mut alert =
+            changed.then(|| plan_change_alert(ctx, entry.saved.plan_change.as_deref().unwrap_or_default()));
         let mut go_on = go_on;
         match quota_stop {
             Some((true, said, next, provider)) => {
@@ -3657,11 +3866,7 @@ impl Inner {
             return (None, None);
         };
         let stamp = now().replace([':', '.'], "-");
-        let suffix = if claim.plan_audit {
-            "analyze-audit"
-        } else {
-            step_key(claim.step)
-        };
+        let suffix = step_key(claim.step);
         let name = format!("{}/{stamp}-{suffix}.jsonl", ctx.row.display_id);
         let path = runs.join(&name);
         let file = path
@@ -3697,7 +3902,11 @@ impl Inner {
         claim: &Claim,
         job: &mut Job,
     ) -> Result<Option<flow_mcp::Run>, FlowError> {
-        if !self.require_mcp || claim.nested || flow_mcp::criteria(claim.step, claim.plan_audit).is_empty() {
+        if !self.require_mcp
+            || !ctx.config.steps.verify_mcp
+            || claim.nested
+            || flow_mcp::criteria(claim.step).is_empty()
+        {
             return Ok(None);
         }
         let rows = self.findings(ctx.row.wp_id);
@@ -3725,19 +3934,19 @@ impl Inner {
             "branch": ctx.row.branch,
             "base": ctx.row.base,
             "step": claim.step,
-            "purpose": if claim.plan_audit { "verifyPlan" } else { "executeStep" },
+            "purpose": "executeStep",
             "brief": ctx.read(BRIEF_FILE),
             "approvedPlan": plan,
             "checksActuallyRun": checks,
             "findings": findings,
         });
-        let mcp = flow_mcp::Run::start(claim.step, claim.plan_audit, &job.cwd, context).map_err(|e| {
+        let mcp = flow_mcp::Run::start(claim.step, &job.cwd, context).map_err(|e| {
             flow_error(
                 "mcp.start",
                 format!("Không mở được MCP để xác minh bước: {e}. Bấm Thử lại."),
             )
         })?;
-        let instructions = flow_mcp::instructions(claim.step, claim.plan_audit);
+        let instructions = flow_mcp::instructions(claim.step);
         if let Some(prompt) = job.stdin.as_mut() {
             *prompt = format!("{instructions}\n\n{prompt}");
         } else if let Some(prompt) = job.args.get_mut(1).filter(|arg| arg.starts_with('/')) {
@@ -3767,11 +3976,7 @@ impl Inner {
             "AI đã thoát nhưng chưa nộp kết quả xác minh. Bước chưa hoàn thành. Xem Chat rồi bấm Thử lại.",
         ))?;
         let summary = opw_context::redact(&verdict.summary, &[]);
-        let summary = if claim.plan_audit {
-            summary
-        } else {
-            short(&summary)
-        };
+        let summary = short(&summary);
         let browser_question = claim.step == StepKind::BrowserTest && browsertest::question(answer).is_some();
         match verdict.outcome {
             Outcome::Completed if !browser_question => {
@@ -3813,17 +4018,26 @@ impl Inner {
         claim: &Claim,
     ) -> Result<RunResult, FlowError> {
         let mut job = job.clone();
+        // A capped push summary can resume too, while Dừng keeps its existing fresh-run choice.
+        if step == StepKind::PushSummary {
+            job.args.retain(|arg| arg != "--no-session-persistence");
+        }
         // "Chạy tiếp" after Dừng: the stopped session, the user's words as its next message
-        let go_on = (!claim.plan_audit)
-            .then(|| self.take_go_on(ctx.row.wp_id, step, AgentKind::Claude))
-            .flatten();
+        let go_on = self.take_go_on(ctx.row.wp_id, step, AgentKind::Claude);
         if let Some(g) = go_on {
             if let Some(i) = job.args.iter().position(|a| a == "--resume") {
                 let end = (i + 2).min(job.args.len());
                 job.args.drain(i..end);
             }
             job.args.extend(["--resume".to_owned(), g.session]);
-            job.stdin = Some(prompts::go_on(&g.note, None));
+            if job.args.get(1).is_some_and(|arg| arg.starts_with('/')) {
+                job.args.remove(1);
+            }
+            job.stdin = Some(if step == StepKind::Analyze {
+                prompts::go_on_analysis(&g.note)
+            } else {
+                prompts::go_on(&g.note, None)
+            });
         }
         if !job
             .args
@@ -3843,21 +4057,14 @@ impl Inner {
         let stop: &AtomicBool = &claim.stop;
         use std::io::Write;
         let wp_id = ctx.row.wp_id;
-        let (budget, timeout, key) = limits(step, &ctx.config);
+        let (budget, timeout, key) = limits(ai_limit_step(step), &ctx.config);
         let (mut raw, log) = self.open_log(ctx, claim, job);
         let run_id = self.begin_run(ctx, step, "claude", log.as_deref());
         let mut result: Option<RunResult> = None;
         let mut session = String::new();
         let mut used_model = String::new();
-        let quota_hit = |session: &str, why: &str| {
-            self.quota_hit(
-                ctx,
-                step,
-                Provider::Claude,
-                (!claim.plan_audit).then_some(session),
-                why,
-            )
-        };
+        let quota_hit =
+            |session: &str, why: &str| self.quota_hit(ctx, step, Provider::Claude, Some(session), why);
         let mut on_line = |line: &str| {
             if let Some(f) = raw.as_mut() {
                 let _ = writeln!(f, "{line}");
@@ -3895,7 +4102,7 @@ impl Inner {
                 id,
                 &StepRunEnd {
                     state,
-                    session_id: sid.filter(|_| !claim.plan_audit),
+                    session_id: sid,
                     cost_usd: r.map(|r| r.cost_usd),
                     tokens_in: r.map(|r| r.tokens_in),
                     tokens_out: r.map(|r| r.tokens_out),
@@ -3930,7 +4137,8 @@ impl Inner {
             Some(r) if r.over_budget() => Err(flow_error(
                 "step.budget",
                 format!(
-                    "Bước này chạm giới hạn ${budget}. Tăng `steps.{key}.maxBudgetUsd` trong config.json nếu cần, rồi bấm Thử lại."
+                    "Bước này chạm trần ${budget}. Chọn Chạy tiếp để cấp thêm ngân sách trong cùng phiên, hoặc Chạy lại từ đầu. Đổi trần tại Cài đặt → Các bước AI → {}.",
+                    step_label(ai_limit_step(step))
                 ),
             )),
             Some(r) if r.is_error || !outcome.success() => {
@@ -3994,9 +4202,7 @@ impl Inner {
         let wp_id = ctx.row.wp_id;
         // "Chạy tiếp" after Dừng: `exec … resume <stopped thread> -` with the user's words
         let resumed;
-        let go_on = (!claim.plan_audit)
-            .then(|| self.take_go_on(wp_id, step, AgentKind::Codex))
-            .flatten();
+        let go_on = self.take_go_on(wp_id, step, AgentKind::Codex);
         let job = match go_on {
             Some(g) => {
                 let mut j = job.clone();
@@ -4013,7 +4219,7 @@ impl Inner {
         let mut job = job.clone();
         let mcp = self.attach_mcp(ctx, claim, &mut job)?;
         let job = &job;
-        let (_, timeout, key) = limits(step, &ctx.config);
+        let (_, timeout, key) = limits(ai_limit_step(step), &ctx.config);
         let (mut raw, log) = self.open_log(ctx, claim, job);
         let run_id = self.begin_run(ctx, step, "codex", log.as_deref());
         let mut thread = String::new();
@@ -4047,7 +4253,7 @@ impl Inner {
                 id,
                 &StepRunEnd {
                     state: if ok { "done" } else { "failed" },
-                    session_id: Some(thread.as_str()).filter(|t| !claim.plan_audit && !t.is_empty()),
+                    session_id: Some(thread.as_str()).filter(|t| !t.is_empty()),
                     cost_usd: None,
                     tokens_in: Some(tokens_in),
                     tokens_out: Some(tokens_out),
@@ -4077,13 +4283,7 @@ impl Inner {
             return Err(self.cut_session_lost(wp_id, step, Provider::Codex));
         }
         if (failed.is_some() || !outcome.success()) && quotagate::looks_quota_hit(&quota_text) {
-            return Err(self.quota_hit(
-                ctx,
-                step,
-                Provider::Codex,
-                (!claim.plan_audit).then_some(thread.as_str()),
-                &quota_text,
-            ));
+            return Err(self.quota_hit(ctx, step, Provider::Codex, Some(thread.as_str()), &quota_text));
         }
         if let Some(m) = failed {
             if looks_signed_out(&m) || looks_signed_out(&outcome.stderr_tail) {
@@ -4220,8 +4420,9 @@ fn stop_error(outcome: &RunOutcome, timeout: Duration, key: &str) -> Option<Flow
         return Some(flow_error(
             "step.timeout",
             format!(
-                "Bước chạy quá {} phút nên app đã dừng nó. Tăng `steps.{key}.timeoutMin` nếu cần, rồi bấm Thử lại.",
-                timeout.as_secs() / 60
+                "Bước chạy quá {} phút nên app đã dừng nó. Đổi Thời gian tối đa tại Cài đặt → Các bước AI → {}, rồi bấm Thử lại.",
+                timeout.as_secs() / 60,
+                step_from_key(key).map_or("Bước này", step_label)
             ),
         ));
     }
@@ -4373,13 +4574,8 @@ fn execute(inner: &Inner, ctx: &TaskCtx, claim: &Claim) -> Result<Done, FlowErro
             ));
         }
     }
-    if inner.require_mcp && result.is_ok() {
-        if claim.stop.load(Ordering::Relaxed) {
-            return Err(flow_error("step.stopped", "Bạn đã dừng bước này."));
-        }
-        inner
-            .with_saved(ctx.row.wp_id, |s| require_current_plan(s, ctx))
-            .transpose()?;
+    if inner.require_mcp && result.is_ok() && claim.stop.load(Ordering::Relaxed) {
+        return Err(flow_error("step.stopped", "Bạn đã dừng bước này."));
     }
     result
 }
@@ -4390,6 +4586,15 @@ struct ChecksDone {
     ran: bool,
     note: String,
     cost: f64,
+}
+
+/// The AI repair inside Kiểm tra uses Sửa lỗi; command timeouts stay separate.
+fn ai_limit_step(step: StepKind) -> StepKind {
+    if step == StepKind::Checks {
+        StepKind::Fix
+    } else {
+        step
+    }
 }
 
 /// Run the checks on the changed files; Claude fixes what they report (resuming the code
@@ -4406,7 +4611,8 @@ fn run_checks(
     let wp_id = ctx.row.wp_id;
     let own_step = step == StepKind::Checks;
     let config = ctx.repo_config();
-    let (budget, timeout, _) = limits(StepKind::Checks, &ctx.config);
+    let (_, timeout, _) = limits(StepKind::Checks, &ctx.config);
+    let (repair_budget, repair_timeout, _) = limits(StepKind::Fix, &ctx.config);
     let checker = inner
         .checker
         .lock()
@@ -4424,7 +4630,7 @@ fn run_checks(
         if list.is_empty() {
             return Ok(ChecksDone {
                 ran: false,
-                note: "không có lệnh kiểm tra cho các file đã đổi (thêm `repos.<repo>.checks` trong config.json nếu cần)"
+                note: "Không dò thấy lệnh kiểm tra cho các file đã đổi. Xem kết quả tại tab Tiến trình."
                     .into(),
                 cost,
             });
@@ -4523,7 +4729,7 @@ fn run_checks(
             }
             let message = match broken.first() {
                 Some(b) => format!(
-                    "Không chạy được {}: {}. Sửa lệnh trong `repos.<repo>.checks` (config.json) hoặc cài công cụ còn thiếu, rồi bấm Thử lại.",
+                    "Không chạy được {}: {}. Mở tab Tiến trình để xem lệnh và lỗi; cài công cụ còn thiếu hoặc chọn Làm tiếp → Viết code để xử lý, rồi chạy lại Kiểm tra.",
                     b.label,
                     short(b.broken.as_deref().unwrap_or_default())
                 ),
@@ -4542,7 +4748,6 @@ fn run_checks(
             choice: model_choice(StepKind::Fix, &ctx.config),
             mode: permission_mode(StepKind::Fix, &ctx.config),
             nested: true,
-            plan_audit: false,
         };
         let allowed = config.allow_bash.clone();
         let session = inner.with_saved(wp_id, |s| s.session_of(fixer.agent)).flatten();
@@ -4551,10 +4756,10 @@ fn run_checks(
             &fixer,
             session.as_deref(),
             &[],
-            budget,
+            repair_budget,
             &allowed,
             repo,
-            timeout,
+            repair_timeout,
             prompt,
         );
         let r = inner.run_ai(ctx, step, &job, &fixer)?;
@@ -4900,7 +5105,6 @@ fn review_harness(
         mode: None,
         // the app reads its findings; the harness build already reported to the app
         nested: true,
-        plan_audit: false,
     };
     let brief = ctx.read(BRIEF_FILE).unwrap_or_default();
     let plan = ctx.read(PLAN_FILE).unwrap_or_default();
@@ -5647,8 +5851,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 })
                 .collect();
             let answers: Vec<(&str, &str)> = answers.iter().map(|(q, a)| (q.as_str(), a.as_str())).collect();
-            let audit_feedback = inner.with_saved(wp_id, |s| s.audit_feedback.clone()).flatten();
-            let mut prompt = prompts::analyze(&brief, previous, &answers, audit_feedback.as_deref());
+            let mut prompt = prompts::analyze(&brief, previous, &answers);
             // notes from earlier work on the repo: where it runs, how it is tested
             let memory = browsertest::claude_projects().and_then(|p| browsertest::repo_memory(&p, repo));
             let dirs: Vec<String> = memory.iter().map(|m| m.to_string_lossy().into_owned()).collect();
@@ -5679,52 +5882,8 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     ),
                 ));
             }
-            let mut cost = r.cost;
             if inner.require_mcp {
                 validate_analysis(&answer.plan, &r.text)?;
-                if claim.stop.load(Ordering::Relaxed) {
-                    return Err(flow_error("step.stopped", "Bạn đã dừng bước này."));
-                }
-                inner.log(
-                    wp_id,
-                    Some(step),
-                    "info",
-                    "Đối chiếu plan với brief và code trong phiên chỉ đọc mới.",
-                    true,
-                );
-                // The draft finished. A quota cut in the fresh audit can only retry from analysis.
-                inner.with_saved(wp_id, |s| s.cut = None);
-                let audit = Claim {
-                    plan_audit: true,
-                    mode: None,
-                    stop: claim.stop.clone(),
-                    choice: claim.choice.clone(),
-                    ..*claim
-                };
-                let (provider, args) = if codex {
-                    let mut args = codex::analyze_args();
-                    args.insert(args.len() - 1, "--ephemeral".into());
-                    (Provider::Codex, codex::with_model(args, &audit.choice))
-                } else {
-                    let mut args = claude::analyze_args(budget, &[]);
-                    args.push("--no-session-persistence".into());
-                    (Provider::Claude, claude::with_model(args, &audit.choice))
-                };
-                let audit_prompt = prompts::audit_plan(&r.text, feedback.as_deref(), &answers);
-                let verify = job(provider, args, Some(audit_prompt));
-                let verified = inner.run_ai(ctx, step, &verify, &audit).map_err(|mut err| {
-                    if matches!(
-                        err.code.as_str(),
-                        "mcp.mismatch" | "mcp.blocked" | "mcp.needsUser"
-                    ) {
-                        inner.with_saved(wp_id, |s| s.audit_feedback = Some(err.message.clone()));
-                    }
-                    if err.code != "step.stopped" {
-                        err.message = format!("Đối chiếu plan: {}", err.message);
-                    }
-                    err
-                })?;
-                cost = cost.zip(verified.cost).map(|(draft, audit)| draft + audit);
             }
             write_task_file(ctx, PLAN_FILE, &answer.plan)?;
             set_session(&r.session);
@@ -5794,14 +5953,11 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 }
                 s.questions = questions;
                 s.proposals = proposals;
-                if inner.require_mcp {
-                    s.verified_plan = Some(plan_digest(ctx, &brief, &answer.plan));
-                }
             });
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Analyze),
                 note,
-                cost,
+                cost: r.cost,
             })
         }
         StepKind::Implement => {
@@ -5997,7 +6153,6 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 choice: claim.choice.clone(),
                 mode: None,
                 nested: false,
-                plan_audit: false,
             });
             let claim = scratch_only.as_ref().unwrap_or(claim);
             let shell = shell_of(claim, &allowed);
@@ -6280,10 +6435,19 @@ fn codex_read_review(
 /// Runs the claimed step, then the next ones while auto-advance is on.
 fn worker(inner: &Arc<Inner>, ctx: &TaskCtx, first: Claim) {
     let mut claim = first;
+    let mut ctx = ctx.clone();
     loop {
         let step = claim.step;
-        let result = execute(inner, ctx, &claim);
-        match inner.finish(ctx, step, result) {
+        let result = execute(inner, &ctx, &claim);
+        if let Some(config) = inner
+            .config_path
+            .lock()
+            .ok()
+            .and_then(|p| p.as_ref().and_then(|p| Config::load(p).ok()))
+        {
+            ctx.config = config;
+        }
+        match inner.finish(&ctx, step, result) {
             None => return,
             Some(Ok(next)) => claim = next,
             Some(Err(e)) => {
@@ -6371,7 +6535,7 @@ mod tests {
             "harness"
         } else if has("acceptEdits") {
             "code"
-        } else if has("--no-session-persistence") {
+        } else if has("--no-session-persistence") || flag(job, "--tools").as_deref() == Some("Bash") {
             "push"
         } else {
             "review"
@@ -6481,263 +6645,8 @@ mod tests {
         settle(flow, ctx)
     }
 
-    #[test]
-    fn mcp_verdict_controls_plan_and_unverified_context_blocks_implementation() {
-        for agent in ["claude", "codex"] {
-            verify_mcp_plan_gate(agent);
-        }
-    }
-
-    fn verify_mcp_plan_gate(agent: &str) {
-        use serde_json::{Value, json};
-
-        let Some(s) = setup() else { return };
-        let mut config = Config::default();
-        config.steps.analyze.agent = Some(agent.into());
-        let ctx = s.ctx(1, &config);
-        std::fs::write(
-            s.repo.join("a.ts"),
-            "export const byId = (rows) => new Map(rows.map(row => [row.collaborationUser, row.name]));\n",
-        )
-        .unwrap();
-        std::fs::write(
-            s.repo.join("FolderRow.tsx"),
-            "export const folder = (accessible_by) => ({ collaborationUser: accessible_by.id });\n",
-        )
-        .unwrap();
-        git(&s.repo, &["add", "a.ts", "FolderRow.tsx"]);
-        git(
-            &s.repo,
-            &["commit", "-q", "-m", "Add another producer of collaborationUser"],
-        );
-        git(
-            &s.repo,
-            &["remote", "add", "origin", "https://github.com/o/r.git"],
-        );
-        let binding = crate::task_repo::check(
-            &ctx.config,
-            "Web",
-            "https://github.com/o/r/issues/279",
-            &Git::new(&s.repo),
-            false,
-        )
-        .unwrap();
-        s.store
-            .lock()
-            .unwrap()
-            .upsert_task_with_binding(
-                &ctx.row,
-                crate::task_repo::KEY,
-                &serde_json::to_string(&binding).unwrap(),
-            )
-            .unwrap();
-        let calls = AtomicUsize::new(0);
-        let fake = Arc::new(Fake {
-            script: Box::new(move |job: &Job, _stop: &AtomicBool, out: &mut dyn FnMut(&str)| {
-                const PLAN: &str = "## Nguyên nhân\na.ts:1\n## Phương án\nA\n## Đề xuất\nA\n## File sẽ sửa\na.ts\n## Kế hoạch test\nKiểm tra A\n## Rủi ro\n{risk}\n\n```json\n{\"questions\":[],\"harness\":{\"recommend\":false},\"browserTest\":{\"recommend\":false}}\n```";
-                const WRONG_RISK: &str = "Group ID luôn vắng mặt trong Map.";
-                const COUNTEREXAMPLE: &str = "FolderRow.tsx:1 gán accessible_by.id vào collaborationUser, a.ts:1 dùng làm key của Map; group ID có thể đã tồn tại.";
-                let index = calls.fetch_add(1, Ordering::SeqCst);
-                let url = if job.agent == Provider::Claude {
-                    let config: Value = serde_json::from_str(&flag(job, "--mcp-config").unwrap()).unwrap();
-                    config["mcpServers"]["op_workflow"]["url"]
-                        .as_str()
-                        .unwrap()
-                        .to_owned()
-                } else {
-                    let url = job
-                        .args
-                        .iter()
-                        .find_map(|arg| arg.strip_prefix("mcp_servers.op_workflow.url=\""))
-                        .unwrap();
-                    url.trim_end_matches('"').to_owned()
-                };
-                let credential = job.mcp_token.as_ref().unwrap();
-                let send = |method: &str, params: Value| {
-                    let request = json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
-                    let mut response = ureq::post(&url)
-                        .header("Authorization", format!("Bearer {}", credential.0))
-                        .header("Content-Type", "application/json")
-                        .header("Accept", "application/json, text/event-stream")
-                        .send(request.to_string().as_bytes())
-                        .unwrap();
-                    serde_json::from_str::<Value>(&response.body_mut().read_to_string().unwrap()).unwrap()
-                };
-                let call =
-                    |name, args| send("tools/call", json!({"name":name,"arguments":args}))["result"].clone();
-                let report = |outcome, evidence| {
-                    let mut payload =
-                        json!({"outcome":outcome,"summary":"đối chiếu a.ts","evidence":evidence});
-                    if outcome == "completed" && matches!(index, 2 | 4) {
-                        let risk = if index == 2 { WRONG_RISK } else { COUNTEREXAMPLE };
-                        payload["resultText"] = json!(PLAN.replace("{risk}", risk));
-                    }
-                    call("report_step_result", payload)
-                };
-                assert_eq!(
-                    send("initialize", json!({"protocolVersion":"2025-11-25"}))["result"]["protocolVersion"],
-                    "2025-11-25"
-                );
-                assert_eq!(
-                    send("tools/list", json!({}))["result"]["tools"]
-                        .as_array()
-                        .unwrap()
-                        .len(),
-                    2
-                );
-                assert_eq!(report("mismatch", vec![])["isError"], true);
-                let contract = call("get_step_contract", json!({}));
-                let data: Value =
-                    serde_json::from_str(contract["content"][0]["text"].as_str().unwrap()).unwrap();
-                assert_eq!(data["context"]["taskId"], "WP-1");
-                assert_eq!(data["criteria"].as_array().unwrap().len(), 3);
-                let audit_evidence = || {
-                    ["coverage", "dataFlow", "verification"]
-                        .map(|criterion| {
-                            json!({"criterion":criterion,"detail":COUNTEREXAMPLE,
-                               "sources":[{"file":"FolderRow.tsx","line":1},{"file":"a.ts","line":1}]})
-                        })
-                        .to_vec()
-                };
-                match index {
-                    0 => {} // CLI success alone cannot complete the step.
-                    1 => assert_eq!(report("mismatch", vec![])["isError"], false),
-                    2 | 4 => {
-                        assert_eq!(data["context"]["purpose"], "executeStep");
-                        if index == 4 {
-                            let prompt = job.stdin.as_deref().unwrap();
-                            assert!(prompt.contains("<audit_feedback>"));
-                            assert!(prompt.contains(COUNTEREXAMPLE));
-                        }
-                        let evidence = |line| {
-                            vec![
-                                json!({"criterion":"scope","detail":"Fix org"}),
-                                json!({"criterion":"rootCause","detail":"exported value","sources":[{"file":"a.ts","line":line}]}),
-                                json!({"criterion":"plan","detail":"Change a, then run the check"}),
-                            ]
-                        };
-                        assert_eq!(report("completed", vec![])["isError"], true);
-                        assert_eq!(report("completed", evidence(500))["isError"], true);
-                        assert_eq!(report("completed", evidence(1))["isError"], false);
-                        assert_eq!(report("mismatch", vec![])["isError"], true);
-                    }
-                    3 | 5 => {
-                        assert_eq!(data["context"]["purpose"], "verifyPlan");
-                        assert_eq!(data["criteria"][1]["id"], "dataFlow");
-                        assert_eq!(data["criteria"][1]["requiresSource"], true);
-                        let flags = if job.agent == Provider::Claude {
-                            ["--no-session-persistence", "--restricted"]
-                        } else {
-                            ["--ephemeral", "read-only"]
-                        };
-                        assert!(flags.iter().all(|flag| job.args.iter().any(|arg| arg == flag)));
-                        assert!(
-                            !job.args
-                                .iter()
-                                .any(|arg| matches!(arg.as_str(), "resume" | "--resume" | "--add-dir"))
-                        );
-                        let prompt = job.stdin.as_deref().unwrap();
-                        assert!(prompt.contains("<draft_plan>"));
-                        assert_eq!(prompt.contains(WRONG_RISK), index == 3);
-                        if index == 3 {
-                            let mut incomplete = audit_evidence();
-                            incomplete[1]["sources"] = json!([]);
-                            assert_eq!(report("completed", incomplete)["isError"], true);
-                            assert_eq!(
-                                call(
-                                    "report_step_result",
-                                    json!({"outcome":"mismatch","summary":COUNTEREXAMPLE})
-                                )["isError"],
-                                false
-                            );
-                        } else {
-                            assert_eq!(report("completed", audit_evidence())["isError"], false);
-                        }
-                    }
-                    6 => {
-                        assert_eq!(data["context"]["step"], "implement");
-                        assert!(
-                            data["context"]["approvedPlan"]
-                                .as_str()
-                                .unwrap()
-                                .contains("a.ts:1")
-                        );
-                        std::fs::write(job.cwd.join("a.ts"), "export const a = 2;\n").unwrap();
-                        assert_eq!(
-                            report(
-                                "completed",
-                                vec![
-                                    json!({"criterion":"scope","detail":"Fix org"}),
-                                    json!({"criterion":"implementation","detail":"Changed a to 2","sources":[{"file":"a.ts","line":1}]}),
-                                    json!({"criterion":"checks","detail":"App checks run next"}),
-                                ]
-                            )["isError"],
-                            false
-                        );
-                    }
-                    _ => panic!("Implementation started with stale input"),
-                }
-                if job.agent == Provider::Claude {
-                    out(&result_line("done"));
-                } else {
-                    out(r#"{"type":"thread.started","thread_id":"test-thread"}"#);
-                    out(r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#);
-                }
-                ok()
-            }),
-            jobs: Mutex::new(Vec::new()),
-            missing: false,
-        });
-        let flow = Flow::new(s.store.clone(), fake.clone(), None);
-        flow.started(&ctx, None).unwrap();
-        let d = run(&flow, &ctx, FlowAction::Run);
-        assert_eq!(d.error.unwrap().code, "mcp.missingVerdict");
-        assert!(!ctx.file(PLAN_FILE).exists());
-        let d = run(&flow, &ctx, FlowAction::Retry);
-        assert_eq!(d.error.unwrap().code, "mcp.mismatch");
-        assert!(!ctx.file(PLAN_FILE).exists());
-        assert_eq!(
-            flow.act(ctx.clone(), FlowAction::Finish { forced: true })
-                .unwrap_err()
-                .code,
-            "flow.notReady"
-        );
-        let d = run(&flow, &ctx, FlowAction::Retry);
-        assert_eq!(d.gate.unwrap().kind, GateKind::Error);
-        let err = d.error.unwrap();
-        assert_eq!(err.code, "mcp.mismatch");
-        assert!(err.message.contains("Đối chiếu plan"));
-        assert!(err.message.contains("FolderRow.tsx:1"));
-        assert!(!ctx.file(PLAN_FILE).exists());
-        assert_eq!(fake.jobs.lock().unwrap().len(), 4);
-        let d = run(&flow, &ctx, FlowAction::Retry);
-        assert_eq!(d.gate.unwrap().kind, GateKind::PlanReview, "{:?}", d.error);
-        assert!(ctx.read(PLAN_FILE).unwrap().contains("FolderRow.tsx:1"));
-        assert_eq!(fake.jobs.lock().unwrap().len(), 6);
-        let brief = ctx.read(BRIEF_FILE).unwrap();
-        std::fs::write(ctx.file(BRIEF_FILE), "New requirement").unwrap();
-        assert_eq!(
-            flow.act(ctx.clone(), FlowAction::ApprovePlan).unwrap_err().code,
-            "mcp.planStale"
-        );
-        std::fs::write(ctx.file(BRIEF_FILE), brief).unwrap();
-        git(
-            &s.repo,
-            &["remote", "set-url", "origin", "https://github.com/o/other.git"],
-        );
-        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
-        assert_eq!(d.error.unwrap().code, "repo.mismatch");
-        assert_eq!(fake.jobs.lock().unwrap().len(), 6);
-        git(
-            &s.repo,
-            &["remote", "set-url", "origin", "https://github.com/o/r.git"],
-        );
-        let d = run(&flow, &ctx, FlowAction::Retry);
-        assert_eq!(
-            (d.status, d.current),
-            (FlowStatus::Ready, Some(StepKind::ReviewLocal))
-        );
-        assert_eq!(fake.jobs.lock().unwrap().len(), 7);
+    mod followup {
+        include!("flow_followup_tests.rs");
     }
 
     const HIGH: &str = "Review\n```json\n{\"findings\":[{\"severity\":\"high\",\"file\":\"a.ts\",\"line\":1,\"title\":\"Null org\",\"detail\":\"crash\",\"suggestion\":\"guard\"}]}\n```";

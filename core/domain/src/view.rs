@@ -53,6 +53,8 @@ pub enum TaskColumn {
 #[serde(rename_all = "camelCase")]
 pub enum GateKind {
     PlanReview,
+    /// Brief/plan changed after approval; the saved workflow decision stays pending.
+    PlanChanged,
     /// A review reported findings: the user picks which ones the AI fixes. Saved tasks from
     /// before call it `mediumTriage` (the final review's medium findings only).
     #[serde(alias = "mediumTriage")]
@@ -340,6 +342,8 @@ pub struct SettingsView {
     /// Agent, model and effort of each AI step, with what past runs cost (Các bước AI).
     #[serde(default)]
     pub steps: Vec<StepSetting>,
+    #[serde(default = "verify_mcp_default")]
+    pub verify_mcp: bool,
     /// Probe Claude this often (seconds) while Claude Code is in use outside the app; 0 = off
     /// (`quota.claudeActiveProbeSec`).
     #[serde(default)]
@@ -353,6 +357,10 @@ pub struct SettingsView {
     /// Harness library of every known repo.
     #[serde(default)]
     pub harness_libs: Vec<HarnessLib>,
+}
+
+fn verify_mcp_default() -> bool {
+    true
 }
 
 /// What closing the main window does (`onClose` in config): ask each time, go to the tray (the AI
@@ -458,6 +466,12 @@ pub struct StepSetting {
     /// Finished runs of this step over every task.
     pub runs: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_budget_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_min: Option<u32>,
+    pub default_budget_usd: f64,
+    pub default_timeout_min: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avg_cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avg_seconds: Option<f64>,
@@ -479,6 +493,14 @@ pub struct StepChoiceRequest {
     pub effort: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepLimitsRequest {
+    pub step: StepKind,
+    pub max_budget_usd: Option<f64>,
+    pub timeout_min: Option<u32>,
 }
 
 /// Windows notifications by kind; the bell lists every alert either way.
@@ -1428,6 +1450,8 @@ pub struct TaskDetail {
     /// Stopped with Dừng, and the run's session can go on: "Chạy tiếp" with the user's words.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_go_on: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_budget_usd: Option<f64>,
     pub findings: Vec<FindingView>,
     /// Docs/test judgement of the latest review of each kind (Tự review, Review chốt, …).
     #[serde(default)]
@@ -1507,6 +1531,7 @@ pub struct TestCase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum FlowAction {
+    KeepPlan,
     /// Run the current step (the one shown as ready).
     Run,
     /// Stop the running step; it can be retried.
@@ -1522,7 +1547,9 @@ pub enum FlowAction {
     /// Plan gate: the AI codes the plan.
     ApprovePlan,
     /// Plan gate: analyze again with this feedback.
-    RejectPlan { feedback: String },
+    RejectPlan {
+        feedback: String,
+    },
     /// Plan gate: the user codes by hand.
     SelfCode,
     /// Plan gate: answer one of the analysis's questions (`answer`), or leave it to the AI.
@@ -1536,7 +1563,10 @@ pub enum FlowAction {
     },
     /// Turn an optional step (Harness, Test trình duyệt) on or off for this task, until the flow
     /// gets there.
-    SetUses { step: StepKind, on: bool },
+    SetUses {
+        step: StepKind,
+        on: bool,
+    },
     /// Test trình duyệt: the dev server the app starts for this task, remembered for the repo
     /// too. An empty URL clears both (the AI starts the app itself again).
     #[serde(rename_all = "camelCase")]
@@ -1558,9 +1588,13 @@ pub enum FlowAction {
     /// The user finished coding by hand.
     SelfCodeDone,
     /// Findings gate: fix the picked findings (`fix`), or go on without fixing.
-    PickFindings { fix: bool },
+    PickFindings {
+        fix: bool,
+    },
     /// After-fix gate: the answer to "Review chéo lại?".
-    AfterFix { choice: AfterFix },
+    AfterFix {
+        choice: AfterFix,
+    },
     /// "Bỏ khỏi thư viện": take the harness this task kept out of the repo's harness library.
     DropHarness,
     /// Write the push summary again (optionally for another issue number).
@@ -1584,7 +1618,9 @@ pub enum FlowAction {
         note: Option<String>,
     },
     /// Turn auto-advance on/off for this task.
-    SetAuto { on: bool },
+    SetAuto {
+        on: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

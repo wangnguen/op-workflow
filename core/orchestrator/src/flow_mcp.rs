@@ -24,14 +24,13 @@ pub(crate) const TOKEN_ENV: &str = "OPW_STEP_MCP_TOKEN";
 const TOOL_PREFIX: &str = "mcp__op_workflow";
 const PROTOCOLS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
 
-fn source_required(step: StepKind, plan_audit: bool, criterion: &str) -> bool {
-    plan_audit
-        || matches!(
-            (step, criterion),
-            (StepKind::Analyze, "rootCause")
-                | (StepKind::Implement, "implementation")
-                | (StepKind::Fix | StepKind::FixCross, "fixes")
-        )
+fn source_required(step: StepKind, criterion: &str) -> bool {
+    matches!(
+        (step, criterion),
+        (StepKind::Analyze, "rootCause")
+            | (StepKind::Implement, "implementation")
+            | (StepKind::Fix | StepKind::FixCross, "fixes")
+    )
 }
 
 #[derive(Clone)]
@@ -44,23 +43,7 @@ impl std::fmt::Debug for Credential {
 }
 
 /// What the AI needs to prove for the step it actually ran.
-pub(crate) fn criteria(step: StepKind, plan_audit: bool) -> &'static [(&'static str, &'static str)] {
-    if plan_audit {
-        return &[
-            (
-                "coverage",
-                "Map every assigned behavior and answered question to the draft's recommended changes and test cases. Cite the affected code.",
-            ),
-            (
-                "dataFlow",
-                "Trace the draft's material assumptions through the relevant entry points, producers, writers and consumers. Cite where facts are established, including other paths that might contradict the draft.",
-            ),
-            (
-                "verification",
-                "Check that the planned tests can distinguish the expected behavior from the current defect and cover material side effects. Cite the existing test or the behavior each new test needs to exercise.",
-            ),
-        ];
-    }
+pub(crate) fn criteria(step: StepKind) -> &'static [(&'static str, &'static str)] {
     use StepKind::*;
     const SCOPE: (&str, &str) = (
         "scope",
@@ -130,13 +113,10 @@ pub(crate) fn criteria(step: StepKind, plan_audit: bool) -> &'static [(&'static 
     }
 }
 
-fn next(step: StepKind, plan_audit: bool) -> &'static str {
+fn next(step: StepKind) -> &'static str {
     use StepKind::*;
     match step {
-        Analyze if plan_audit => "The app presents the verified plan for the user's approval.",
-        Analyze => {
-            "The app starts a fresh read-only session to verify the draft before presenting it to the user."
-        }
+        Analyze => "The app validates the plan format and presents it for the user's approval.",
         Implement => "The app runs configured checks, then applies the task's review/test workflow.",
         Fix | FixCross => {
             "The app reruns checks and then asks about review or reruns the test that found the problem."
@@ -149,17 +129,11 @@ fn next(step: StepKind, plan_audit: bool) -> &'static str {
     }
 }
 
-pub(crate) fn instructions(step: StepKind, plan_audit: bool) -> String {
-    let format = match (step, plan_audit) {
-        (StepKind::Analyze, false) => {
-            "Include the complete draft plan and its final JSON block in resultText, then end with a short summary."
-        }
-        (StepKind::Analyze, true) => {
-            "Report your verdict on the supplied draft. Omit resultText. If the draft needs changes, give concrete reasons and file:line references in Vietnamese in summary."
-        }
-        _ => {
-            "Keep the original final answer format, including the ask JSON if browser interaction needs the user."
-        }
+pub(crate) fn instructions(step: StepKind) -> String {
+    let format = if step == StepKind::Analyze {
+        "Include the complete draft plan and its final JSON block in resultText, then end with a short summary."
+    } else {
+        "Keep the original final answer format, including the ask JSON if browser interaction needs the user."
     };
     let label = if step == StepKind::PushSummary {
         "Decide whether the full task is ready for handoff."
@@ -178,7 +152,7 @@ pub(crate) fn instructions(step: StepKind, plan_audit: bool) -> String {
          mismatch for wrong requirements/scope/repo, blocked for unfinished or unverifiable work, \
          and needsUser when user input is essential; explain what is wrong or missing in summary. \
          {format} The app applies checks and decides the transition. {}",
-        next(step, plan_audit)
+        next(step)
     )
 }
 
@@ -221,7 +195,6 @@ struct Session {
     host: String,
     token: String,
     step: StepKind,
-    plan_audit: bool,
     context: Value,
     repo: PathBuf,
     report: Mutex<Report>,
@@ -240,7 +213,7 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    pub fn start(step: StepKind, plan_audit: bool, repo: &Path, context: Value) -> io::Result<Self> {
+    pub fn start(step: StepKind, repo: &Path, context: Value) -> io::Result<Self> {
         let repo = std::fs::canonicalize(repo)?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
@@ -259,7 +232,6 @@ impl Run {
             host,
             token,
             step,
-            plan_audit,
             context,
             repo,
             report: Mutex::default(),
@@ -437,10 +409,10 @@ fn rpc(s: &Session, request: &Value) -> Option<Value> {
             Some("get_step_contract") => match s.report.lock() {
                 Ok(mut report) => {
                     report.context_read = true;
-                    let data = json!({"context":s.context,"criteria":criteria(s.step, s.plan_audit).iter()
-                        .map(|(id, requirement)| json!({"id":id,"requirement":requirement,"requiresSource":source_required(s.step, s.plan_audit, id)}))
+                    let data = json!({"context":s.context,"criteria":criteria(s.step).iter()
+                        .map(|(id, requirement)| json!({"id":id,"requirement":requirement,"requiresSource":source_required(s.step, id)}))
                         .collect::<Vec<_>>(),
-                        "onAccepted":next(s.step, s.plan_audit)});
+                        "onAccepted":next(s.step)});
                     tool(data, false)
                 }
                 Err(_) => tool(json!("Could not read the run state"), true),
@@ -463,7 +435,7 @@ fn tool(value: Value, is_error: bool) -> Value {
 fn submit(s: &Session, arguments: Value) -> Result<(), String> {
     let verdict: Verdict = serde_json::from_value(arguments).map_err(|e| format!("Invalid verdict: {e}"))?;
     let valid_text = |v: &str| !v.trim().is_empty() && v.chars().count() <= 2000;
-    let required = criteria(s.step, s.plan_audit);
+    let required = criteria(s.step);
     if !valid_text(&verdict.summary)
         || verdict.evidence.len() > required.len()
         || verdict.evidence.iter().any(|e| {
@@ -484,7 +456,7 @@ fn submit(s: &Session, arguments: Value) -> Result<(), String> {
     if verdict.outcome == Outcome::Completed && verdict.evidence.len() != required.len() {
         return Err("A completed verdict requires evidence for every listed criterion.".into());
     }
-    let needs_plan = s.step == StepKind::Analyze && !s.plan_audit && verdict.outcome == Outcome::Completed;
+    let needs_plan = s.step == StepKind::Analyze && verdict.outcome == Outcome::Completed;
     match &verdict.result_text {
         Some(text) if needs_plan && !text.trim().is_empty() && text.chars().count() <= 40_000 => {}
         None if !needs_plan => {}
@@ -496,7 +468,7 @@ fn submit(s: &Session, arguments: Value) -> Result<(), String> {
     }
     for evidence in &verdict.evidence {
         if verdict.outcome == Outcome::Completed
-            && source_required(s.step, s.plan_audit, &evidence.criterion)
+            && source_required(s.step, &evidence.criterion)
             && evidence.sources.is_empty()
         {
             return Err(format!(

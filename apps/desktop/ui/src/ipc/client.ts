@@ -17,6 +17,8 @@ import {
   mockSetOnClose,
   mockSetQuotaProbe,
   mockSetStepChoice,
+  mockSetVerifyMcp,
+  mockSetStepLimits,
   mockSettings,
   mockStepModels,
   mockStartOptions,
@@ -100,6 +102,11 @@ export const openConfig = (): Promise<null> => call("open_config", () => null);
 /** Settings → Các bước AI: agent, model and effort of one step (absent = the machine's default). */
 export const setStepChoice = (choice: StepChoiceRequest): Promise<SettingsView> =>
   call("set_step_choice", () => mockSetStepChoice(choice), { choice });
+
+export const setVerifyMcp = (on: boolean): Promise<SettingsView> =>
+  call("set_verify_mcp", () => mockSetVerifyMcp(on), { on });
+export const setStepLimits = (limits: CommandArgs["set_step_limits"]["limits"]): Promise<SettingsView> =>
+  call("set_step_limits", () => mockSetStepLimits(limits), { limits });
 /** Settings → Hạn mức: probe Claude every `activeSec` while Claude Code is in use elsewhere
  *  (0 = off), and every `idleMin` minutes otherwise. */
 export const setQuotaProbe = (activeSec: number, idleMin: number): Promise<SettingsView> =>

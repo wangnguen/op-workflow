@@ -599,6 +599,7 @@ export function mockSettings(): SettingsView {
     tasksDirSuggested: MOCK_DESKTOP_TASKS,
     notify: mockNotify(),
     steps: mockStepSettings(),
+    verifyMcp: mockVerifyMcp,
     claudeActiveProbeSec: mockProbe.activeSec,
     claudeProbeMin: mockProbe.idleMin,
     onClose: mockClose.choice,
@@ -724,6 +725,25 @@ const MOCK_STEP_HISTORY: Partial<Record<StepKind, [number, number | undefined, n
   pushSummary: [2, 0.09, 14],
 };
 const mockPicks: Partial<Record<StepKind, Omit<StepChoiceRequest, "step">>> = {};
+let mockVerifyMcp = true;
+const mockLimits: Partial<Record<StepKind, { maxBudgetUsd?: number; timeoutMin?: number }>> = {};
+const DEFAULT_LIMITS: Partial<Record<StepKind, [number, number]>> = {
+  analyze: [5, 20], implement: [5, 60], harness: [2, 30], reviewLocal: [3, 30],
+  fix: [2, 45], crossReview: [3, 30], browserTest: [3, 30], finalReview: [3, 30], pushSummary: [1, 10],
+};
+export function mockSetVerifyMcp(on: boolean): SettingsView {
+  mockVerifyMcp = on;
+  return mockSettings();
+}
+export function mockSetStepLimits(limits: { step: StepKind; maxBudgetUsd?: number; timeoutMin?: number }): SettingsView {
+  if (!AI_STEPS.includes(limits.step) ||
+      (limits.maxBudgetUsd !== undefined && (!Number.isFinite(limits.maxBudgetUsd) || limits.maxBudgetUsd <= 0)) ||
+      (limits.timeoutMin !== undefined && (!Number.isInteger(limits.timeoutMin) || limits.timeoutMin <= 0 || limits.timeoutMin > 4294967295))) {
+    throw { code: "step.limits", message: "Trần chi phí và thời gian phải lớn hơn 0; để trống để dùng mặc định." };
+  }
+  mockLimits[limits.step] = { maxBudgetUsd: limits.maxBudgetUsd, timeoutMin: limits.timeoutMin };
+  return mockSettings();
+}
 
 /** Same rules as the core (`flow::agent_for`): the pick, else Claude; Review chéo takes the other
  *  AI than Viết code's; Test trình duyệt stays on Claude. */
@@ -757,6 +777,9 @@ function mockStepSettings(): StepSetting[] {
       effort: pick.effort,
       effortDefault: step === "pushSummary" && agent === "claude" ? "low" : undefined,
       runs,
+      ...mockLimits[step],
+      defaultBudgetUsd: DEFAULT_LIMITS[step]?.[0],
+      defaultTimeoutMin: DEFAULT_LIMITS[step]?.[1],
       avgCostUsd,
       avgSeconds: runs > 0 ? avgSeconds : undefined,
       lastModel: runs > 0 ? (agent === "codex" ? "gpt-6.1-sol" : "claude-opus-5-5") : undefined,
