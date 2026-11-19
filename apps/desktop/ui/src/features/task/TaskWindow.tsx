@@ -921,6 +921,8 @@ function FindingsTab({ detail: d, busy, onDecide, onPickSevere, onAction }: Find
           const settled = isSettled(f);
           const asked = atGate && f.state === "open" && f.chosen !== true;
           const picked = f.chosen === true && f.state === "open";
+          const harnessFail = f.source === "harness";
+          const harnessReview = f.source === "harnessReview";
           return (
             <li key={f.fingerprint} className={`finding finding--${f.severity} finding--${f.state}${asked ? " is-asked" : ""}`}>
               <span className={`sev sev--${f.severity}`}>{severityLabel[f.severity]}</span>
@@ -932,7 +934,7 @@ function FindingsTab({ detail: d, busy, onDecide, onPickSevere, onAction }: Find
                   <span className={`finding-state finding-state--${f.state}`}>
                     {f.state === "fixing" && d.status !== "running" ? t.fixingWaiting : findingStateLabel[f.state]}
                   </span>
-                  {picked && <span className="finding-state finding-state--chosen">{t.chosen}</span>}
+                  {picked && <span className="finding-state finding-state--chosen">{f.fixHarness ? t.chosenHarness : t.chosen}</span>}
                 </div>
                 {f.detail && <p className="finding-detail">{f.detail}</p>}
                 {f.suggestion && (
@@ -980,9 +982,18 @@ function FindingsTab({ detail: d, busy, onDecide, onPickSevere, onAction }: Find
                 ) : null}
                 {!settled && !f.chosen && (
                   <>
-                    <button className="btn btn--sm" disabled={locked || busy !== undefined} title={t.decideHint.fix} onClick={() => onDecide(f, "fix")}>
-                      {t.decide.fix}
-                    </button>
+                    {!harnessReview && (
+                      <button className="btn btn--sm" disabled={locked || busy !== undefined}
+                        title={harnessFail ? t.decideHint.fixCode : t.decideHint.fix} onClick={() => onDecide(f, "fix")}>
+                        {harnessFail ? t.decide.fixCode : t.decide.fix}
+                      </button>
+                    )}
+                    {(harnessFail || harnessReview) && (
+                      <button className="btn btn--sm" disabled={locked || busy !== undefined}
+                        title={t.decideHint.fixHarness} onClick={() => onDecide(f, "fixHarness")}>
+                        {t.decide.fixHarness}
+                      </button>
+                    )}
                     <button
                       className="btn btn--sm"
                       disabled={locked || busy !== undefined}

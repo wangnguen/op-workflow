@@ -460,6 +460,15 @@ impl Store {
         Ok(())
     }
 
+    /// Keep a chosen finding and its fix target in the workflow in the same transaction.
+    pub fn save_finding_decision(&self, row: &FindingRow, flow: &str, at: &str) -> StorageResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.upsert_finding(row)?;
+        self.save_flow(row.wp_id, flow, at)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     // ---------- per-task values ----------
 
     /// One value of `kind` (`key` = `""` for single values).

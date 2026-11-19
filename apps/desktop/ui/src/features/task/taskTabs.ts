@@ -70,7 +70,7 @@ export function findingCounts(list: FindingView[]): { open: number; fix: number 
 
 /** Open critical / high findings not picked yet (the "pick them all" shortcut). */
 export const unpickedSevere = (list: FindingView[]): FindingView[] =>
-  list.filter((f) => f.state === "open" && f.chosen !== true && (f.severity === "critical" || f.severity === "high"));
+  list.filter((f) => f.source !== "harness" && f.state === "open" && f.chosen !== true && (f.severity === "critical" || f.severity === "high"));
 
 /** Open findings not picked yet ("Chọn thêm lỗi" after a fix). */
 export const unpicked = (list: FindingView[]): number => list.filter((f) => f.state === "open" && f.chosen !== true).length;

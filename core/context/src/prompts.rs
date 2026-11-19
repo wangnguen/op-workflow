@@ -194,14 +194,16 @@ fn diff_howto(base: &str) -> String {
 /// steps (read by `opw_agents::text::plan_answer`, which takes it out of plan.md).
 const ANALYZE_JSON: &str = "After the plan, end your message with one fenced ```json block (nothing after it):\n\
 {\"questions\": [{\"text\": \"...\", \"options\": [\"...\", \"...\"]}],\n \
-\"harness\": {\"recommend\": true, \"reason\": \"...\", \"checks\": [\"...\"]},\n \
+\"harness\": {\"recommend\": false, \"reason\": \"...\", \"checks\": []},\n \
 \"browserTest\": {\"recommend\": false, \"reason\": \"...\", \"scenario\": [\"...\"],\n  \
 \"devServer\": {\"url\": \"http://localhost:5173\", \
 \"commands\": [{\"command\": \"npm run dev\", \"dir\": \"\", \"wait\": \"\"}]}}}\n\
 - questions: what you need the user to decide before coding (in Vietnamese), each with 2-3 short \
 suggested answers; an empty list when nothing is unclear. Do not repeat them in the plan.\n\
-- harness: whether this task is worth a throwaway test harness outside the repository (pure \
-logic, data shaping, edge cases you can run without the app); `checks` = what it would check.\n\
+- harness: default to false. Recommend it only when a script outside the app can exercise public \
+behavior with expected inputs and outcomes derived from the brief or plan, and the repo tests \
+and browser tests would struggle to cover meaningful cases. Always give a concrete reason, \
+including when the answer is false. Leave checks empty when false.\n\
 - browserTest: whether the change should be tried in a real browser (UI, a page flow); \
 `scenario` = the steps and what to expect; `devServer` = how this repository runs locally, from \
 its README, CLAUDE.md and package.json scripts: `url` = the page to open; `commands` = every \
@@ -335,6 +337,14 @@ pub fn fix(items: &[FixItem], shell: Shell<'_>, context: Option<(&str, &str)>) -
     p.push_str(
         "\n\nEnd with a list in Vietnamese: for each finding, `đã sửa` or `không sửa` plus the reason.\n\n",
     );
+    p.push_str(&fix_list(items));
+    if let Some((plan, brief)) = context {
+        p.push_str(&context_block(plan, brief));
+    }
+    p
+}
+
+fn fix_list(items: &[FixItem]) -> String {
     let list: Vec<String> = items
         .iter()
         .enumerate()
@@ -353,12 +363,20 @@ pub fn fix(items: &[FixItem], shell: Shell<'_>, context: Option<(&str, &str)>) -
             s
         })
         .collect();
-    p.push_str(&tagged("findings", &list.join("\n")));
-    p.push('\n');
-    if let Some((plan, brief)) = context {
-        p.push_str(&context_block(plan, brief));
-    }
-    p
+    format!("{}\n", tagged("findings", &list.join("\n")))
+}
+
+pub fn fix_harness(items: &[FixItem], brief: &str, plan: &str, repo: &str, scratch: &str) -> String {
+    format!(
+        "Fix only the selected harness findings in `{scratch}`. Read production code in `{repo}` \
+         for context. Never change any file in that repository or restore an old helper to make \
+         a stale test pass. Base assertions on the brief and plan, using public behavior. Keep \
+         the existing harness command runnable. The numbers below identify the findings. \
+         Summarize in Vietnamese and end with a JSON block {{\"fixed\":[1,2]}} listing only finding \
+         numbers you actually fixed.\n\n{}\n\n{}",
+        fix_list(items),
+        task_context(brief, plan)
+    )
 }
 
 /// The plan and the brief for a code step that starts without a session: another AI wrote the
@@ -411,7 +429,14 @@ Write summary, detail and library.summary in Vietnamese.";
 /// [5] Harness: build and run a throwaway test harness for the change, outside the repository.
 /// `checks` = what the analysis said it would check; `shell` = what the step may run (for Claude
 /// the app's harness commands plus the repo's `allowBash`).
-pub fn harness(plan: &str, checks: &[String], scratch: &str, library: &str, shell: Shell<'_>) -> String {
+pub fn harness(
+    brief: &str,
+    plan: &str,
+    checks: &[String],
+    scratch: &str,
+    library: &str,
+    shell: Shell<'_>,
+) -> String {
     let mut p = format!(
         "Build and run a throwaway test harness for the change of this task, outside the repository.\n\n\
          Folders:\n\
@@ -423,6 +448,10 @@ pub fn harness(plan: &str, checks: &[String], scratch: &str, library: &str, shel
          folder and adapt it there). Never read or reuse the harness library or the memory of \
          another repository.\n\n\
          How:\n\
+         - Derive expected outcomes from the issue and the approved plan. Use current code to \
+         locate public entry points. Each case must name the requirement it covers and exercise \
+         observable behavior through a public function or API named in the plan. Do not use \
+         internal helpers, mirror implementation logic, or infer expectations from current output.\n\
          - Exercise the code this task changed, imported from the repository by absolute path. For \
          TypeScript run it with `npx tsx <file>` or compile it with `npx tsc --outDir <scratch \
          folder>/build`; never write build output inside the repository.\n\
@@ -457,9 +486,24 @@ pub fn harness(plan: &str, checks: &[String], scratch: &str, library: &str, shel
     p.push('\n');
     p.push_str(HARNESS_JSON);
     p.push_str("\n\n");
-    p.push_str(&tagged("plan", plan));
-    p.push('\n');
+    p.push_str(&task_context(brief, plan));
     p
+}
+
+pub fn review_harness(brief: &str, plan: &str, scratch: &str, command: &str) -> String {
+    format!(
+        "Independently review the harness in `{scratch}`, whose command is `{command}`. Remain \
+         read-only. Inspect the harness and source to identify public entry points. Do not run \
+         the harness or use the implementation to derive expected results. Trace each case to \
+         the brief or approved plan. Report wrong expectations, assertions that duplicate the \
+         implementation, calls to internal helpers, missing requirements, and an ineffective \
+         negative control. Cite scratch-relative files and lines. Suggest fixes to the harness. \
+         Respond in Vietnamese with a fenced JSON block \
+         {{\"findings\":[{{\"severity\":\"high\",\"file\":\"run.js\",\"line\":1,\"title\":\"...\",\
+         \"detail\":\"...\",\"suggestion\":\"...\"}}]}}. Use an empty findings array when clean.\n\n\
+         {RUBRIC}\n\n{}",
+        task_context(brief, plan)
+    )
 }
 
 /// The json block that ends the browser test (read by `opw_orchestrator::browsertest::answer`).
@@ -877,6 +921,7 @@ mod tests {
     #[test]
     fn the_harness_stays_outside_the_repo_and_can_run_again() {
         let p = harness(
+            "Issue: xử lý org rỗng",
             "## Đề xuất\nguard",
             &["org rỗng".into(), " ".into()],
             "C:/data/scratch/WP-1",
@@ -888,7 +933,8 @@ mod tests {
         assert!(p.contains("`PASS: <case>`") && p.contains("\"negativeControl\""));
         assert!(p.contains("What to check:\n- org rỗng\n\n"));
         assert!(p.contains("`node *`") && p.contains("<plan>\n## Đề xuất"));
-        assert!(harness("x", &[], "s", "l", Shell::Allowed(&[])).contains("its edge cases"));
-        assert!(harness("x", &[], "s", "l", Shell::Open).contains("not limited to a list"));
+        assert!(p.contains("<brief>\nIssue: xử lý org rỗng") && p.contains("public function or API"));
+        assert!(harness("brief", "x", &[], "s", "l", Shell::Allowed(&[])).contains("its edge cases"));
+        assert!(harness("brief", "x", &[], "s", "l", Shell::Open).contains("not limited to a list"));
     }
 }

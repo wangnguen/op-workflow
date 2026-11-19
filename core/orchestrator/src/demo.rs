@@ -170,6 +170,7 @@ fn to_view(f: Finding) -> FindingView {
         suggestion: None,
         reason: None,
         chosen: false,
+        fix_harness: false,
         round: None,
         step: None,
     }

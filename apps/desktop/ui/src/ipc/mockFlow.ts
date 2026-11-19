@@ -1335,7 +1335,11 @@ export function mockDecideFinding(d: FindingDecision): TaskDetail {
   const reason = d.reason?.trim();
   switch (d.decision) {
     case "fix":
+    case "fixHarness":
+      if (d.decision === "fixHarness" && x.source !== "harness" && x.source !== "harnessReview")
+        throw fail("finding.target", "Lỗi này không thuộc Harness.");
       x.chosen = true;
+      x.fixHarness = d.decision === "fixHarness" || x.source === "harnessReview";
       x.reason = undefined;
       if (settled(x)) x.state = "open";
       break;
@@ -1343,16 +1347,19 @@ export function mockDecideFinding(d: FindingDecision): TaskDetail {
       if (!reason) throw fail("finding.reason", "Chấp nhận thì ghi lý do (vì sao giữ code như vậy)");
       x.state = "accepted";
       x.chosen = false;
+      x.fixHarness = false;
       x.reason = reason;
       break;
     case "defer":
       x.state = "deferred";
       x.chosen = false;
+      x.fixHarness = false;
       x.reason = reason || undefined;
       break;
     case "reset":
       x.state = "open";
       x.chosen = false;
+      x.fixHarness = false;
       x.reason = undefined;
       break;
   }

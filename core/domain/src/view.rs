@@ -972,6 +972,9 @@ pub struct FindingView {
     /// The user asked for this one to be fixed (counts even when it is only low).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chosen: bool,
+    /// The selected fix targets the scratch harness.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fix_harness: bool,
     /// Cross-review round that reported it last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<u8>,
@@ -1585,6 +1588,8 @@ pub enum FlowAction {
 pub enum Decision {
     /// Fix it in the next fix step.
     Fix,
+    /// Repair the harness that produced a failed case.
+    FixHarness,
     /// Keep the code; `reason` says why.
     Accept,
     /// Leave it for later.

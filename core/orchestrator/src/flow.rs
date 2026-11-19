@@ -50,6 +50,7 @@ pub const PLAN_FILE: &str = "plan.md";
 pub const PUSH_FILE: &str = "push.md";
 pub const BRIEF_FILE: &str = "brief.md";
 const REVIEW_DIR: &str = "review";
+const HARNESS_REVIEW: &str = "harnessReview";
 /// Lines kept for the log tab.
 const LOG_LINES: usize = 300;
 /// Log lines read back from SQLite when the app starts.
@@ -66,6 +67,8 @@ const NOTE_CHARS: usize = 400;
 const RUN_LOG_DAYS: u64 = 14;
 /// Optional steps the user turns on or off per task (the analysis proposes them).
 const SWITCHABLE: [StepKind; 2] = [StepKind::Harness, StepKind::BrowserTest];
+const NO_HARNESS_REASON: &str =
+    "Phân tích chưa xác định được ca kiểm tra độc lập có kết quả mong đợi rõ ràng.";
 /// Times Claude may fix what Kiểm tra reports before the step stops for the user.
 const CHECK_FIX_ROUNDS: usize = 2;
 /// What a question left to the AI says in plan.md.
@@ -191,6 +194,9 @@ struct Saved {
     checks_note: Option<String>,
     /// Harness (step 5): what the AI built and how it ran last.
     harness: Option<HarnessState>,
+    /// Findings the user routed to the scratch harness.
+    #[serde(skip_serializing_if = "HashSet::is_empty")]
+    harness_fix: HashSet<String>,
     /// Test trình duyệt (step 10): how it went last.
     browser: Option<BrowserState>,
     /// The usage limit ended a run in the middle: which, and when it can go on.
@@ -332,6 +338,8 @@ struct HarnessState {
     /// Program and arguments, run from `dir` (the task's scratch folder).
     run: Vec<String>,
     dir: String,
+    builder: Option<AgentKind>,
+    reviewed: bool,
     passed: bool,
     /// What the AI said about it.
     summary: String,
@@ -811,7 +819,7 @@ fn to_fix(f: &FindingRow) -> bool {
     f.chosen && f.state == "open"
 }
 
-fn finding_view(f: &FindingRow) -> FindingView {
+fn finding_view(f: &FindingRow, saved: &Saved) -> FindingView {
     let state = serde_json::from_value(serde_json::Value::String(f.state.clone()))
         .unwrap_or(opw_domain::finding::FindingState::Open);
     FindingView {
@@ -826,6 +834,7 @@ fn finding_view(f: &FindingRow) -> FindingView {
         suggestion: f.suggestion.clone().filter(|d| !d.is_empty()),
         reason: f.reason.clone(),
         chosen: f.chosen,
+        fix_harness: f.chosen && (f.source == HARNESS_REVIEW || saved.harness_fix.contains(&f.fingerprint)),
         round: f.round,
         step: f.step.as_deref().and_then(step_from_key),
     }
@@ -865,6 +874,11 @@ fn merge_findings(
     let mut seen = HashSet::new();
     for r in raw {
         let fp = raw_fingerprint(step, r);
+        let fp = if source == HARNESS_REVIEW {
+            format!("harness-review:{fp}")
+        } else {
+            fp
+        };
         if !seen.insert(fp.clone()) {
             continue;
         }
@@ -892,7 +906,7 @@ fn merge_findings(
     let test_step = |key: Option<&str>| matches!(key, Some("harness" | "browserTest"));
     let ours = |old: &FindingRow| {
         if test_step(Some(step_key(step))) {
-            old.step.as_deref() == Some(step_key(step))
+            old.step.as_deref() == Some(step_key(step)) && old.source == source
         } else {
             !test_step(old.step.as_deref())
         }
@@ -1417,6 +1431,14 @@ impl Flow {
 
     /// Fix / accept / defer / reset one finding.
     pub fn decide(&self, d: &FindingDecision) -> Result<(), ApiError> {
+        let mut tasks = self.inner.lock_tasks();
+        let entry = tasks.get_mut(&d.wp_id).ok_or_else(flow_missing)?;
+        if entry.run.is_some() {
+            return Err(ApiError::new(
+                "step.running",
+                "Chờ bước đang chạy xong rồi chọn lỗi.",
+            ));
+        }
         let store = self.inner.lock_store()?;
         let mut f = store
             .findings(d.wp_id)
@@ -1426,7 +1448,10 @@ impl Flow {
             .ok_or_else(|| ApiError::new("finding.notFound", "Không thấy lỗi này nữa"))?;
         let reason = d.reason.as_deref().map(str::trim).filter(|r| !r.is_empty());
         match d.decision {
-            Decision::Fix => {
+            Decision::Fix | Decision::FixHarness => {
+                if d.decision == Decision::FixHarness && f.source != "harness" && f.source != HARNESS_REVIEW {
+                    return Err(ApiError::new("finding.target", "Lỗi này không thuộc Harness."));
+                }
                 f.chosen = true;
                 if settled(&f.state) {
                     f.state = "open".into();
@@ -1455,9 +1480,18 @@ impl Flow {
                 f.reason = None;
             }
         }
+        let mut saved = entry.saved.clone();
+        if d.decision == Decision::FixHarness {
+            saved.harness_fix.insert(f.fingerprint.clone());
+        } else {
+            saved.harness_fix.remove(&f.fingerprint);
+        }
+        let json = serde_json::to_string(&saved).map_err(|e| ApiError::new("storage", e.to_string()))?;
         store
-            .upsert_finding(&f)
-            .map_err(|e| ApiError::new("storage", e.to_string()))
+            .save_finding_decision(&f, &json, &now())
+            .map_err(|e| ApiError::new("storage", e.to_string()))?;
+        entry.saved = saved;
+        Ok(())
     }
 
     pub fn card(&self, ctx: &TaskCtx) -> Option<CardFlow> {
@@ -1568,7 +1602,7 @@ impl Flow {
         Some(SystemFlow {
             steps: step_views(entry, &runs, &ctx.row.updated_at),
             agents,
-            findings: findings.iter().map(finding_view).collect(),
+            findings: findings.iter().map(|f| finding_view(f, &entry.saved)).collect(),
             gate: gate_view(entry, &findings),
         })
     }
@@ -1647,7 +1681,7 @@ impl Flow {
                 .into_iter()
                 .filter(|s| entry.saved.workflow.uses(*s))
                 .collect(),
-            findings: findings.iter().map(finding_view).collect(),
+            findings: findings.iter().map(|f| finding_view(f, &entry.saved)).collect(),
             review_notes: review_notes(ctx),
             push,
             log: entry.log.iter().cloned().collect(),
@@ -2120,7 +2154,13 @@ fn apply_action(
                 .clone()
                 .filter(|s| stopped_here && entry.saved.workflow.failed_step() == Some(s.step))
                 .ok_or_else(|| not_now("chạy tiếp (chỉ sau khi bạn bấm Dừng một bước AI)"))?;
-            if ctx.agent_for(stopped.step) != stopped.agent {
+            let agent = match &entry.saved.harness {
+                Some(h) if stopped.step == StepKind::Harness && !h.reviewed && !h.run.is_empty() => {
+                    other_agent(h.builder.unwrap_or_else(|| ctx.agent_for(StepKind::Harness)))
+                }
+                _ => ctx.agent_for(stopped.step),
+            };
+            if agent != stopped.agent {
                 return Err(ApiError::new(
                     "flow.goOn",
                     "AI của bước này đã đổi trong Cài đặt nên không làm tiếp phiên cũ được: bấm Chạy lại từ đầu",
@@ -2470,6 +2510,9 @@ fn apply_action(
                 // asked for by hand: Review chốt runs even on code Tự review already saw
                 if step == StepKind::FinalReview {
                     entry.saved.reviewed_change = None;
+                }
+                if let Some(h) = entry.saved.harness.as_mut().filter(|_| step == StepKind::Harness) {
+                    h.run.clear();
                 }
             }
             entry.saved.finished = false;
@@ -3169,7 +3212,11 @@ impl Inner {
         // Kiểm tra costs no tokens: it follows Viết code even without "Tự chạy"
         let after_checks = step == StepKind::Checks && std::mem::take(&mut entry.saved.review_after_checks);
         let rerun_harness = entry.saved.workflow.fixing() == Some(StepKind::Harness)
-            && entry.saved.harness.as_ref().is_some_and(|h| !h.run.is_empty());
+            && entry
+                .saved
+                .harness
+                .as_ref()
+                .is_some_and(|h| h.reviewed && !h.run.is_empty());
         let go_on = kind == "ok"
             && match entry.saved.workflow.phase() {
                 Phase::Running(StepKind::Checks) => true,
@@ -3184,7 +3231,11 @@ impl Inner {
                 if go_on
                     && next != StepKind::Checks
                     && !(next == StepKind::Harness
-                        && entry.saved.harness.as_ref().is_some_and(|h| !h.run.is_empty())) =>
+                        && entry
+                            .saved
+                            .harness
+                            .as_ref()
+                            .is_some_and(|h| h.reviewed && !h.run.is_empty())) =>
             {
                 let provider = provider_of(ctx.agent_for(next));
                 let (warn, stop) = quotagate::levels(&ctx.config.quota.warn_at);
@@ -4194,11 +4245,15 @@ fn code_job(
             codex::with_mode(codex::with_model(args, &claim.choice), mode),
         )
     } else {
-        let args = if claim.step == StepKind::Harness {
+        let mut args = if claim.step == StepKind::Harness {
             claude::harness_args(budget, allowed, dirs)
         } else {
             claude::code_args(resume, budget, allowed)
         };
+        if claim.step.is_fix() && !dirs.is_empty() {
+            args.push("--add-dir".into());
+            args.extend(dirs.iter().cloned());
+        }
         (
             Provider::Claude,
             claude::with_mode(claude::with_model(args, &claim.choice), mode),
@@ -4449,6 +4504,93 @@ fn keep_harness(inner: &Inner, wp_id: u64, mut state: HarnessState, outcome: &ha
     }
 }
 
+fn checkpoint_harness(inner: &Inner, wp_id: u64, state: &HarnessState) {
+    if let Some(entry) = inner.lock_tasks().get_mut(&wp_id) {
+        entry.saved.harness = Some(state.clone());
+        inner.persist(wp_id, entry);
+    }
+}
+
+fn harness_repo_unchanged(repo: &Path, before: &GitSnap) -> Result<(), FlowError> {
+    let after = git_snap(repo).map_err(|e| flow_error("repo.git", e))?;
+    match git_surprise(StepKind::Harness, before, &after) {
+        Some(reason) => Err(flow_error(
+            "git.unexpected",
+            format!("Harness dừng vì {reason}. Kiểm tra repo trước khi thử lại."),
+        )),
+        None => Ok(()),
+    }
+}
+
+fn other_agent(builder: AgentKind) -> AgentKind {
+    if builder == AgentKind::Codex {
+        AgentKind::Claude
+    } else {
+        AgentKind::Codex
+    }
+}
+
+fn review_harness(
+    inner: &Inner,
+    ctx: &TaskCtx,
+    claim: &Claim,
+    repo: &Path,
+    state: &HarnessState,
+) -> Result<Option<f64>, FlowError> {
+    let builder = state.builder.unwrap_or(claim.agent);
+    let agent = other_agent(builder);
+    let review = Claim {
+        step: StepKind::Harness,
+        agent,
+        stop: claim.stop.clone(),
+        choice: ModelChoice::default(),
+        mode: None,
+    };
+    let brief = ctx.read(BRIEF_FILE).unwrap_or_default();
+    let plan = ctx.read(PLAN_FILE).unwrap_or_default();
+    let prompt = prompts::review_harness(&brief, &plan, &state.dir, &state.command());
+    let before = git_snap(repo).map_err(|e| flow_error("repo.git", e))?;
+    if let Some(run) = inner
+        .lock_tasks()
+        .get_mut(&ctx.row.wp_id)
+        .and_then(|e| e.run.as_mut())
+    {
+        run.agent = agent;
+        run.command = Some("Review harness".into());
+        run.model = None;
+        run.effort = None;
+    }
+    inner.on_tool(
+        ctx.row.wp_id,
+        StepKind::Harness,
+        agent_name(agent),
+        "Review harness",
+    );
+    let (raw, cost) = if agent == AgentKind::Codex {
+        (
+            codex_read_review(inner, ctx, &review, "harness-review", prompt)?,
+            None,
+        )
+    } else {
+        let (budget, timeout, _) = limits(StepKind::Harness, &ctx.config);
+        let job = Job {
+            agent: Provider::Claude,
+            args: claude::analyze_args(budget, std::slice::from_ref(&state.dir)),
+            cwd: repo.to_path_buf(),
+            stdin: Some(prompt),
+            timeout,
+        };
+        let r = inner.run_claude(ctx, StepKind::Harness, &job, &review)?;
+        (
+            text::findings_from_text(&r.text).ok_or_else(unreadable_review)?,
+            Some(r.cost_usd),
+        )
+    };
+    harness_repo_unchanged(repo, &before)?;
+    inner.merge(ctx, StepKind::Harness, 0, HARNESS_REVIEW, &raw)?;
+    Ok(cost)
+}
+
 /// After a Sửa lỗi: run the task's harness again when it has one. `None` = nothing to run.
 fn harness_again(
     inner: &Inner,
@@ -4462,8 +4604,15 @@ fn harness_again(
             s.harness.clone().filter(|_| s.workflow.uses(StepKind::Harness))
         })
         .flatten()
-        .filter(|h| !h.run.is_empty() && Path::new(&h.dir).is_dir());
+        .filter(|h| h.reviewed && !h.run.is_empty() && Path::new(&h.dir).is_dir());
     let Some(state) = state else { return Ok(None) };
+    if inner
+        .findings(wp_id)
+        .iter()
+        .any(|f| f.source == HARNESS_REVIEW && !settled(&f.state))
+    {
+        return Ok(None);
+    }
     let (outcome, _) = harness_command(inner, ctx, claim, repo, &state)?;
     let mut note = keep_harness(inner, wp_id, state, &outcome);
     if !outcome.passed {
@@ -4485,8 +4634,7 @@ fn harness_again(
 /// library.
 fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<Done, FlowError> {
     let wp_id = ctx.row.wp_id;
-    let (budget, timeout, _) = limits(StepKind::Harness, &ctx.config);
-    let (saved, after_fix, checks) = inner
+    let (saved, checks) = inner
         .with_saved(wp_id, |s| {
             let checks: Vec<String> = s
                 .proposals
@@ -4500,11 +4648,7 @@ fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Resu
                         .collect::<Vec<_>>()
                 })
                 .collect();
-            (
-                s.harness.clone(),
-                s.workflow.fixing() == Some(StepKind::Harness),
-                checks,
-            )
+            (s.harness.clone(), checks)
         })
         .unwrap_or_default();
     let finish = |state: HarnessState,
@@ -4546,19 +4690,57 @@ fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Resu
             cost,
         }
     };
-    // after a fix of what it found: the app runs the same harness again (no tokens)
-    let again = saved
-        .clone()
-        .filter(|h| after_fix && !h.run.is_empty() && Path::new(&h.dir).is_dir());
-    if let Some(state) = again {
-        let ran = harness_command(inner, ctx, claim, repo, &state)?;
-        return Ok(finish(
-            state,
-            ran,
-            None,
-            " (app chạy lại, không tốn token)".into(),
-        ));
+    let (mut state, built_cost) = if let Some(state) = saved
+        .as_ref()
+        .filter(|h| !h.run.is_empty() && Path::new(&h.dir).is_dir())
+    {
+        (state.clone(), None)
+    } else {
+        build_harness(inner, ctx, claim, repo, &checks, saved.map_or(0, |s| s.runs))?
+    };
+    let was_reviewed = state.reviewed;
+    let reviewed_cost = if state.reviewed {
+        None
+    } else {
+        let cost = review_harness(inner, ctx, claim, repo, &state)?;
+        state.reviewed = true;
+        checkpoint_harness(inner, wp_id, &state);
+        cost
+    };
+    let cost = match (built_cost, reviewed_cost) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or_default() + b.unwrap_or_default()),
+    };
+    let open = inner
+        .findings(wp_id)
+        .iter()
+        .filter(|f| f.source == HARNESS_REVIEW && !settled(&f.state))
+        .count();
+    if open > 0 {
+        return Ok(Done {
+            event: WorkflowEvent::ReviewFinished { open },
+            note: format!("Review harness báo {open} lỗi cần xử lý"),
+            cost,
+        });
     }
+    let ran = harness_command(inner, ctx, claim, repo, &state)?;
+    let note = if was_reviewed {
+        " (app chạy lại, không tốn token)"
+    } else {
+        " (review harness xong)"
+    };
+    Ok(finish(state, ran, cost, note.into()))
+}
+
+fn build_harness(
+    inner: &Inner,
+    ctx: &TaskCtx,
+    claim: &Claim,
+    repo: &Path,
+    checks: &[String],
+    runs: u32,
+) -> Result<(HarnessState, Option<f64>), FlowError> {
+    let (budget, timeout, _) = limits(StepKind::Harness, &ctx.config);
     let repo_config = ctx.repo_config();
     let library = harness::library_dir(repo_config.harness_dir.as_deref(), repo);
     let repo_name = repo
@@ -4581,8 +4763,9 @@ fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Resu
     allowed.extend(repo_config.allow_bash.iter().cloned());
     let plan = ctx.read(PLAN_FILE).unwrap_or_default();
     let prompt = prompts::harness(
+        &ctx.read(BRIEF_FILE).unwrap_or_default(),
         &plan,
-        &checks,
+        checks,
         &path(&scratch),
         &path(&library),
         shell_of(claim, &allowed),
@@ -4590,14 +4773,16 @@ fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Resu
     let job = code_job(
         claim,
         None,
-        &[path(&scratch), path(&library)],
+        &[path(&scratch)],
         budget,
         &repo_config.allow_bash,
         repo,
         timeout,
         prompt,
     );
+    let before = git_snap(repo).map_err(|e| flow_error("repo.git", e))?;
     let r = inner.run_ai(ctx, StepKind::Harness, &job, claim)?;
+    harness_repo_unchanged(repo, &before)?;
     let answer = harness::answer(&r.text).ok_or_else(|| {
         flow_error(
             "harness.parse",
@@ -4607,18 +4792,63 @@ fn run_harness(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Resu
     let state = HarnessState {
         run: answer.run.clone(),
         dir: path(&scratch),
+        builder: Some(claim.agent),
         summary: answer.summary.clone(),
         negative: answer.negative.as_ref().map(|(ok, _)| *ok),
         negative_detail: answer.negative.clone().map(|(_, d)| d).unwrap_or_default(),
         files: answer.files.clone(),
         library_root: Some(path(&library)),
         pending: answer.library.clone(),
-        runs: saved.map_or(0, |s| s.runs),
+        runs,
         ..HarnessState::default()
     };
-    // the app runs it itself: its result counts, and the command is known to work for later
-    let ran = harness_command(inner, ctx, claim, repo, &state)?;
-    Ok(finish(state, ran, r.cost, String::new()))
+    checkpoint_harness(inner, ctx.row.wp_id, &state);
+    Ok((state, r.cost))
+}
+
+fn settle_harness_review_fixes(
+    inner: &Inner,
+    wp_id: u64,
+    items: &[(&FindingRow, bool)],
+    reply: &str,
+) -> Result<(), FlowError> {
+    if !items.iter().any(|(f, _)| f.source == HARNESS_REVIEW) {
+        return Ok(());
+    }
+    let fixed: Vec<usize> = text::fenced_blocks(reply)
+        .into_iter()
+        .rev()
+        .find_map(|block| {
+            let value = serde_json::from_str::<serde_json::Value>(&block.body).ok()?;
+            serde_json::from_value(value.get("fixed")?.clone()).ok()
+        })
+        .ok_or_else(|| {
+            flow_error(
+                "harness.fixReport",
+                "AI chưa báo các lỗi review harness đã sửa. Xem Chat rồi bấm Thử lại.",
+            )
+        })?;
+    let store = inner.lock_store().map_err(|e| flow_error(&e.code, e.message))?;
+    for (i, (f, _)) in items
+        .iter()
+        .enumerate()
+        .filter(|(_, (f, _))| f.source == HARNESS_REVIEW)
+    {
+        let state = if fixed.contains(&(i + 1)) { "fixed" } else { "open" };
+        store
+            .upsert_finding(&FindingRow {
+                state: state.into(),
+                chosen: false,
+                ..(*f).clone()
+            })
+            .map_err(|e| {
+                flow_error(
+                    "storage",
+                    format!("Không lưu được kết quả sửa Harness {wp_id}: {e}"),
+                )
+            })?;
+    }
+    Ok(())
 }
 
 /// Step 11. Claude tries the change in Chrome through the Chrome DevTools MCP server only,
@@ -5064,15 +5294,28 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             write_task_file(ctx, PLAN_FILE, &answer.plan)?;
             set_session(&r.session);
             let questions = new_questions(answer.questions, &before);
-            let proposals: Vec<StepProposal> = answer
+            let mut proposals: Vec<StepProposal> = answer
                 .proposals
                 .into_iter()
-                .filter_map(|p| {
+                .filter_map(|mut p| {
                     let step = match p.step {
                         "harness" => StepKind::Harness,
                         "browserTest" => StepKind::BrowserTest,
                         _ => return None,
                     };
+                    if step == StepKind::Harness {
+                        let has_checks = p
+                            .checks
+                            .lines()
+                            .any(|line| !line.trim_start_matches(['-', ' ']).trim().is_empty());
+                        if p.reason.trim().is_empty() || (p.recommend && !has_checks) {
+                            p.recommend = false;
+                            p.reason = NO_HARNESS_REASON.into();
+                        }
+                        if !p.recommend {
+                            p.checks.clear();
+                        }
+                    }
                     Some(StepProposal {
                         step,
                         recommend: p.recommend,
@@ -5094,8 +5337,20 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     })
                 })
                 .collect();
+            if !proposals.iter().any(|p| p.step == StepKind::Harness) {
+                proposals.push(StepProposal {
+                    step: StepKind::Harness,
+                    recommend: false,
+                    reason: NO_HARNESS_REASON.into(),
+                    checks: String::new(),
+                    dev_server: None,
+                });
+            }
             let note = plan_note(&answer.plan, questions.len(), &proposals);
             inner.with_saved(wp_id, |s| {
+                if let Some(h) = s.harness.as_mut() {
+                    h.run.clear();
+                }
                 // the AI's advice turns a step on or off unless the user already chose
                 for p in &proposals {
                     if !s.picked.contains(&p.step) && s.workflow.state_of(p.step) == StepState::Pending {
@@ -5230,7 +5485,20 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         }
         StepKind::Fix | StepKind::FixCross => {
             let findings = inner.findings(wp_id);
-            let items: Vec<&FindingRow> = findings.iter().filter(|f| to_fix(f)).collect();
+            let picks = inner
+                .with_saved(wp_id, |s| s.harness_fix.clone())
+                .unwrap_or_default();
+            let items: Vec<(&FindingRow, bool)> = findings
+                .iter()
+                .filter(|f| to_fix(f))
+                .map(|f| {
+                    (
+                        f,
+                        f.source == HARNESS_REVIEW
+                            || (f.source == "harness" && picks.contains(&f.fingerprint)),
+                    )
+                })
+                .collect();
             if items.is_empty() {
                 return Ok(Done {
                     event: E::StepSucceeded(step),
@@ -5239,7 +5507,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 });
             }
             if let Ok(store) = inner.store.lock() {
-                for f in &items {
+                for (f, _) in &items {
                     let _ = store.upsert_finding(&FindingRow {
                         state: "fixing".into(),
                         ..(*f).clone()
@@ -5248,32 +5516,93 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             }
             let list: Vec<FixItem> = items
                 .iter()
-                .map(|f| FixItem {
+                .map(|(f, harness)| FixItem {
                     severity: f.severity.clone(),
                     file: f.file.clone(),
                     line: f.line,
-                    title: f.title.clone(),
+                    title: if *harness {
+                        format!("[Sửa harness] {}", f.title)
+                    } else {
+                        f.title.clone()
+                    },
                     detail: f.detail.clone().unwrap_or_default(),
                     suggestion: f.suggestion.clone().unwrap_or_default(),
                 })
                 .collect();
-            let allowed = ctx.repo_config().allow_bash;
+            let has_harness = items.iter().any(|(_, h)| *h);
+            let has_code = items.iter().any(|(_, h)| !h);
+            let scratch = if has_harness {
+                let dir = scratch_dir(inner, ctx);
+                if !dir.is_dir() {
+                    return Err(flow_error(
+                        "harness.scratch",
+                        "Không thấy thư mục harness. Quay lại bước Harness để dựng lại.",
+                    ));
+                }
+                Some(dir)
+            } else {
+                None
+            };
+            let dirs: Vec<String> = scratch.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            let mut allowed = ctx.repo_config().allow_bash;
+            if has_harness {
+                allowed.extend(claude::HARNESS_BASH.iter().map(|s| (*s).to_owned()));
+            }
+            let scratch_only = (!has_code).then(|| Claim {
+                step,
+                agent: claim.agent,
+                stop: claim.stop.clone(),
+                choice: claim.choice.clone(),
+                mode: None,
+            });
+            let claim = scratch_only.as_ref().unwrap_or(claim);
             let shell = shell_of(claim, &allowed);
             let cut = inner.cut_session(wp_id, step, provider_of(claim.agent));
             // no session of this AI: it did not write the code, so it gets the plan and the brief
             let plan = ctx.read(PLAN_FILE).unwrap_or_default();
             let context = session.is_none().then_some((plan.as_str(), brief.as_str()));
-            let mut prompt = match &cut {
-                Some(_) => prompts::carry_on_cut(step_label(step), shell),
-                None => prompts::fix(&list, shell, context),
+            let mut prompt = match (scratch.as_ref(), has_code, &cut) {
+                (Some(dir), false, _) => prompts::fix_harness(
+                    &list,
+                    &brief,
+                    &plan,
+                    &repo.to_string_lossy(),
+                    &dir.to_string_lossy(),
+                ),
+                (Some(dir), true, _) => {
+                    let mut prompt = prompts::fix(&list, shell, Some((&plan, &brief)));
+                    prompt.push_str(&format!(
+                        "\nItems marked [Sửa harness] must be fixed only in `{}` using the brief and plan; \
+                         never restore removed code to make a test pass. For the other items edit \
+                         production code. End with a JSON block {{\"fixed\":[1,2]}} listing only the \
+                         numbers of harness findings you actually fixed.",
+                        dir.display()
+                    ));
+                    prompt
+                }
+                (None, _, Some(_)) => prompts::carry_on_cut(step_label(step), shell),
+                (None, _, None) => prompts::fix(&list, shell, context),
             };
             if cut.is_none() && inner.was_cut(wp_id, step) {
                 prompt.push_str(prompts::CUT_BEFORE);
             }
-            let resume = cut.as_deref().or(session.as_deref());
-            let code = code_job(claim, resume, &[], budget, &allowed, repo, timeout, prompt);
+            let resume = cut.as_deref().or(session.as_deref().filter(|_| has_code));
+            let cwd = scratch.as_deref().filter(|_| !has_code).unwrap_or(repo);
+            let mut code = code_job(claim, resume, &dirs, budget, &allowed, cwd, timeout, prompt);
+            if !has_code && claim.agent == AgentKind::Codex {
+                code.args.insert(1, "--skip-git-repo-check".into());
+            }
+            let before = (!has_code)
+                .then(|| git_snap(repo))
+                .transpose()
+                .map_err(|e| flow_error("repo.git", e))?;
             let r = inner.run_ai(ctx, step, &code, claim)?;
-            set_session(&r.session);
+            if let Some(before) = before {
+                harness_repo_unchanged(repo, &before)?;
+            } else {
+                set_session(&r.session);
+            }
+            settle_harness_review_fixes(inner, wp_id, &items, &r.text)?;
             let fixes = inner
                 .with_saved(wp_id, |s| {
                     s.fixes += 1;
@@ -5281,7 +5610,15 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 })
                 .unwrap_or(fixes + 1);
             // Kiểm tra again on what the fix changed; it belongs to this step (no own row)
-            let again = run_checks(inner, ctx, claim, repo, &base, step)?;
+            let again = if has_code {
+                run_checks(inner, ctx, claim, repo, &base, step)?
+            } else {
+                ChecksDone {
+                    ran: false,
+                    note: String::new(),
+                    cost: 0.0,
+                }
+            };
             let mut again_note = if again.ran {
                 format!("; Kiểm tra lại: {}", again.note)
             } else {
@@ -5431,6 +5768,16 @@ fn codex_review(
     brief: &str,
     plan: &str,
 ) -> Result<Vec<RawFinding>, FlowError> {
+    codex_read_review(inner, ctx, claim, name, prompts::cross_review(base, brief, plan))
+}
+
+fn codex_read_review(
+    inner: &Inner,
+    ctx: &TaskCtx,
+    claim: &Claim,
+    name: &str,
+    prompt: String,
+) -> Result<Vec<RawFinding>, FlowError> {
     let step = claim.step;
     let (_, timeout, _) = limits(step, &ctx.config);
     let repo = ctx
@@ -5457,7 +5804,7 @@ fn codex_review(
         agent: Provider::Codex,
         args,
         cwd: repo,
-        stdin: Some(prompts::cross_review(base, brief, plan)),
+        stdin: Some(prompt),
         timeout,
     };
     let (answer, _) = inner.run_codex(ctx, step, &job, claim)?;
@@ -5467,7 +5814,9 @@ fn codex_review(
         .and_then(|v| text::findings_from_json(&v))
         .or_else(|| text::findings_from_text(&text))
         .ok_or_else(unreadable_review)?;
-    save_review_notes(ctx, step, &text);
+    if step.is_review() {
+        save_review_notes(ctx, step, &text);
+    }
     Ok(raw)
 }
 
@@ -7233,7 +7582,47 @@ mod tests {
     #[test]
     fn the_harness_is_built_once_then_run_by_the_app_after_each_fix() {
         let Some(s) = setup() else { return };
+        let review_calls = AtomicUsize::new(0);
         let (flow, fake) = flow_with(&s, false, move |job, stop, out| match kind(job) {
+            "codex"
+                if job
+                    .stdin
+                    .as_deref()
+                    .is_some_and(|p| p.contains("Independently review the harness")) =>
+            {
+                assert!(job.args.windows(2).any(|a| a == ["--sandbox", "read-only"]));
+                assert!(job.args.iter().any(|a| a == "--output-schema"));
+                assert!(!job.args.iter().any(|a| a == "resume"));
+                let text = if review_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    "malformed".to_owned()
+                } else {
+                    serde_json::json!({"findings":[{
+                        "severity":"high","file":"run.js","line":1,"title":"Expected value mismatch",
+                        "detail":"The expected value disagrees with the brief.","suggestion":"Use the brief."
+                    }]})
+                    .to_string()
+                };
+                out(
+                    &serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":text}})
+                        .to_string(),
+                );
+                ok()
+            }
+            _ if job
+                .stdin
+                .as_deref()
+                .is_some_and(|p| p.starts_with("Fix only the selected harness")) =>
+            {
+                assert!(
+                    job.args
+                        .windows(2)
+                        .any(|a| a[0] == "--add-dir" && Path::new(&a[1]) == job.cwd)
+                );
+                assert!(job.cwd.join("run.js").is_file());
+                std::fs::write(job.cwd.join("run.js"), "// reviewed harness").unwrap();
+                out(&result_line("Đã sửa.\n```json\n{\"fixed\":[1]}\n```"));
+                ok()
+            }
             "analyze" => {
                 out(&result_line(
                     "## Nguyên nhân\nx\n```json\n{\"harness\":{\"recommend\":true,\"reason\":\"có logic\",\"checks\":[\"org rỗng\"]}}\n```",
@@ -7287,8 +7676,35 @@ mod tests {
         let d = run(&flow, &ctx, FlowAction::ApprovePlan);
         assert_eq!(d.current, Some(StepKind::Harness));
 
-        // built by the AI, run by the app: one case FAILs → the findings gate
+        // A review parse failure retries only the review, before the app runs any cases.
         let d = run(&flow, &ctx, FlowAction::Run);
+        assert!(d.error.is_some(), "{:?}", d.gate);
+        assert!(runs.lock().unwrap().is_empty());
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::Findings),
+            "{:?}",
+            d.error
+        );
+        let review = d.findings.iter().find(|f| f.source == HARNESS_REVIEW).unwrap();
+        assert!(runs.lock().unwrap().is_empty());
+        flow.decide(&FindingDecision {
+            wp_id: 1,
+            fingerprint: review.fingerprint.clone(),
+            decision: Decision::Fix,
+            reason: None,
+        })
+        .unwrap();
+        assert!(
+            flow.detail(&ctx)
+                .findings
+                .iter()
+                .any(|f| f.source == HARNESS_REVIEW && f.fix_harness)
+        );
+
+        // Repair the review finding in scratch, then the app runs the harness; one case fails.
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
         assert_eq!(
             d.gate.as_ref().map(|g| g.kind),
             Some(GateKind::Findings),
@@ -7308,22 +7724,38 @@ mod tests {
             .find(|f| f.title == "Harness FAIL: empty org")
             .unwrap();
         assert_eq!((f.file.as_str(), f.source.as_str()), ("a.ts", "harness"));
-        let note = d
-            .runs
-            .iter()
-            .find(|r| r.step == StepKind::Harness)
-            .and_then(|r| r.note.clone());
-        assert_eq!(note.as_deref(), Some("FAIL 1/2"));
+        for (decision, fix_harness) in [(Decision::Fix, false), (Decision::FixHarness, true)] {
+            flow.decide(&FindingDecision {
+                wp_id: 1,
+                fingerprint: f.fingerprint.clone(),
+                decision,
+                reason: None,
+            })
+            .unwrap();
+            assert!(
+                flow.detail(&ctx)
+                    .findings
+                    .iter()
+                    .any(|item| item.fingerprint == f.fingerprint
+                        && item.chosen
+                        && item.fix_harness == fix_harness)
+            );
+        }
         let jobs = fake.jobs.lock().unwrap().clone();
-        let prompt = jobs.last().unwrap().stdin.clone().unwrap();
+        let prompt = jobs
+            .iter()
+            .find(|j| kind(j) == "harness")
+            .unwrap()
+            .stdin
+            .clone()
+            .unwrap();
         assert!(prompt.contains(&library.to_string_lossy().into_owned()) && prompt.contains("- org rỗng"));
         let scratch = PathBuf::from(&runs.lock().unwrap()[0]);
         assert!(!scratch.starts_with(&s.repo) && scratch.join("run.js").is_file());
         assert!(library.join(harness::README).is_file());
         assert!(s.tasks.join("WP-1").join("harness").join("run-1.log").is_file());
 
-        // fixed in step 7, then the app runs the harness again by itself: PASS, kept
-        pick_all(&flow, &ctx);
+        // The user chose to repair the harness; the app reruns it by itself and saves the pass.
         let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
         assert_eq!(
             (d.current, d.status),
@@ -7337,7 +7769,11 @@ mod tests {
         assert_eq!(kept, library.join("org-guard"));
         assert!(kept.join("run.js").is_file());
         let harness_runs: Vec<&RunSummary> = d.runs.iter().filter(|r| r.step == StepKind::Harness).collect();
-        assert_eq!(harness_runs.len(), 1, "the app's own run adds no AI run");
+        assert_eq!(
+            harness_runs.len(),
+            3,
+            "one build and two review attempts; app runs add no AI rows"
+        );
         assert!(
             d.findings
                 .iter()
@@ -7348,7 +7784,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|j| kind(j) == "harness")
+                .filter(|j| j
+                    .stdin
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with("Build and run a throwaway test harness")))
                 .count(),
             1
         );
@@ -8443,7 +8882,9 @@ mod tests {
             panic!("{:?}", d.questions)
         };
         assert_eq!((q.id.as_str(), q.text.as_str()), ("q1", "Có cần migrate không?"));
-        assert!(d.proposals.is_empty() && d.uses.is_empty());
+        assert!(d.uses.is_empty());
+        assert_eq!(d.proposals.len(), 1);
+        assert!(!d.proposals[0].recommend && !d.proposals[0].reason.is_empty());
         let err = flow.act(ctx.clone(), FlowAction::ApprovePlan).unwrap_err();
         assert_eq!(err.code, "plan.questions");
         let answer = |text: &str| FlowAction::AnswerQuestion {

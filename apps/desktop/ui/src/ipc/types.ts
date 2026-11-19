@@ -640,6 +640,7 @@ export interface FindingView {
   reason?: string;
   /** the user asked for it to be fixed */
   chosen?: boolean;
+  fixHarness?: boolean;
   /** cross-review round that reported it last */
   round?: number;
   /** step that reported it last */
@@ -1016,7 +1017,7 @@ export type FlowAction =
   | { type: "reopen"; step?: StepKind; note?: string }
   | { type: "setAuto"; on: boolean };
 
-export type Decision = "fix" | "accept" | "defer" | "reset";
+export type Decision = "fix" | "fixHarness" | "accept" | "defer" | "reset";
 
 export interface FindingDecision {
   wpId: number;
