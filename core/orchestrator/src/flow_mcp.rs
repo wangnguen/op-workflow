@@ -47,7 +47,7 @@ pub(crate) fn criteria(step: StepKind) -> &'static [(&'static str, &'static str)
     use StepKind::*;
     const SCOPE: (&str, &str) = (
         "scope",
-        "Verify that the task requirements apply to this checkout using current code. Identify every required outcome and report any conflict with the brief, plan, repo or memory.",
+        "Verify that the task requirements apply to this checkout using current code. When the context has repoCheck, decide whether this checkout is the right place for the change and say why. Identify every required outcome and report any conflict with the brief, plan, repo or memory.",
     );
     const REVIEW: (&str, &str) = (
         "review",

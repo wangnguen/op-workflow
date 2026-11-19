@@ -97,6 +97,18 @@ export const vi = {
     workspacesHint: "App tìm repo git trong các thư mục này (sâu 2 cấp) khi bạn bấm Bắt đầu làm việc.",
     remembered: "Đã nhớ theo project",
     harnessLibs: "Thư viện harness",
+    repoChecks: "Lệnh kiểm tra",
+    repoChecksHint:
+      "Lệnh bước Kiểm tra chạy cho repo này sau Viết code và mỗi lần Sửa lỗi, mỗi dòng một lệnh; `{files}` là các file task đã đổi (ví dụ `npx eslint {files}`). Để trống thì app tự dò theo package (tsc, eslint, prettier).",
+    repoChecksPlaceholder: "Để trống: app tự dò (tsc, eslint, prettier)",
+    repoChecksAuto: "app tự dò",
+    repoChecksCount: (n: number) => `${n} lệnh`,
+    repoChecksEdit: "Sửa",
+    repoPairs: "Repo phụ đã nhớ",
+    repoPairsHint:
+      "Khi bạn duyệt plan làm ở một repo khác repo trong link issue, app nhớ cặp đó để lần Phân tích sau biết. Đây chỉ là gợi ý cho AI, không chặn task nào.",
+    repoPairsEmpty: "Chưa có cặp nào.",
+    repoPairForget: "Bỏ",
     harnessLibsHint:
       "Mỗi repo một thư viện riêng, nằm ngoài repo và ngoài %TEMP%. Bước Harness đọc README.md của thư viện để dùng lại harness cũ, và lưu harness mới dùng lại được vào đây. Không repo nào đọc thư viện của repo khác.",
     harnessLibsEmpty: "Chưa có repo nào: thư viện hiện ra sau lần Bắt đầu làm việc đầu tiên.",
@@ -410,7 +422,8 @@ export const vi = {
     repo: "Repo",
     repoPick: "Chọn repo…",
     repoSuggested: "gợi ý từ link issue trong mô tả task",
-    confirmUnlinkedRepo: "Tôi đã kiểm tra đây là repo của task này.",
+    repoNotIssue: (issueRepos: string[], origin?: string) =>
+      `Issue thuộc ${issueRepos.join(", ")}; repo này ${origin ? `có origin ${origin}` : "không có origin"}. Vẫn bắt đầu được: bước Phân tích sẽ xem đây có đúng chỗ sửa không và nói lý do.`,
     repoRemembered: "đã dùng cho project này",
     repoNone: (dirs: string) => `Không thấy repo git nào trong ${dirs}. Dán đường dẫn repo vào ô bên dưới.`,
     repoOther: "Repo ở chỗ khác",
@@ -472,6 +485,24 @@ export const vi = {
       keep: "Giữ plan, chạy tiếp",
       keepHint: "Duyệt brief và plan hiện tại, rồi tiếp tục tại bước hoặc lựa chọn đang chờ.",
     },
+    /** "Trao đổi với AI" under the strip of a failed step */
+    talk: {
+      title: "Trao đổi với AI",
+      hint: "Hỏi AI vì sao bước này lỗi và nên làm gì. AI chỉ đọc, không sửa file. Bàn xong thì Chạy tiếp theo hướng đã bàn, hoặc Chạy lại từ đầu (lần chạy mới nhận cả nội dung trao đổi).",
+      you: "Bạn",
+      ai: "AI",
+      answering: "AI đang đọc và trả lời…",
+      placeholder: "Hỏi AI, giải thích thêm, hoặc hướng dẫn cho lần chạy tiếp… (Ctrl+Enter để gửi)",
+      ask: "Hỏi AI",
+      askHint: "AI trả lời ngay trong khung này, không chạy lại bước.",
+      stop: "Dừng",
+      stopHint: "Dừng lượt trả lời này; những gì đã nói vẫn giữ.",
+      goOn: "Chạy tiếp theo hướng đã bàn",
+      goOnHint: "AI làm tiếp trong đúng phiên của bước, đọc thêm lời bạn gõ (để trống thì làm theo những gì đã bàn).",
+      goOnGone: "Bước này không còn phiên để tiếp. Dùng Chạy lại từ đầu: lần chạy mới nhận cả nội dung trao đổi.",
+    },
+    useCurrentRepo: "Dùng repo hiện tại",
+    useCurrentRepoHint: "Repo hiện tại đúng là repo của task: app ghi lại thư mục và origin này rồi chạy lại bước.",
     /** a Claude step reached its cost cap */
     budget: {
       retryFreshHint: "Mở phiên mới và chạy lại bước này với giới hạn hiện tại.",
@@ -481,9 +512,6 @@ export const vi = {
     },
     stoppedLabel: "Đã dừng, chờ bạn",
     retryFreshHint: "Chạy lại bước này bằng phiên mới, như chưa chạy lần nào (bỏ những gì AI làm dở trong phiên vừa dừng)",
-    guidePlaceholder: "Hướng dẫn cho AI (không bắt buộc)",
-    goOnStopped: "Chạy tiếp",
-    goOnStoppedHint: "AI làm tiếp trong đúng phiên vừa dừng, đọc lời bạn gõ như tin nhắn tiếp theo (để trống thì AI làm tiếp như cũ)",
     login: "Đăng nhập",
     approve: "Duyệt, AI viết code",
     approveHint: "AI viết code theo plan này trên nhánh của task (không commit, không push)",

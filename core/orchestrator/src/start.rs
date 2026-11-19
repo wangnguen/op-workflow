@@ -34,9 +34,15 @@ pub const BRANCH_DEFAULT: &str = "default";
 /// Dialog data for one task. Scans the workspace folders; no network.
 pub fn options(config: &Config, wp: &WorkPackage, saved: Option<&TaskRow>) -> StartOptions {
     let links = extract_issue_links(&wp.description);
-    let issue_slugs: Vec<String> = links
-        .iter()
-        .map(|l| format!("{}/{}", l.domain, l.repo).to_lowercase())
+    let issue_slugs = crate::task_repo::issue_repos(&wp.description);
+    // checkouts where issues of these repos were worked on before (a secondary repo, a fork)
+    let paired: Vec<String> = config
+        .projects
+        .get(&wp.project)
+        .into_iter()
+        .flat_map(|p| &p.repo_aliases)
+        .filter(|(issue, _)| issue_slugs.iter().any(|s| s.eq_ignore_ascii_case(issue.trim())))
+        .flat_map(|(_, origins)| origins.iter().map(|o| o.trim().to_lowercase()))
         .collect();
     let remembered: Vec<String> = config
         .projects
@@ -67,7 +73,9 @@ pub fn options(config: &Config, wp: &WorkPackage, saved: Option<&TaskRow>) -> St
             let path_text = path.to_string_lossy().into_owned();
             let remote = origin_url(path);
             let slug = remote.as_deref().and_then(remote_slug);
-            let suggested = slug.as_ref().is_some_and(|s| issue_slugs.contains(s));
+            let suggested = slug
+                .as_ref()
+                .is_some_and(|s| issue_slugs.contains(s) || paired.contains(s));
             let rank = remembered
                 .iter()
                 .position(|r| same_path(r, &path_text))
@@ -125,6 +133,7 @@ pub fn options(config: &Config, wp: &WorkPackage, saved: Option<&TaskRow>) -> St
         branch,
         branch_source: branch_source.to_owned(),
         issue_links: links.into_iter().map(|l| l.url).collect(),
+        issue_repos: issue_slugs,
         workspaces: config.workspaces.clone(),
     }
 }
@@ -329,13 +338,8 @@ pub(crate) fn start(
     }
     let (git, top) = open_repo(&req.repo)?;
     let source = details.as_ref().map_or(wp, |(fresh, _)| fresh);
-    let binding = crate::task_repo::check(
-        config,
-        &source.project,
-        &source.description,
-        &git,
-        req.confirm_unlinked_repo,
-    )?;
+    // any checkout may start the task: Phân tích decides whether it is the right place
+    let binding = crate::task_repo::Binding::read(&git, &source.description)?;
     let created = git.start_branch(branch, base).map_err(git_error)?;
 
     let mut warnings = Vec::new();
@@ -640,7 +644,6 @@ mod tests {
             base: "development".into(),
             branch: "f/WP-188001".into(),
             carry_on: None,
-            confirm_unlinked_repo: false,
         };
         let input = || StartInput {
             config: &cfg,
@@ -661,17 +664,25 @@ mod tests {
             task_url: "https://op.example.com/work_packages/188001".into(),
             now: "2026-11-13T09:00:00Z".into(),
         };
-        let wrong_repo = StartRequest {
-            repo: root.path().join("api").to_string_lossy().into_owned(),
-            confirm_unlinked_repo: true,
-            ..req.clone()
-        };
-        assert_eq!(start(input(), &wrong_repo).unwrap_err().code, "repo.mismatch");
-        assert_eq!(
-            Git::new(root.path().join("api")).current_branch().unwrap(),
-            "development"
+        // a checkout that is not the issue's repo is not refused: Phân tích checks it
+        let api = root.path().join("api");
+        let other = crate::task_repo::Binding::read(&Git::new(&api), &task.description).unwrap();
+        assert!(
+            other.needs_check() && other.pairs().is_empty(),
+            "no origin, nothing to pair"
         );
-        assert!(!cfg_path.exists());
+        let upstream = crate::task_repo::Binding::read(
+            &Git::new(&web),
+            "https://github.com/acme/upstream/issues/12 https://github.com/acme/upstream/issues/13",
+        )
+        .unwrap();
+        assert_eq!(upstream.issue_repos, ["github.com/acme/upstream"]);
+        assert!(upstream.needs_check());
+        let pair = (
+            "github.com/acme/upstream".to_owned(),
+            "github.com/acme/web".to_owned(),
+        );
+        assert_eq!(upstream.pairs(), [pair]);
         let mut alias_cfg = cfg.clone();
         alias_cfg
             .projects
@@ -682,28 +693,15 @@ mod tests {
                 "github.com/acme/upstream".into(),
                 vec!["github.com/acme/web".into()],
             );
-        assert!(
-            crate::task_repo::check(
-                &alias_cfg,
-                &task.project,
-                "https://github.com/acme/upstream/issues/12",
-                &Git::new(&web),
-                false,
-            )
-            .is_ok()
-        );
         assert_eq!(
-            crate::task_repo::check(
-                &alias_cfg,
-                &task.project,
-                "https://github.com/acme/unrelated/issues/12",
-                &Git::new(&web),
-                true,
-            )
-            .unwrap_err()
-            .code,
-            "repo.mismatch"
+            crate::task_repo::remembered(&alias_cfg, &task.project, &upstream),
+            ["github.com/acme/upstream"]
         );
+        // a remembered secondary checkout is suggested for the next task of that issue repo
+        let next = wp(188009, "https://github.com/acme/upstream/issues/40");
+        let opts = options(&alias_cfg, &next, None);
+        assert_eq!(opts.issue_repos, ["github.com/acme/upstream"]);
+        assert!(opts.repos.iter().any(|r| r.name == "web" && r.suggested));
         let (res, row, _) = start(input(), &req).unwrap();
         assert!(res.created);
         assert!(res.warnings.is_empty(), "{:?}", res.warnings);
@@ -787,7 +785,6 @@ mod tests {
             base: "development".into(),
             branch: "feature/188004".into(),
             carry_on: None,
-            confirm_unlinked_repo: true,
         };
         let (res, _, _) = start(
             StartInput {

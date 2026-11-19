@@ -34,6 +34,7 @@ import { CopyPush } from "./CopyPush";
 import { DiffTab } from "./DiffTab";
 import { FinishDialog } from "./FinishDialog";
 import { BudgetChoices, PlanChangedChoices } from "./GateChoices";
+import { TalkPanel } from "./TalkPanel";
 import { Markdown } from "../../shared/Markdown";
 import { modelText } from "../../shared/models";
 import { Icon } from "../../shared/ui/Icon";
@@ -238,6 +239,9 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
                 setFeedbackOpen(true);
               }}
             />
+            {d.status === "gate" && d.gate?.kind === "error" && (
+              <TalkPanel detail={d} disabled={busy !== undefined} onAction={act} />
+            )}
             {error && <p className="note note--error task-error">{error}</p>}
             <div className="task-tabs">
               <SegmentedControl
@@ -464,13 +468,24 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
     } else if (kind === "error" && d.error?.code === "step.budget") {
       actions = <BudgetChoices disabled={disabled} canGoOn={d.canGoOn === true} budget={d.continuationBudgetUsd} onAction={onAction} />;
     } else if (stopped) {
-      actions = <GoOnStopped disabled={disabled} canGoOn={d.canGoOn === true} onAction={onAction} />;
+      // the guide box and "Chạy tiếp" are in "Trao đổi với AI" below the strip
+      actions = (
+        <button className="btn btn--sm" disabled={disabled} title={t.retryFreshHint} onClick={() => onAction({ type: "retry" })}>
+          <Icon name="refresh" size={12} />
+          {t.retryFresh}
+        </button>
+      );
     } else if (kind === "error") {
       actions = (
         <>
           {d.error?.provider && d.error.code === "agent.signedOut" && (
             <button className="btn btn--sm" disabled={disabled} onClick={() => onLogin(d.error?.provider ?? "claude")}>
               {t.login}
+            </button>
+          )}
+          {d.error?.code === "repo.changed" && (
+            <button className="btn btn--sm" disabled={disabled} title={t.useCurrentRepoHint} onClick={() => onAction({ type: "useCurrentRepo" })}>
+              {t.useCurrentRepo}
             </button>
           )}
           <button className="btn btn--primary btn--sm" disabled={disabled} onClick={() => onAction({ type: "retry" })}>
@@ -603,51 +618,6 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
       <span className="task-status-text">{text}</span>
       <span className="task-status-actions">{actions}</span>
     </div>
-  );
-}
-
-/** After Dừng: what the user wants the AI to do now, then "Chạy tiếp" in the same session;
- *  or "Chạy lại từ đầu" with a new one. A run that cannot go on (no session kept) offers only
- *  the second. */
-function GoOnStopped({
-  disabled,
-  canGoOn,
-  onAction,
-}: {
-  disabled: boolean;
-  canGoOn: boolean;
-  onAction: (a: FlowAction) => void;
-}) {
-  const [note, setNote] = useState("");
-  const goOn = () => onAction({ type: "goOn", note: note.trim() });
-  const fresh = (
-    <button
-      className={canGoOn ? "btn btn--ghost btn--sm" : "btn btn--primary btn--sm"}
-      disabled={disabled}
-      title={t.retryFreshHint}
-      onClick={() => onAction({ type: "retry" })}
-    >
-      <Icon name="refresh" size={12} />
-      {t.retryFresh}
-    </button>
-  );
-  if (!canGoOn) return fresh;
-  return (
-    <>
-      {fresh}
-      <input
-        className="input task-answer task-guide"
-        value={note}
-        placeholder={t.guidePlaceholder}
-        disabled={disabled}
-        onChange={(e) => setNote(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && !disabled && goOn()}
-      />
-      <button className="btn btn--primary btn--sm" disabled={disabled} title={t.goOnStoppedHint} onClick={goOn}>
-        <Icon name="play" size={12} />
-        {t.goOnStopped}
-      </button>
-    </>
   );
 }
 

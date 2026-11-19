@@ -41,8 +41,9 @@ use opw_domain::view::{
     AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CloseChoice, CommentsView, DataMode,
     DeleteBranchRequest, DiffView, FindingDecision, FlowAction, FlowStatus, HarnessLib, InboxItem,
     IssueFetch, IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, PushCheck, QuotaNote,
-    QuotaSnapshot, RepoState, SettingsView, StartOptions, StartRequest, StartResult, StepChoiceRequest,
-    StepRef, StepView, TaskCard, TaskColumn, TaskDetail, TaskSystem, TasksDirChange, TodayStats, UpdateView,
+    QuotaSnapshot, RepoChecks, RepoPair, RepoState, SettingsView, StartOptions, StartRequest, StartResult,
+    StepChoiceRequest, StepRef, StepView, TaskCard, TaskColumn, TaskDetail, TaskSystem, TasksDirChange,
+    TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
@@ -57,7 +58,8 @@ pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The harness library of every repo config knows (remembered by "Bắt đầu làm việc" or written
 /// under `repos`), each repo once.
-fn harness_libs(config: &Config) -> Vec<HarnessLib> {
+/// Every repo the config knows (remembered for a project, or with settings of its own).
+fn known_repos(config: &Config) -> Vec<String> {
     let mut repos: Vec<String> = Vec::new();
     for r in config
         .projects
@@ -70,6 +72,43 @@ fn harness_libs(config: &Config) -> Vec<HarnessLib> {
         }
     }
     repos
+}
+
+/// Settings → Repo → Lệnh kiểm tra: the Kiểm tra commands of every known repo.
+fn repo_checks(config: &Config) -> Vec<RepoChecks> {
+    known_repos(config)
+        .into_iter()
+        .map(|repo| RepoChecks {
+            commands: config
+                .repos
+                .iter()
+                .find(|(k, _)| opw_config::same_path(k, &repo))
+                .map(|(_, c)| c.checks.clone())
+                .unwrap_or_default(),
+            repo,
+        })
+        .collect()
+}
+
+/// Settings → Repo: issue repo → checkout pairs remembered from approved plans.
+fn repo_pairs(config: &Config) -> Vec<RepoPair> {
+    config
+        .projects
+        .iter()
+        .flat_map(|(project, p)| {
+            p.repo_aliases.iter().flat_map(move |(issue, origins)| {
+                origins.iter().map(move |origin| RepoPair {
+                    project: project.clone(),
+                    issue_repo: issue.clone(),
+                    origin: origin.clone(),
+                })
+            })
+        })
+        .collect()
+}
+
+fn harness_libs(config: &Config) -> Vec<HarnessLib> {
+    known_repos(config)
         .into_iter()
         .map(|repo| {
             let configured = config
@@ -941,6 +980,7 @@ impl AppService {
             _ => None,
         };
         let reopen = matches!(action, FlowAction::Reopen { .. });
+        let approved = matches!(action, FlowAction::ApprovePlan | FlowAction::SelfCode);
         // the dev server the user confirms is remembered for the repo too
         let dev_server = match &action {
             FlowAction::SetDevServer {
@@ -951,6 +991,9 @@ impl AppService {
             _ => None,
         };
         flow.act(ctx.clone(), action)?;
+        if approved {
+            self.remember_repo_pairs(&ctx, flow);
+        }
         if let (Some(server), Some(repo), Some(path)) =
             (dev_server, ctx.row.repo.as_deref(), self.config_path.as_deref())
         {
@@ -1778,6 +1821,8 @@ impl AppService {
             claude_probe_min: config.quota.claude_probe_min,
             on_close: config.on_close,
             harness_libs: harness_libs(&config),
+            repo_checks: repo_checks(&config),
+            repo_pairs: repo_pairs(&config),
         }
     }
 
@@ -1870,6 +1915,66 @@ impl AppService {
     /// Settings → Repo & nhánh → Thư viện harness: the library folder of one repo (`None` = back
     /// to `C:\tmp\<repo>-harness`). Not inside the repo, not in `%TEMP%` (the EDR locks new exes
     /// run from there).
+    /// Settings → Repo → Lệnh kiểm tra: the commands Kiểm tra runs for `repo` (`{files}` = the
+    /// changed files); an empty list = guessed per package again.
+    pub fn set_repo_checks(&self, repo: &str, commands: &[String]) -> Result<SettingsView, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
+        if !known_repos(&self.config())
+            .iter()
+            .any(|r| opw_config::same_path(r, repo))
+        {
+            return Err(ApiError::new("checks.repo", "Repo này chưa có trong Cài đặt"));
+        }
+        opw_config::save_repo_checks(path, repo, commands)
+            .map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        Ok(self.settings())
+    }
+
+    /// Settings → Repo: forget one remembered issue repo → checkout pair.
+    pub fn forget_repo_pair(&self, pair: &RepoPair) -> Result<SettingsView, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
+        opw_config::forget_repo_alias(path, &pair.project, &pair.issue_repo, &pair.origin)
+            .map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        Ok(self.settings())
+    }
+
+    /// The user approved a plan made in a checkout that is not plainly the issue's repo: the
+    /// next analysis of an issue of that repo is told it was worked on here (a hint only).
+    fn remember_repo_pairs(&self, ctx: &TaskCtx, flow: &Flow) {
+        let (Some(path), Some(store)) = (self.config_path.as_deref(), self.store.as_ref()) else {
+            return;
+        };
+        let binding = store
+            .lock()
+            .ok()
+            .and_then(|s| s.kv_get(ctx.row.wp_id, task_repo::KEY, "").ok().flatten())
+            .and_then(|v| serde_json::from_str::<task_repo::Binding>(&v).ok());
+        let mut added = Vec::new();
+        for (issue, origin) in binding.map(|b| b.pairs()).unwrap_or_default() {
+            if opw_config::remember_repo_alias(path, &ctx.row.project, &issue, &origin).unwrap_or(false) {
+                added.push(issue);
+            }
+        }
+        if !added.is_empty() {
+            self.reload_config();
+            flow.note(
+                ctx.row.wp_id,
+                &format!(
+                    "App nhớ: issue của {} đã làm ở repo này (gợi ý cho lần Phân tích sau; xem ở Cài đặt → Repo)",
+                    added.join(", ")
+                ),
+            );
+        }
+    }
+
     pub fn set_harness_dir(&self, repo: &str, dir: Option<&str>) -> Result<SettingsView, ApiError> {
         let path = self
             .config_path

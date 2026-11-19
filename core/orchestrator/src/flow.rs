@@ -39,8 +39,8 @@ use opw_domain::view::{
     AgentKind, AgentQuestionView, AgentView, AlertKind, ApiError, CarryOn, ChatItem, ChatKind, ChatView,
     Decision, DevCommand, DevServer, FindingDecision, FindingView, FlowAction, FlowError, FlowStatus,
     GateKind, GateView, LogLine, PlanQuestion, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote,
-    RunState, RunSummary, RunView, SessionStatus, StepProposal, StepRef, StepView, TaskColumn, TaskDetail,
-    TestCase, TestView, ToolEvent,
+    RunState, RunSummary, RunView, SessionStatus, StepProposal, StepRef, StepView, TalkTurn, TaskColumn,
+    TaskDetail, TestCase, TestView, ToolEvent,
 };
 use opw_domain::workflow::{AfterFix, Phase, StepKind, StepState, Workflow, WorkflowEvent};
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
@@ -233,6 +233,34 @@ struct Saved {
     /// "Chạy tiếp": the next run of that step goes on in the stopped session with the user's words.
     #[serde(skip_serializing_if = "Option::is_none")]
     go_on: Option<GoOnRun>,
+    /// "Trao đổi với AI" at the error gate of a step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    talk: Option<Talk>,
+    /// What the user and the AI said about the failure, for the next run of that step (when that
+    /// run does not go on in the session the conversation happened in).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    talk_carry: Option<TalkCarry>,
+}
+
+/// A conversation about the failure of `step`, read only. It goes on in a Claude session: the
+/// failed step's own when it had one (then "Chạy tiếp" carries on with the conversation in it),
+/// else a fresh one. Codex gets a fresh read-only session with the whole conversation each turn.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct Talk {
+    step: Option<StepKind>,
+    agent: Option<AgentKind>,
+    session: Option<String>,
+    /// `session` is the failed step's own session.
+    in_step: bool,
+    turns: Vec<TalkTurn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TalkCarry {
+    step: StepKind,
+    text: String,
 }
 
 /// A run the user stopped with Dừng, whose session can take the user's words next.
@@ -254,6 +282,19 @@ struct GoOnRun {
     note: String,
 }
 
+/// Errors after which the run's session is kept for "Chạy tiếp": the user stopped it, the cost
+/// cap ended it, or the AI ended its turn without the verdict the app needs (it can be told what
+/// to do and go on where it was).
+const GO_ON_AFTER: [&str; 7] = [
+    "step.stopped",
+    "step.budget",
+    "mcp.mismatch",
+    "mcp.blocked",
+    "mcp.needsUser",
+    "mcp.missingVerdict",
+    "mcp.verdictConflict",
+];
+
 /// After Dừng, what the error gate says when the run can go on in its session…
 const STOPPED_GO_ON: &str = "Bạn đã dừng bước này. Gõ hướng dẫn cho AI rồi bấm Chạy tiếp (AI làm tiếp trong phiên đó), hoặc Chạy lại từ đầu.";
 /// … and when it cannot (no session, or a step that keeps none).
@@ -269,6 +310,56 @@ fn can_go_on(step: StepKind, agent: AgentKind) -> bool {
         AgentKind::Codex => matches!(step, S::Implement | S::Fix | S::FixCross | S::Harness),
         AgentKind::Shell => false,
     }
+}
+
+/// Cost cap of one answer in "Trao đổi với AI" (Claude).
+const TALK_BUDGET_USD: f64 = 0.5;
+/// Time limit of one answer.
+const TALK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Log lines of the failed step the AI sees.
+const TALK_LOG_LINES: usize = 15;
+
+/// The conversation about a failed step goes to that step's next run, unless that run goes on in
+/// the very session the conversation happened in ("Chạy tiếp" after talking in the step's own
+/// Claude session).
+fn carry_talk(saved: &mut Saved, step: StepKind, go_on: bool) {
+    let Some(talk) = saved.talk.take() else { return };
+    if talk.step != Some(step) || talk.turns.is_empty() || (go_on && talk.in_step) {
+        return;
+    }
+    saved.talk_carry = Some(TalkCarry {
+        step,
+        text: talk_transcript(&talk.turns),
+    });
+}
+
+fn talk_transcript(turns: &[TalkTurn]) -> String {
+    turns
+        .iter()
+        .map(|t| format!("{}: {}", if t.from_user { "User" } else { "AI" }, t.text.trim()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Add `text` to a job's prompt: after the prompt on stdin, or after a `/command` argument.
+fn add_to_prompt(job: &mut Job, text: &str) {
+    if let Some(prompt) = job.stdin.as_mut() {
+        prompt.push_str("\n\n");
+        prompt.push_str(text);
+    } else if let Some(prompt) = job.args.get_mut(1).filter(|a| a.starts_with('/')) {
+        prompt.push(' ');
+        prompt.push_str(text);
+    }
+}
+
+/// One answer of "Trao đổi với AI", and where the conversation goes on.
+struct TalkAnswer {
+    text: String,
+    agent: AgentKind,
+    /// The Claude session to go on in next turn.
+    session: Option<String>,
+    in_step: bool,
+    cost: Option<f64>,
 }
 
 /// What the AI asked at the question gate.
@@ -484,6 +575,8 @@ struct Entry {
     saved: Saved,
     run: Option<Running>,
     log: VecDeque<LogLine>,
+    /// The AI is answering in "Trao đổi với AI"; Dừng sets the flag.
+    talking: Option<Arc<AtomicBool>>,
 }
 
 /// What a step run needs to know about its task.
@@ -1133,6 +1226,11 @@ impl Flow {
         *self.inner.config_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
     }
 
+    /// A line in the task's log (Tiến trình), from outside a step.
+    pub fn note(&self, wp_id: u64, text: &str) {
+        self.inner.log(wp_id, None, "info", text, true);
+    }
+
     pub fn brief_refreshed(&self, ctx: &TaskCtx) {
         self.inner
             .with_saved(ctx.row.wp_id, |s| s.refreshed_brief = ctx.read(BRIEF_FILE));
@@ -1230,6 +1328,7 @@ impl Flow {
                     saved,
                     run: None,
                     log,
+                    talking: None,
                 };
                 if checks_ahead {
                     if let Ok(json) = serde_json::to_string(&entry.saved) {
@@ -1479,6 +1578,9 @@ impl Flow {
     pub fn act(&self, ctx: TaskCtx, action: FlowAction) -> Result<(), ApiError> {
         self.ensure(&ctx);
         self.observe_plan(&ctx);
+        if let FlowAction::Talk { text } = &action {
+            return self.talk(ctx, text);
+        }
         let wp_id = ctx.row.wp_id;
         let start = {
             let mut tasks = self.inner.lock_tasks();
@@ -1505,6 +1607,101 @@ impl Flow {
                 .name(format!("opw-flow-{wp_id}"))
                 .spawn(move || worker(&inner, &ctx, claim))
                 .map_err(|e| ApiError::new("flow.thread", e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// "Trao đổi với AI" at an error gate: keep the user's message, then let the AI answer on a
+    /// thread of its own (read only). The step stays failed; Chạy tiếp / Chạy lại từ đầu decide
+    /// what comes next, and what was said goes along.
+    fn talk(&self, ctx: TaskCtx, text: &str) -> Result<(), ApiError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(ApiError::new("talk.empty", "Gõ điều bạn muốn hỏi AI trước."));
+        }
+        let wp_id = ctx.row.wp_id;
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let mut tasks = self.inner.lock_tasks();
+            let entry = tasks.get_mut(&wp_id).ok_or_else(flow_missing)?;
+            if entry.run.is_some() || entry.talking.is_some() {
+                return Err(ApiError::new("talk.busy", "AI đang chạy: chờ xong rồi hỏi tiếp."));
+            }
+            let step = entry
+                .saved
+                .workflow
+                .failed_step()
+                .filter(|_| entry.saved.workflow.phase() == Phase::Gate(GateKind::Error))
+                .ok_or_else(|| not_now("trao đổi với AI (chỉ khi một bước đang lỗi)"))?;
+            let talk = entry.saved.talk.get_or_insert_with(Talk::default);
+            if talk.step != Some(step) {
+                *talk = Talk {
+                    step: Some(step),
+                    ..Talk::default()
+                };
+            }
+            talk.turns.push(TalkTurn {
+                from_user: true,
+                text: text.to_owned(),
+                at: now(),
+                cost_usd: None,
+            });
+            entry.talking = Some(stop.clone());
+            self.inner.persist(wp_id, entry);
+        }
+        let inner = self.inner.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("opw-talk-{wp_id}"))
+            .spawn(move || {
+                let answer = inner.talk_turn(&ctx, &stop);
+                let mut tasks = inner.lock_tasks();
+                let Some(entry) = tasks.get_mut(&wp_id) else {
+                    return;
+                };
+                entry.talking = None;
+                let step = entry.saved.talk.as_ref().and_then(|t| t.step);
+                let turn = match answer {
+                    Ok(a) => {
+                        if let Some(t) = entry.saved.talk.as_mut() {
+                            t.agent = Some(a.agent);
+                            t.session.clone_from(&a.session);
+                            t.in_step = a.in_step;
+                        }
+                        // the conversation happened in the step's own session: Chạy tiếp goes
+                        // on in it, conversation included
+                        if let (true, Some(step), Some(session)) = (a.in_step, step, a.session) {
+                            if can_go_on(step, AgentKind::Claude) {
+                                entry.saved.stopped = Some(StoppedRun {
+                                    step,
+                                    agent: AgentKind::Claude,
+                                    session,
+                                });
+                            }
+                        }
+                        TalkTurn {
+                            from_user: false,
+                            text: a.text,
+                            at: now(),
+                            cost_usd: a.cost,
+                        }
+                    }
+                    Err(why) => TalkTurn {
+                        from_user: false,
+                        text: format!("⚠ {why}"),
+                        at: now(),
+                        cost_usd: None,
+                    },
+                };
+                if let Some(t) = entry.saved.talk.as_mut() {
+                    t.turns.push(turn);
+                }
+                inner.persist(wp_id, entry);
+            });
+        if let Err(e) = spawned {
+            if let Some(entry) = self.inner.lock_tasks().get_mut(&wp_id) {
+                entry.talking = None;
+            }
+            return Err(ApiError::new("flow.thread", e.to_string()));
         }
         Ok(())
     }
@@ -1741,6 +1938,18 @@ impl Flow {
                 .filter(|e| e.code == "step.budget")
                 .and_then(|_| current_step(entry))
                 .map(|step| limits(ai_limit_step(step), &ctx.config).0),
+            // only while the step it is about is the one failed
+            talk: entry
+                .saved
+                .talk
+                .as_ref()
+                .filter(|t| {
+                    entry.saved.workflow.phase() == Phase::Gate(GateKind::Error)
+                        && t.step == entry.saved.workflow.failed_step()
+                })
+                .map(|t| t.turns.clone())
+                .unwrap_or_default(),
+            talk_busy: entry.talking.is_some(),
             running: entry.run.as_ref().map(|r| RunView {
                 step: r.step,
                 agent: r.agent,
@@ -1777,11 +1986,6 @@ impl Flow {
             can_go_on: entry.saved.stopped.as_ref().is_some_and(|s| {
                 entry.saved.workflow.phase() == Phase::Gate(GateKind::Error)
                     && entry.saved.workflow.failed_step() == Some(s.step)
-                    && entry
-                        .saved
-                        .error
-                        .as_ref()
-                        .is_some_and(|e| matches!(e.code.as_str(), "step.stopped" | "step.budget"))
             }),
             uses: SWITCHABLE
                 .into_iter()
@@ -2357,6 +2561,12 @@ fn apply_action(
     use WorkflowEvent as E;
     let running = entry.run.is_some();
     let phase = entry.saved.workflow.phase();
+    if entry.talking.is_some() && !matches!(action, FlowAction::Stop | FlowAction::SetAuto { .. }) {
+        return Err(ApiError::new(
+            "talk.busy",
+            "AI đang trả lời trong khung Trao đổi với AI: chờ xong hoặc bấm Dừng.",
+        ));
+    }
     if entry.saved.plan_change.is_some()
         && !matches!(
             action,
@@ -2413,6 +2623,7 @@ fn apply_action(
                     entry.saved.error = None;
                     entry.saved.stopped = None;
                     entry.saved.go_on = None;
+                    carry_talk(&mut entry.saved, step, false);
                     Ok(true)
                 }
                 _ => Err(not_now("chạy bước tiếp")),
@@ -2433,6 +2644,7 @@ fn apply_action(
             entry.saved.error = None;
             entry.saved.stopped = None;
             entry.saved.go_on = None;
+            carry_talk(&mut entry.saved, step, false);
             let text = if stopped {
                 format!("Chạy lại {} từ đầu", step_label(step))
             } else {
@@ -2445,18 +2657,15 @@ fn apply_action(
             if running {
                 return Err(ApiError::new("step.running", "Bước này đang chạy"));
             }
-            let stopped_here = phase == Phase::Gate(GateKind::Error)
-                && entry
-                    .saved
-                    .error
-                    .as_ref()
-                    .is_some_and(|e| matches!(e.code.as_str(), "step.stopped" | "step.budget"));
             let stopped = entry
                 .saved
                 .stopped
                 .clone()
-                .filter(|s| stopped_here && entry.saved.workflow.failed_step() == Some(s.step))
-                .ok_or_else(|| not_now("chạy tiếp (chỉ sau khi bạn bấm Dừng một bước AI)"))?;
+                .filter(|s| {
+                    phase == Phase::Gate(GateKind::Error)
+                        && entry.saved.workflow.failed_step() == Some(s.step)
+                })
+                .ok_or_else(|| not_now("chạy tiếp (phiên của lần chạy này không còn để tiếp)"))?;
             let agent = match &entry.saved.harness {
                 Some(h) if stopped.step == StepKind::Harness && !h.reviewed && !h.run.is_empty() => {
                     other_agent(h.builder.unwrap_or_else(|| ctx.agent_for(StepKind::Harness)))
@@ -2471,6 +2680,7 @@ fn apply_action(
             }
             event(entry, E::Retry(stopped.step))?;
             entry.saved.error = None;
+            carry_talk(&mut entry.saved, stopped.step, true);
             let note = note.trim().to_owned();
             let text = if note.is_empty() {
                 format!("Chạy tiếp {} trong phiên cũ", step_label(stopped.step))
@@ -2488,12 +2698,73 @@ fn apply_action(
             Ok(true)
         }
         FlowAction::Stop => {
+            if let Some(talking) = &entry.talking {
+                talking.store(true, Ordering::Relaxed);
+                return Ok(false);
+            }
             let run = entry
                 .run
                 .as_ref()
                 .ok_or_else(|| not_now("dừng (không có bước nào đang chạy)"))?;
             run.stop.store(true, Ordering::Relaxed);
             Ok(false)
+        }
+        // `Flow::act` runs it on its own thread; it never reaches here
+        FlowAction::Talk { .. } => Err(not_now("trao đổi với AI")),
+        FlowAction::UseCurrentRepo => {
+            let changed = phase == Phase::Gate(GateKind::Error)
+                && entry
+                    .saved
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.code == "repo.changed");
+            let step = entry
+                .saved
+                .workflow
+                .failed_step()
+                .filter(|_| changed && !running)
+                .ok_or_else(|| not_now("dùng repo hiện tại"))?;
+            let repo = ctx
+                .repo()
+                .filter(|r| r.is_dir())
+                .ok_or_else(|| ApiError::new("repo.missing", "Không thấy thư mục repo của task"))?;
+            let store = store
+                .lock()
+                .map_err(|_| ApiError::new("storage", "Dữ liệu cục bộ đang bị khoá"))?;
+            let old = store
+                .kv_get(ctx.row.wp_id, crate::task_repo::KEY, "")
+                .map_err(|e| ApiError::new("storage", e.to_string()))?
+                .and_then(|v| serde_json::from_str::<crate::task_repo::Binding>(&v).ok());
+            let brief = ctx.read(BRIEF_FILE).unwrap_or_default();
+            let now_bound = match old {
+                Some(old) => old.rebind(&repo)?,
+                None => crate::task_repo::Binding::read(
+                    &Git::new(&repo),
+                    crate::task_repo::legacy_issues(&brief),
+                )?,
+            };
+            let json =
+                serde_json::to_string(&now_bound).map_err(|e| ApiError::new("storage", e.to_string()))?;
+            store
+                .kv_set(ctx.row.wp_id, crate::task_repo::KEY, "", &json, &now())
+                .map_err(|e| ApiError::new("storage", e.to_string()))?;
+            drop(store);
+            event(entry, E::Retry(step))?;
+            entry.saved.error = None;
+            entry.saved.stopped = None;
+            entry.saved.go_on = None;
+            carry_talk(&mut entry.saved, step, false);
+            let origin = now_bound.remote().unwrap_or("không có origin").to_owned();
+            push_log(
+                entry,
+                Some(step),
+                "info",
+                &format!(
+                    "Bạn dùng repo hiện tại cho task (origin {origin}), chạy lại {}",
+                    step_label(step)
+                ),
+            );
+            Ok(true)
         }
         FlowAction::ApprovePlan => {
             let plan = ctx
@@ -3469,7 +3740,7 @@ impl Inner {
         }
         // Dừng: the run's session, for "Chạy tiếp"
         let stopped_run = match &result {
-            Err(e) if matches!(e.code.as_str(), "step.stopped" | "step.budget") && !quitting => {
+            Err(e) if GO_ON_AFTER.contains(&e.code.as_str()) && !quitting => {
                 early.and_then(|id| self.runs(wp_id).into_iter().find(|r| r.id == id))
             }
             _ => None,
@@ -3502,6 +3773,8 @@ impl Inner {
                     if step == StepKind::Analyze {
                         entry.saved.feedback = None;
                     }
+                    // the conversation about this step's failure is over
+                    entry.saved.talk = None;
                     note.clone_from(&done.note);
                     let cost = done.cost.map(|c| format!(" ({})", usd(c))).unwrap_or_default();
                     ("ok", format!("{} xong: {}{cost}", step_label(step), done.note))
@@ -3521,7 +3794,9 @@ impl Inner {
             }
             Err(mut err) => {
                 let _ = entry.saved.workflow.apply(WorkflowEvent::StepFailed(step));
-                if matches!(err.code.as_str(), "step.stopped" | "step.budget") && !quitting {
+                // a session kept from an earlier failure is not this run's
+                entry.saved.stopped = None;
+                if GO_ON_AFTER.contains(&err.code.as_str()) && !quitting {
                     entry.saved.go_on = None;
                     entry.saved.stopped = stopped_run.as_ref().and_then(|row| {
                         let agent = agent_of_row(row);
@@ -3935,6 +4210,7 @@ impl Inner {
             "base": ctx.row.base,
             "step": claim.step,
             "purpose": "executeStep",
+            "repoCheck": (claim.step == StepKind::Analyze).then(|| self.repo_check(ctx)).flatten(),
             "brief": ctx.read(BRIEF_FILE),
             "approvedPlan": plan,
             "checksActuallyRun": checks,
@@ -4052,6 +4328,11 @@ impl Inner {
         let resumes_cut = self
             .cut_session(ctx.row.wp_id, step, Provider::Claude)
             .is_some_and(|id| job.args.windows(2).any(|w| w[0] == "--resume" && w[1] == id));
+        if !claim.nested {
+            if let Some(text) = self.take_talk_carry(ctx.row.wp_id, step) {
+                add_to_prompt(&mut job, &prompts::talk_carry(&text));
+            }
+        }
         let mcp = self.attach_mcp(ctx, claim, &mut job)?;
         let job = &job;
         let stop: &AtomicBool = &claim.stop;
@@ -4217,6 +4498,11 @@ impl Inner {
             None => job,
         };
         let mut job = job.clone();
+        if !claim.nested {
+            if let Some(text) = self.take_talk_carry(ctx.row.wp_id, step) {
+                add_to_prompt(&mut job, &prompts::talk_carry(&text));
+            }
+        }
         let mcp = self.attach_mcp(ctx, claim, &mut job)?;
         let job = &job;
         let (_, timeout, key) = limits(ai_limit_step(step), &ctx.config);
@@ -4334,6 +4620,226 @@ impl Inner {
     }
 
     /// "Chạy tiếp" after Dừng, for this run of `step` by `agent` (taken once).
+    /// The conversation about this step's last failure, once, for its next run.
+    fn take_talk_carry(&self, wp_id: u64, step: StepKind) -> Option<String> {
+        let mut tasks = self.lock_tasks();
+        let entry = tasks.get_mut(&wp_id)?;
+        let carry = entry.saved.talk_carry.take_if(|c| c.step == step)?;
+        self.persist(wp_id, entry);
+        Some(carry.text)
+    }
+
+    /// The checkout the task was bound to at Bắt đầu.
+    fn binding(&self, wp_id: u64) -> Option<crate::task_repo::Binding> {
+        let value = self
+            .lock_store()
+            .ok()?
+            .kv_get(wp_id, crate::task_repo::KEY, "")
+            .ok()??;
+        serde_json::from_str(&value).ok()
+    }
+
+    /// What Phân tích is told when the checkout is not plainly the issue's repo.
+    fn repo_check(&self, ctx: &TaskCtx) -> Option<String> {
+        let b = self.binding(ctx.row.wp_id).filter(|b| b.needs_check())?;
+        let remembered = crate::task_repo::remembered(&ctx.config, &ctx.row.project, &b);
+        Some(prompts::repo_check(&b.issue_repos, b.remote(), &remembered))
+    }
+
+    /// One answer of "Trao đổi với AI". Read only: Claude with Read/Grep/Glob, Codex in its
+    /// read-only sandbox; the repo is compared before and after. `Err` = why there is no answer.
+    fn talk_turn(&self, ctx: &TaskCtx, stop: &AtomicBool) -> Result<TalkAnswer, String> {
+        use std::io::Write;
+        let wp_id = ctx.row.wp_id;
+        let repo = ctx
+            .repo()
+            .filter(|r| r.is_dir())
+            .ok_or("Không thấy thư mục repo của task.")?;
+        let (talk, error, log, stopped) = {
+            let tasks = self.lock_tasks();
+            let entry = tasks.get(&wp_id).ok_or("Task không còn trong luồng.")?;
+            let talk = entry.saved.talk.clone().unwrap_or_default();
+            let mut log: Vec<String> = entry
+                .log
+                .iter()
+                .rev()
+                .filter(|l| l.step.is_some() && l.step == talk.step)
+                .take(TALK_LOG_LINES)
+                .map(|l| l.text.clone())
+                .collect();
+            log.reverse();
+            (
+                talk,
+                entry.saved.error.clone(),
+                log.join("\n"),
+                entry.saved.stopped.clone(),
+            )
+        };
+        let step = talk.step.ok_or("Không rõ bước đang lỗi.")?;
+        let question = talk
+            .turns
+            .last()
+            .filter(|t| t.from_user)
+            .map(|t| t.text.clone())
+            .ok_or("Chưa có câu hỏi.")?;
+        let first = talk.agent.is_none();
+        // who answers, in which session: the step's own Claude session when it has one
+        let (agent, session, in_step) = if first {
+            let own = stopped
+                .filter(|s| s.step == step && s.agent == AgentKind::Claude)
+                .map(|s| s.session)
+                .or_else(|| {
+                    self.runs(wp_id)
+                        .into_iter()
+                        .rev()
+                        .find(|r| step_from_key(&r.step) == Some(step))
+                        .filter(|r| agent_of_row(r) == AgentKind::Claude)
+                        .and_then(|r| r.session_id)
+                        .filter(|s| !s.is_empty())
+                });
+            match own {
+                Some(s) => (AgentKind::Claude, Some(s), true),
+                None if matches!(step, StepKind::Intake | StepKind::Checks) => {
+                    (AgentKind::Claude, None, false)
+                }
+                None => (ctx.agent_for(step), None, false),
+            }
+        } else {
+            (
+                talk.agent.unwrap_or(AgentKind::Claude),
+                talk.session.clone(),
+                talk.in_step,
+            )
+        };
+        let error_text = error
+            .as_ref()
+            .map(|e| format!("{} ({})", e.message, e.code))
+            .unwrap_or_default();
+        let prompt = if !first && session.is_some() {
+            prompts::talk_followup(&question)
+        } else {
+            let brief = ctx.read(BRIEF_FILE).unwrap_or_default();
+            let plan = ctx.read(PLAN_FILE).unwrap_or_default();
+            let status = Git::new(&repo).run(&["status", "--short"]).unwrap_or_default();
+            let earlier = talk_transcript(&talk.turns[..talk.turns.len() - 1]);
+            let context = prompts::TalkContext {
+                brief: &brief,
+                plan: &plan,
+                status: &status,
+                earlier: &earlier,
+            };
+            prompts::talk(
+                step_label(step),
+                &error_text,
+                &log,
+                (!in_step).then_some(&context),
+                &question,
+            )
+        };
+        let provider = provider_of(agent);
+        let mut args = match provider {
+            Provider::Codex => codex::analyze_args(),
+            Provider::Claude => claude::analyze_args(TALK_BUDGET_USD, &[]),
+        };
+        if let (Provider::Claude, Some(s)) = (provider, &session) {
+            args.extend(["--resume".to_owned(), s.clone()]);
+        }
+        let job = Job {
+            agent: provider,
+            args,
+            cwd: repo.clone(),
+            stdin: Some(prompt),
+            timeout: TALK_TIMEOUT,
+            mcp_token: None,
+        };
+        let mut raw = self.runs_dir.as_ref().and_then(|runs| {
+            let stamp = now().replace([':', '.'], "-");
+            let path = runs.join(format!("{}/{stamp}-talk.jsonl", ctx.row.display_id));
+            std::fs::create_dir_all(path.parent()?).ok()?;
+            std::fs::File::create(path).ok()
+        });
+        let before = git_snap(&repo).ok();
+        let mut answer: Option<String> = None;
+        let mut failed: Option<String> = None;
+        let mut new_session = String::new();
+        let mut cost = None;
+        let mut over = false;
+        let mut on_line = |line: &str| {
+            if let Some(f) = raw.as_mut() {
+                let _ = writeln!(f, "{line}");
+            }
+            if provider == Provider::Codex {
+                match codex::parse_line(line) {
+                    Ok(CodexEvent::Message(m)) => answer = Some(m),
+                    Ok(CodexEvent::Failed(m)) => failed = Some(m),
+                    _ => {}
+                }
+                return;
+            }
+            for event in claude::parse_line(line).unwrap_or_default() {
+                match event {
+                    ClaudeEvent::Init { session_id, .. } => new_session = session_id,
+                    ClaudeEvent::Result(r) => {
+                        over = r.over_budget();
+                        cost = Some(r.cost_usd);
+                        if !r.session_id.is_empty() {
+                            new_session.clone_from(&r.session_id);
+                        }
+                        if r.is_error {
+                            failed = Some(r.text.clone());
+                        } else {
+                            answer = Some(r.text.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        let outcome = self
+            .launcher
+            .launch(&job, stop, &mut on_line)
+            .map_err(|e| match e {
+                LaunchError::Missing => format!("Không tìm thấy {} trên máy.", agent_name(agent)),
+                LaunchError::Spawn(why) => format!("Không chạy được {}: {why}", agent_name(agent)),
+            })?;
+        if stop.load(Ordering::Relaxed) {
+            return Err("Bạn đã dừng lượt trả lời này.".into());
+        }
+        if over {
+            return Err(format!(
+                "Lượt trả lời chạm trần ${TALK_BUDGET_USD}. Hỏi gọn hơn, hoặc chọn Chạy tiếp / Chạy lại từ đầu."
+            ));
+        }
+        let mut text = match (answer.filter(|a| !a.trim().is_empty()), failed) {
+            (Some(a), None) => a,
+            (_, Some(why)) if looks_signed_out(&why) => {
+                return Err(format!(
+                    "{} đã đăng xuất: đăng nhập lại rồi hỏi tiếp.",
+                    agent_name(agent)
+                ));
+            }
+            (_, Some(why)) => return Err(format!("AI không trả lời được: {}", short(&why))),
+            (None, None) if quotagate::looks_quota_hit(&outcome.stderr_tail) => {
+                return Err("Hết hạn mức của AI này: chờ reset rồi hỏi tiếp.".into());
+            }
+            (None, None) => return Err(format!("AI không trả lời được: {}", exit_why(&outcome))),
+        };
+        if let (Some(before), Ok(after)) = (before, git_snap(&repo)) {
+            if let Some(what) = git_surprise(StepKind::CrossReview, &before, &after) {
+                text.push_str(&format!(
+                    "\n\n⚠ App thấy {what} trong lượt trao đổi này (lượt này chỉ được đọc). Xem lại repo trước khi chạy tiếp."
+                ));
+            }
+        }
+        Ok(TalkAnswer {
+            text,
+            agent,
+            session: (provider == Provider::Claude && !new_session.is_empty()).then_some(new_session),
+            in_step,
+            cost,
+        })
+    }
+
     fn take_go_on(&self, wp_id: u64, step: StepKind, agent: AgentKind) -> Option<GoOnRun> {
         self.with_saved(wp_id, |s| s.go_on.take_if(|g| g.step == step && g.agent == agent))
             .flatten()
@@ -4504,23 +5010,23 @@ fn execute(inner: &Inner, ctx: &TaskCtx, claim: &Claim) -> Result<Done, FlowErro
             .map_err(|e| flow_error(&e.code, e.message))?
             .kv_get(ctx.row.wp_id, crate::task_repo::KEY, "")
             .map_err(|e| flow_error("storage", e.to_string()))?;
-        let binding = if let Some(value) = stored {
-            serde_json::from_str::<crate::task_repo::Binding>(&value).map_err(|_| {
-                flow_error(
-                    "repo.unverified",
-                    "Thông tin repo đã lưu không đọc được. Gắn lại repo trong Bắt đầu làm việc.",
+        let saved = stored.and_then(|v| serde_json::from_str::<crate::task_repo::Binding>(&v).ok());
+        let binding = match saved {
+            Some(binding) => binding,
+            // a task started before bindings were kept (or one whose binding cannot be read):
+            // bind it to the checkout as it is now
+            None => {
+                let brief = ctx.read(BRIEF_FILE).unwrap_or_default();
+                let binding = crate::task_repo::Binding::read(
+                    &Git::new(&repo),
+                    crate::task_repo::legacy_issues(&brief),
                 )
-            })?
-        } else {
-            let brief = ctx.read(BRIEF_FILE).unwrap_or_default();
-            crate::task_repo::check(
-                &ctx.config,
-                &ctx.row.project,
-                crate::task_repo::legacy_issues(&brief),
-                &Git::new(&repo),
-                false,
-            )
-            .map_err(|e| flow_error(&e.code, e.message))?
+                .map_err(|e| flow_error(&e.code, e.message))?;
+                if let (Ok(json), Ok(store)) = (serde_json::to_string(&binding), inner.lock_store()) {
+                    let _ = store.kv_set(ctx.row.wp_id, crate::task_repo::KEY, "", &json, &now());
+                }
+                binding
+            }
         };
         binding
             .recheck(&repo)
@@ -4630,7 +5136,7 @@ fn run_checks(
         if list.is_empty() {
             return Ok(ChecksDone {
                 ran: false,
-                note: "Không dò thấy lệnh kiểm tra cho các file đã đổi. Xem kết quả tại tab Tiến trình."
+                note: "Không dò thấy lệnh kiểm tra cho các file đã đổi. Thêm lệnh ở Cài đặt → Repo → Lệnh kiểm tra nếu repo cần."
                     .into(),
                 cost,
             });
@@ -4729,7 +5235,7 @@ fn run_checks(
             }
             let message = match broken.first() {
                 Some(b) => format!(
-                    "Không chạy được {}: {}. Mở tab Tiến trình để xem lệnh và lỗi; cài công cụ còn thiếu hoặc chọn Làm tiếp → Viết code để xử lý, rồi chạy lại Kiểm tra.",
+                    "Không chạy được {}: {}. Sửa lệnh ở Cài đặt → Repo → Lệnh kiểm tra hoặc cài công cụ còn thiếu, rồi chạy lại Kiểm tra (hỏi AI ở khung Trao đổi với AI nếu chưa rõ).",
                     b.label,
                     short(b.broken.as_deref().unwrap_or_default())
                 ),
@@ -5852,6 +6358,10 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 .collect();
             let answers: Vec<(&str, &str)> = answers.iter().map(|(q, a)| (q.as_str(), a.as_str())).collect();
             let mut prompt = prompts::analyze(&brief, previous, &answers);
+            // a checkout that is not plainly the issue's repo: the AI decides if it is the place
+            if let Some(note) = inner.repo_check(ctx) {
+                prompt.push_str(&note);
+            }
             // notes from earlier work on the repo: where it runs, how it is tested
             let memory = browsertest::claude_projects().and_then(|p| browsertest::repo_memory(&p, repo));
             let dirs: Vec<String> = memory.iter().map(|m| m.to_string_lossy().into_owned()).collect();
@@ -7669,6 +8179,292 @@ mod tests {
     /// Tự review's high is fixed, so the code moved after it and Review chốt runs. Its answer has
     /// no findings block: the step fails, and Tiến trình shows a failed run although the process
     /// ended well.
+    /// "Trao đổi với AI" answers on a thread of its own: wait for the answer.
+    fn talked(flow: &Flow, ctx: &TaskCtx) -> TaskDetail {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let d = flow.detail(ctx);
+            if !d.talk_busy {
+                return d;
+            }
+            assert!(Instant::now() < deadline, "the AI never answered");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    const TALK_ANSWER: &str = "Lỗi vì thiếu quyền đọc thư mục cấu hình. Đề xuất: đọc file mẫu thay thế.";
+
+    fn is_talk(job: &Job) -> bool {
+        job.stdin
+            .as_deref()
+            .is_some_and(|p| p.contains("stopped with this error") || p.contains("same conversation"))
+    }
+
+    #[test]
+    fn a_failed_step_is_talked_over_read_only_then_goes_on_in_its_own_session() {
+        let Some(s) = setup() else { return };
+        let analyses = AtomicUsize::new(0);
+        let inner = happy(CLEAN);
+        let (flow, fake) = flow_with(
+            &s,
+            false,
+            move |job: &Job, stop: &AtomicBool, out: &mut dyn FnMut(&str)| {
+                if is_talk(job) {
+                    out(&result_line(TALK_ANSWER));
+                    return ok();
+                }
+                if kind(job) == "analyze" && analyses.fetch_add(1, Ordering::SeqCst) == 0 {
+                    out(&result_line("dừng giữa chừng"));
+                    return RunOutcome {
+                        code: Some(1),
+                        ..RunOutcome::default()
+                    };
+                }
+                inner(job, stop, out)
+            },
+        );
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::Error),
+            "{:?}",
+            d.error
+        );
+        assert!(!d.can_go_on, "a plain failure keeps no session to go on in");
+        let empty = flow.act(ctx.clone(), FlowAction::Talk { text: " ".into() });
+        assert_eq!(empty.unwrap_err().code, "talk.empty");
+
+        flow.act(
+            ctx.clone(),
+            FlowAction::Talk {
+                text: "Vì sao lỗi?".into(),
+            },
+        )
+        .unwrap();
+        let d = talked(&flow, &ctx);
+        assert_eq!(d.talk.len(), 2);
+        assert!(d.talk[0].from_user && !d.talk[1].from_user);
+        assert!(d.talk[1].text.contains("thiếu quyền") && d.talk[1].cost_usd.is_some());
+        assert!(d.can_go_on, "the talk went on in the step's own session");
+        let talk = fake.jobs.lock().unwrap().last().unwrap().clone();
+        assert!(
+            talk.args.windows(2).any(|w| w == ["--resume", "s-1"]),
+            "{:?}",
+            talk.args
+        );
+        assert!(
+            talk.args.windows(2).any(|w| w == ["--tools", "Read,Grep,Glob"]),
+            "read only"
+        );
+        let prompt = talk.stdin.as_deref().unwrap();
+        assert!(prompt.contains("<user_message>\nVì sao lỗi?") && prompt.contains("<error>"));
+        assert!(
+            !prompt.contains("<brief>"),
+            "its own session already has the task"
+        );
+
+        // the next message stays in the same conversation
+        flow.act(
+            ctx.clone(),
+            FlowAction::Talk {
+                text: "Vậy làm tiếp đi".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(talked(&flow, &ctx).talk.len(), 4);
+        let next = fake.jobs.lock().unwrap().last().unwrap().clone();
+        assert!(next.stdin.as_deref().unwrap().contains("same conversation"));
+        assert!(next.args.windows(2).any(|w| w == ["--resume", "s-1"]));
+
+        // Chạy tiếp: the step goes on in that session; the talk is in there, so no copy of it
+        let d = run(&flow, &ctx, FlowAction::GoOn { note: String::new() });
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::PlanReview),
+            "{:?}",
+            d.error
+        );
+        assert!(d.talk.is_empty());
+        let went_on = fake.jobs.lock().unwrap().last().unwrap().clone();
+        assert!(!is_talk(&went_on) && went_on.args.windows(2).any(|w| w == ["--resume", "s-1"]));
+        assert!(!went_on.stdin.as_deref().unwrap().contains("earlier_conversation"));
+    }
+
+    #[test]
+    fn talking_about_a_codex_step_starts_fresh_read_only_and_a_retry_hears_the_talk() {
+        let Some(s) = setup() else { return };
+        let mut config = Config::default();
+        config.steps.analyze.agent = Some("codex".into());
+        let analyses = AtomicUsize::new(0);
+        let (flow, fake) = flow_with(
+            &s,
+            false,
+            move |job: &Job, _stop: &AtomicBool, out: &mut dyn FnMut(&str)| {
+                let say = |text: &str, out: &mut dyn FnMut(&str)| {
+                    out(r#"{"type":"thread.started","thread_id":"t-1"}"#);
+                    out(&serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":text}})
+                        .to_string());
+                };
+                if is_talk(job) {
+                    // a talk may only read: the app must notice a file it wrote
+                    std::fs::write(job.cwd.join("talk-note.txt"), "x").unwrap();
+                    say(TALK_ANSWER, out);
+                    return ok();
+                }
+                if analyses.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return RunOutcome {
+                        code: Some(1),
+                        ..RunOutcome::default()
+                    };
+                }
+                say("## Nguyên nhân\nx\n```json\n{\"questions\":[]}\n```", out);
+                ok()
+            },
+        );
+        let ctx = s.ctx(1, &config);
+        flow.started(&ctx, None).unwrap();
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::Error),
+            "{:?}",
+            d.error
+        );
+        flow.act(
+            ctx.clone(),
+            FlowAction::Talk {
+                text: "Có cần đổi cách làm không?".into(),
+            },
+        )
+        .unwrap();
+        let d = talked(&flow, &ctx);
+        assert!(d.talk[1].text.contains("⚠ App thấy"), "{}", d.talk[1].text);
+        assert!(
+            !d.can_go_on,
+            "Codex talks in a fresh session: nothing to go on in"
+        );
+        let talk = fake.jobs.lock().unwrap().last().unwrap().clone();
+        assert_eq!(kind(&talk), "codex");
+        assert!(talk.args.iter().any(|a| a == "read-only") && !talk.args.iter().any(|a| a == "resume"));
+        assert!(
+            talk.stdin.as_deref().unwrap().contains("<brief>"),
+            "a fresh session gets the task"
+        );
+        std::fs::remove_file(s.repo.join("talk-note.txt")).unwrap();
+
+        // Chạy lại từ đầu: the new run hears the conversation, once
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::PlanReview),
+            "{:?}",
+            d.error
+        );
+        assert!(d.talk.is_empty());
+        let retry = fake.jobs.lock().unwrap().last().unwrap().clone();
+        let prompt = retry.stdin.as_deref().unwrap();
+        assert!(!is_talk(&retry) && prompt.contains("<earlier_conversation>"));
+        assert!(prompt.contains("Có cần đổi cách làm không?") && prompt.contains("thiếu quyền"));
+        assert!(
+            flow.inner.take_talk_carry(1, StepKind::Analyze).is_none(),
+            "used once"
+        );
+    }
+
+    #[test]
+    fn a_checkout_of_another_repo_is_judged_by_the_analysis_and_a_moved_origin_can_be_taken() {
+        let Some(s) = setup() else { return };
+        git(
+            &s.repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/secondary.git",
+            ],
+        );
+        let mut config = Config::default();
+        config.steps.verify_mcp = false;
+        config
+            .projects
+            .entry("Web".into())
+            .or_default()
+            .repo_aliases
+            .insert(
+                "github.com/example/main".into(),
+                vec!["github.com/example/secondary".into()],
+            );
+        let ctx = s.ctx(1, &config);
+        let binding =
+            crate::task_repo::Binding::read(&Git::new(&s.repo), "https://github.com/example/main/issues/7")
+                .unwrap();
+        s.store
+            .lock()
+            .unwrap()
+            .upsert_task_with_binding(
+                &ctx.row,
+                crate::task_repo::KEY,
+                &serde_json::to_string(&binding).unwrap(),
+            )
+            .unwrap();
+        let moves = AtomicUsize::new(0);
+        let fake = Arc::new(Fake {
+            script: Box::new(move |job: &Job, _stop: &AtomicBool, out: &mut dyn FnMut(&str)| {
+                // the origin moves under the task during its first run
+                if moves.fetch_add(1, Ordering::SeqCst) == 0 {
+                    git(
+                        &job.cwd,
+                        &[
+                            "remote",
+                            "set-url",
+                            "origin",
+                            "https://github.com/example/moved.git",
+                        ],
+                    );
+                }
+                out(&result_line(concat!(
+                    "## Nguyên nhân\nRepo: đúng chỗ, bản phụ của repo chính; a.ts:1\n## Phương án\nA\n",
+                    "## Đề xuất\nA\n## File sẽ sửa\na.ts\n## Kế hoạch test\nKiểm tra A\n## Rủi ro\na.ts:1\n\n",
+                    "```json\n{\"questions\":[],\"harness\":{\"recommend\":false,\"reason\":\"Đã có test\"},",
+                    "\"browserTest\":{\"recommend\":false}}\n```"
+                )));
+                ok()
+            }),
+            jobs: Mutex::new(Vec::new()),
+            missing: false,
+        });
+        let flow = Flow::new(s.store.clone(), fake.clone(), None);
+        flow.set_app_starter(Arc::new(FakeStarter::default()));
+        flow.started(&ctx, None).unwrap();
+        let d = run(&flow, &ctx, FlowAction::Run);
+        let prompt = fake.jobs.lock().unwrap()[0].stdin.clone().unwrap();
+        assert!(prompt.contains("Repository check") && prompt.contains("`github.com/example/main`"));
+        assert!(
+            prompt.contains("`github.com/example/secondary`") && prompt.contains("approved earlier plans")
+        );
+        let err = d.error.unwrap();
+        assert_eq!(err.code, "repo.changed");
+        assert!(
+            err.message.contains("github.com/example/moved"),
+            "{}",
+            err.message
+        );
+
+        let d = run(&flow, &ctx, FlowAction::UseCurrentRepo);
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::PlanReview),
+            "{:?}",
+            d.error
+        );
+        assert!(d.log.iter().any(|l| l.text.contains("Bạn dùng repo hiện tại")));
+        let bound = flow.inner.binding(1).unwrap();
+        assert_eq!(bound.remote(), Some("github.com/example/moved"));
+        assert_eq!(bound.issue_repos, ["github.com/example/main"]);
+    }
+
     #[test]
     fn a_failed_fix_gives_its_findings_back_and_thu_lai_fixes_them_again() {
         use opw_domain::finding::FindingState;

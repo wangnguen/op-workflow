@@ -16,6 +16,8 @@ import {
   saveNxToken,
   setNotify,
   setHarnessDir,
+  setRepoChecks,
+  forgetRepoPair,
   setOnClose,
   setQuotaProbe,
   setTasksDir,
@@ -29,6 +31,7 @@ import type {
   SettingsView,
   StepModels,
   UpdateView,
+  RepoChecks,
 } from "../../ipc/types";
 import { LinkActions } from "../quota/QuotaPopover";
 import { linkProblem } from "../quota/quota";
@@ -144,6 +147,72 @@ function PathLink({ path, onError }: { path: string; onError: (e: string | null)
       <span>{path}</span>
       <Icon name="folder" size={12} />
     </button>
+  );
+}
+
+/** One repo's Kiểm tra commands, one per line; empty = the app guesses them per package. */
+function RepoChecksRow({
+  checks,
+  busy,
+  onSave,
+}: {
+  checks: RepoChecks;
+  busy: boolean;
+  onSave: (commands: string[]) => Promise<boolean>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(checks.commands.join("\n"));
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const save = () => void onSave(lines).then((ok) => ok && setEditing(false));
+  const state = checks.commands.length ? t.repoChecksCount(checks.commands.length) : t.repoChecksAuto;
+  return (
+    <Row id={`checks:${checks.repo}`} label={checks.repo} hint={state} stacked>
+      <div className="set-harness">
+        {editing ? (
+          <textarea
+            className="input mono set-checks-input"
+            value={text}
+            rows={Math.max(2, Math.min(6, lines.length + 1))}
+            autoFocus
+            spellCheck={false}
+            aria-label={`${t.repoChecks} · ${checks.repo}`}
+            placeholder={t.repoChecksPlaceholder}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.stopPropagation();
+                setEditing(false);
+              }
+            }}
+          />
+        ) : (
+          <span className="mono set-harness-path">{checks.commands.length ? checks.commands.join(" · ") : t.repoChecksPlaceholder}</span>
+        )}
+        <span className="set-actions">
+          {editing ? (
+            <>
+              <button className="btn btn--ghost btn--sm" disabled={busy} onClick={() => setEditing(false)}>
+                {t.harnessCancel}
+              </button>
+              <button className="btn btn--sm" disabled={busy} onClick={save}>
+                {t.harnessSave}
+              </button>
+            </>
+          ) : (
+            <button
+              className="btn btn--sm"
+              disabled={busy}
+              onClick={() => {
+                setText(checks.commands.join("\n"));
+                setEditing(true);
+              }}
+            >
+              {t.repoChecksEdit}
+            </button>
+          )}
+        </span>
+      </div>
+    </Row>
   );
 }
 
@@ -388,6 +457,22 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
   };
 
   /** Thư viện harness of one repo; resolves to whether it was saved. */
+  /** A Settings call that answers with the whole view; resolves to whether it worked. */
+  const saveView = (call: () => Promise<SettingsView>): Promise<boolean> => {
+    setBusy(true);
+    setError(null);
+    return call()
+      .then((v) => {
+        setView(v);
+        return true;
+      })
+      .catch((e: unknown) => {
+        setError(errorMessage(e));
+        return false;
+      })
+      .finally(() => setBusy(false));
+  };
+
   const saveHarness = (repo: string, dir?: string): Promise<boolean> => {
     setBusy(true);
     setError(null);
@@ -673,6 +758,37 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                       ))}
                     </Group>
                     <p className="set-note">{t.harnessLibsHint}</p>
+                    <Group title={t.repoChecks}>
+                      {(view?.repoChecks ?? []).map((rc) => (
+                        <RepoChecksRow
+                          key={rc.repo}
+                          checks={rc}
+                          busy={busy}
+                          onSave={(commands) => saveView(() => setRepoChecks(rc.repo, commands))}
+                        />
+                      ))}
+                    </Group>
+                    <p className="set-note">{t.repoChecksHint}</p>
+                    <Group title={t.repoPairs}>
+                      {view && (view.repoPairs ?? []).length === 0 && (
+                        <div className="set-row">
+                          <span className="dim">{t.repoPairsEmpty}</span>
+                        </div>
+                      )}
+                      {(view?.repoPairs ?? []).map((pair) => (
+                        <Row
+                          key={`${pair.project}|${pair.issueRepo}|${pair.origin}`}
+                          id={`pair:${pair.issueRepo}`}
+                          label={`${pair.issueRepo} → ${pair.origin}`}
+                          hint={pair.project}
+                        >
+                          <button className="btn btn--ghost btn--sm" disabled={busy} onClick={() => void saveView(() => forgetRepoPair(pair))}>
+                            {t.repoPairForget}
+                          </button>
+                        </Row>
+                      ))}
+                    </Group>
+                    <p className="set-note">{t.repoPairsHint}</p>
                     <Row id="config" label={t.editConfig}>
                       <button className="btn btn--sm" disabled={isMockMode()} onClick={() => void openConfig()}>
                         {t.openConfig}

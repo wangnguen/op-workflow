@@ -16,14 +16,8 @@ fn verified_ctx(s: &Setup, config: &Config) -> TaskCtx {
         "# Task\nIssue: https://github.com/example/sample/issues/1\n",
     )
     .unwrap();
-    let binding = crate::task_repo::check(
-        &ctx.config,
-        "Web",
-        "https://github.com/example/sample/issues/1",
-        &Git::new(&s.repo),
-        false,
-    )
-    .unwrap();
+    let binding =
+        crate::task_repo::Binding::read(&Git::new(&s.repo), "https://github.com/example/sample/issues/1").unwrap();
     s.store
         .lock()
         .unwrap()
@@ -210,7 +204,7 @@ fn disabled_mcp_keeps_plan_repo_and_finish_guards_and_applies_next_run() {
         );
         assert_eq!(
             run(&flow, &ctx, FlowAction::ApprovePlan).error.unwrap().code,
-            "repo.mismatch"
+            "repo.changed"
         );
         assert_eq!(fake.jobs.lock().unwrap().len(), 1);
         git(
@@ -444,7 +438,7 @@ fn disabled_mcp_keeps_post_run_repo_checks_and_selected_findings_guard() {
         ok()
     });
     let d = run(&flow, &ctx, FlowAction::Run);
-    assert_eq!(d.error.unwrap().code, "repo.mismatch");
+    assert_eq!(d.error.unwrap().code, "repo.changed");
     let finding = FindingRow {
         wp_id: 1,
         fingerprint: "selected".into(),

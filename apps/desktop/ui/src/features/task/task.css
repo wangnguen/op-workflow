@@ -1516,3 +1516,35 @@
 .dev-server-note--warn {
   color: var(--st-waiting);
 }
+
+/* "Trao đổi với AI" under the strip of a failed step */
+.talk {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 16px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  animation: task-tab-in var(--dur-base) var(--ease-out);
+}
+.talk-head { display: flex; flex-direction: column; gap: 2px; }
+.talk-turns {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 240px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.talk-turn { display: flex; flex-direction: column; gap: 2px; max-width: 92%; animation: task-tab-in var(--dur-base) var(--ease-out); }
+.talk-turn--user { align-self: flex-end; text-align: right; }
+.talk-turn--ai { align-self: flex-start; }
+.talk-who { font-size: 11px; }
+.talk-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
+.talk-turn--user .talk-text { padding: 6px 10px; border-radius: 8px; background: var(--accent-soft); }
+.talk-input { width: 100%; resize: vertical; min-height: 52px; }
+.talk-choices { width: 100%; }

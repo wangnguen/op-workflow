@@ -736,3 +736,12 @@
   height: 32px;
   font-size: 12px;
 }
+
+/* Settings → Repo → Lệnh kiểm tra: one command per line */
+.set-checks-input {
+  flex: 1;
+  min-width: 220px;
+  box-sizing: border-box;
+  resize: vertical;
+  line-height: 1.5;
+}

@@ -357,6 +357,12 @@ pub struct SettingsView {
     /// Harness library of every known repo.
     #[serde(default)]
     pub harness_libs: Vec<HarnessLib>,
+    /// Kiểm tra commands of every known repo.
+    #[serde(default)]
+    pub repo_checks: Vec<RepoChecks>,
+    /// Issue repo → checkout pairs remembered from approved plans.
+    #[serde(default)]
+    pub repo_pairs: Vec<RepoPair>,
 }
 
 fn verify_mcp_default() -> bool {
@@ -557,6 +563,38 @@ pub struct HarnessLib {
     pub exists: bool,
 }
 
+/// Kiểm tra commands of one repo (Settings → Repo); empty = guessed per package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoChecks {
+    /// The repo as written in config (`~/Desktop/web`).
+    pub repo: String,
+    pub commands: Vec<String>,
+}
+
+/// Issues of `issue_repo` were worked on in a checkout whose origin is `origin` (remembered when
+/// a plan made there was approved). A hint for the next analysis, not a rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoPair {
+    pub project: String,
+    pub issue_repo: String,
+    pub origin: String,
+}
+
+/// One message of "Trao đổi với AI".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TalkTurn {
+    /// `true` = the user wrote it; `false` = the AI's answer (or why there is none).
+    pub from_user: bool,
+    pub text: String,
+    pub at: String,
+    /// What the answer cost (Claude only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectMemory {
@@ -608,6 +646,10 @@ pub struct StartOptions {
     pub branch_source: String,
     /// Issue links found in the task description.
     pub issue_links: Vec<String>,
+    /// Repos those links name (host/owner/repo). A picked repo whose origin is another one is
+    /// still allowed: Phân tích checks it is the right place.
+    #[serde(default)]
+    pub issue_repos: Vec<String>,
     /// Folders scanned for repos.
     pub workspaces: Vec<String>,
 }
@@ -673,9 +715,6 @@ pub struct StartRequest {
     pub repo: String,
     pub base: String,
     pub branch: String,
-    /// The user checked a repository that the task does not identify by a link or project mapping.
-    #[serde(default)]
-    pub confirm_unlinked_repo: bool,
     /// Starting again a task that finished a round: where to carry on (as "Làm tiếp"). `None`
     /// = stay where it stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1452,6 +1491,12 @@ pub struct TaskDetail {
     pub can_go_on: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_budget_usd: Option<f64>,
+    /// "Trao đổi với AI" at the error gate: what the user asked and what the AI answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub talk: Vec<TalkTurn>,
+    /// The AI is answering the last message of `talk`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub talk_busy: bool,
     pub findings: Vec<FindingView>,
     /// Docs/test judgement of the latest review of each kind (Tự review, Review chốt, …).
     #[serde(default)]
@@ -1531,7 +1576,13 @@ pub struct TestCase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum FlowAction {
+    /// Brief changed after the plan was approved: keep the plan and go on.
     KeepPlan,
+    /// Error gate: ask the AI about the failure (read only); its answer joins `TaskDetail.talk`.
+    Talk { text: String },
+    /// The task's repo folder or origin changed since Bắt đầu: bind the task to it as it is now
+    /// and run the step again.
+    UseCurrentRepo,
     /// Run the current step (the one shown as ready).
     Run,
     /// Stop the running step; it can be retried.
@@ -1547,9 +1598,7 @@ pub enum FlowAction {
     /// Plan gate: the AI codes the plan.
     ApprovePlan,
     /// Plan gate: analyze again with this feedback.
-    RejectPlan {
-        feedback: String,
-    },
+    RejectPlan { feedback: String },
     /// Plan gate: the user codes by hand.
     SelfCode,
     /// Plan gate: answer one of the analysis's questions (`answer`), or leave it to the AI.
@@ -1563,10 +1612,7 @@ pub enum FlowAction {
     },
     /// Turn an optional step (Harness, Test trình duyệt) on or off for this task, until the flow
     /// gets there.
-    SetUses {
-        step: StepKind,
-        on: bool,
-    },
+    SetUses { step: StepKind, on: bool },
     /// Test trình duyệt: the dev server the app starts for this task, remembered for the repo
     /// too. An empty URL clears both (the AI starts the app itself again).
     #[serde(rename_all = "camelCase")]
@@ -1588,13 +1634,9 @@ pub enum FlowAction {
     /// The user finished coding by hand.
     SelfCodeDone,
     /// Findings gate: fix the picked findings (`fix`), or go on without fixing.
-    PickFindings {
-        fix: bool,
-    },
+    PickFindings { fix: bool },
     /// After-fix gate: the answer to "Review chéo lại?".
-    AfterFix {
-        choice: AfterFix,
-    },
+    AfterFix { choice: AfterFix },
     /// "Bỏ khỏi thư viện": take the harness this task kept out of the repo's harness library.
     DropHarness,
     /// Write the push summary again (optionally for another issue number).
@@ -1618,9 +1660,7 @@ pub enum FlowAction {
         note: Option<String>,
     },
     /// Turn auto-advance on/off for this task.
-    SetAuto {
-        on: bool,
-    },
+    SetAuto { on: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

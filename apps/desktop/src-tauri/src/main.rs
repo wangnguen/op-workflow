@@ -103,6 +103,8 @@ fn main() {
             settings_api::set_quota_probe,
             settings_api::step_models,
             settings_api::set_harness_dir,
+            settings_api::set_repo_checks,
+            settings_api::forget_repo_pair,
             flow_api::task_detail,
             flow_api::flow_action,
             flow_api::decide_finding,

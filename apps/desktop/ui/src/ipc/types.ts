@@ -234,6 +234,24 @@ export interface SettingsView {
   onClose?: CloseChoice;
   /** harness library of every known repo */
   harnessLibs?: HarnessLib[];
+  /** Kiểm tra commands of every known repo (empty = guessed per package) */
+  repoChecks?: RepoChecks[];
+  /** issue repo → checkout pairs remembered from approved plans (hints for Phân tích) */
+  repoPairs?: RepoPair[];
+}
+
+/** Kiểm tra commands of one repo (Settings → Repo). */
+export interface RepoChecks {
+  /** the repo as written in config */
+  repo: string;
+  commands: string[];
+}
+
+/** Issues of `issueRepo` were worked on in a checkout whose origin is `origin`. */
+export interface RepoPair {
+  project: string;
+  issueRepo: string;
+  origin: string;
 }
 
 /** Models and effort levels the Claude / Codex CLIs on this machine offer (`step_models`). */
@@ -385,6 +403,8 @@ export interface StartOptions {
   /** only "default" may be replaced by the convention guessed from the picked repo */
   branchSource: BranchSource;
   issueLinks: string[];
+  /** repos those links name (host/owner/repo) */
+  issueRepos?: string[];
   workspaces: string[];
 }
 
@@ -430,7 +450,6 @@ export interface StartRequest {
   repo: string;
   base: string;
   branch: string;
-  confirmUnlinkedRepo?: boolean;
   /** starting again a task that finished a round: where to carry on (none = where it stopped) */
   carryOn?: CarryOn;
 }
@@ -940,6 +959,10 @@ export interface TaskDetail {
   /** stopped with Dừng, and the run's session can go on: "Chạy tiếp" with the user's words */
   canGoOn?: boolean;
   continuationBudgetUsd?: number;
+  /** "Trao đổi với AI" at the error gate */
+  talk?: TalkTurn[];
+  /** the AI is answering the last message of `talk` */
+  talkBusy?: boolean;
   findings: FindingView[];
   /** docs/test judgement of the latest review of each kind */
   reviewNotes?: ReviewNote[];
@@ -991,8 +1014,18 @@ export interface TestCase {
   untested?: boolean;
 }
 
+/** One message of "Trao đổi với AI". */
+export interface TalkTurn {
+  fromUser: boolean;
+  text: string;
+  at: string;
+  costUsd?: number;
+}
+
 export type FlowAction =
   | { type: "keepPlan" }
+  | { type: "talk"; text: string }
+  | { type: "useCurrentRepo" }
   | { type: "run" }
   | { type: "stop" }
   | { type: "retry" }
@@ -1088,6 +1121,8 @@ export interface Commands {
   close_window: null;
   set_on_close: SettingsView;
   set_harness_dir: SettingsView;
+  set_repo_checks: SettingsView;
+  forget_repo_pair: SettingsView;
   open_task_path: null;
 }
 
@@ -1130,5 +1165,7 @@ export interface CommandArgs {
   close_window: { choice: CloseChoice; remember: boolean };
   set_on_close: { choice: CloseChoice };
   set_harness_dir: { repo: string; dir?: string };
+  set_repo_checks: { repo: string; commands: string[] };
+  forget_repo_pair: { pair: RepoPair };
   open_task_path: { wpId: number; path: string };
 }

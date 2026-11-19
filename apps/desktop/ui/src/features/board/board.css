@@ -815,10 +815,10 @@ button.badge {
   word-break: break-word;
 }
 
-.dialog-inline-check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.repo-not-issue {
+  display: block;
+  margin-top: 4px;
+  line-height: 1.45;
 }
 
 .board-wrap {

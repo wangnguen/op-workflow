@@ -95,6 +95,25 @@ pub fn set_harness_dir(
     service.set_harness_dir(&repo, dir.as_deref())
 }
 
+/// Settings → Repo → Lệnh kiểm tra of one repo (empty = guessed per package).
+#[tauri::command]
+pub fn set_repo_checks(
+    service: State<'_, AppService>,
+    repo: String,
+    commands: Vec<String>,
+) -> Result<SettingsView, ApiError> {
+    service.set_repo_checks(&repo, &commands)
+}
+
+/// Settings → Repo: forget one remembered issue repo → checkout pair.
+#[tauri::command]
+pub fn forget_repo_pair(
+    service: State<'_, AppService>,
+    pair: opw_domain::view::RepoPair,
+) -> Result<SettingsView, ApiError> {
+    service.forget_repo_pair(&pair)
+}
+
 /// Settings → Các bước AI: models and effort levels of the Claude / Codex CLIs on this machine.
 /// Starts both CLIs (no prompt, no tokens, about 2 s), so off the UI thread.
 #[tauri::command(async)]

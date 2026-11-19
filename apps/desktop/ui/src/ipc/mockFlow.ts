@@ -31,6 +31,7 @@ import type {
   TaskDetail,
   TestView,
   ToolEvent,
+  TalkTurn,
 } from "./types";
 import { FIX_STEPS, OPTIONAL_STEPS, STEP_ORDER } from "../shared/steps";
 import { mockNewComments } from "./mockTask";
@@ -298,6 +299,8 @@ interface Flow {
   plan?: string;
   approvedBrief?: string;
   planChange?: string;
+  /** "Trao đổi với AI" at the error gate */
+  talk?: TalkTurn[];
   push?: PushView;
   findings: Finding[];
   log: LogLine[];
@@ -1028,6 +1031,7 @@ export function mockTaskDetail(wpId: number): TaskDetail {
         ? { step: "browserTest", question: f.ask.question, url: f.ask.url, browserOpen: true }
         : undefined,
     canGoOn: f.phase === "gate" && f.gate === "error" && f.stopped !== undefined && f.stopped === f.current,
+    talk: f.phase === "gate" && f.gate === "error" && f.talk?.length ? f.talk.map((t) => ({ ...t })) : undefined,
     findings: f.findings.map((x) => ({ ...x })),
     reviewNotes: STEP_ORDER.filter((s) => f.notes[s]).map((s) => ({ step: s, text: f.notes[s] ?? "" })),
     push: f.push,
@@ -1091,18 +1095,51 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       if (f.gate !== "error" || !f.current) throw fail("flow.notNow", "Lúc này chưa thử lại được");
       const fresh = f.error?.code === "step.stopped";
       f.stopped = undefined;
+      f.talk = undefined;
       f.states[f.current] = "running";
       f.phase = "ready";
       log(f, "info", fresh ? `Chạy lại ${LABEL[f.current]} từ đầu` : `Thử lại ${LABEL[f.current]}`, f.current);
       startRun(f);
       break;
     }
+    case "talk": {
+      if (f.phase !== "gate" || f.gate !== "error" || !f.current) {
+        throw fail("flow.notNow", "Lúc này chưa trao đổi với AI (chỉ khi một bước đang lỗi) được");
+      }
+      const text = action.text.trim();
+      if (!text) throw fail("talk.empty", "Gõ điều bạn muốn hỏi AI trước.");
+      const at = new Date().toISOString();
+      f.talk = [
+        ...(f.talk ?? []),
+        { fromUser: true, text, at },
+        {
+          fromUser: false,
+          at,
+          costUsd: 0.04,
+          text: `Bản xem trước: ở app thật, AI đọc lỗi của bước ${LABEL[f.current]}, log và code (chỉ đọc) rồi giải thích vì sao lỗi và nên làm gì tiếp.`,
+        },
+      ];
+      // like the Rust side: talking in the step's own Claude session lets Chạy tiếp go on in it
+      if (agentOf(f.current) === "claude") f.stopped = f.current;
+      break;
+    }
+    case "useCurrentRepo":
+      if (f.gate !== "error" || f.error?.code !== "repo.changed" || !f.current) {
+        throw fail("flow.notNow", "Lúc này chưa dùng repo hiện tại được");
+      }
+      f.error = undefined;
+      f.talk = undefined;
+      f.phase = "ready";
+      log(f, "info", `Bạn dùng repo hiện tại cho task, chạy lại ${LABEL[f.current]}`, f.current);
+      startRun(f);
+      break;
     case "goOn": {
       if (f.gate !== "error" || !f.current || f.stopped !== f.current) {
         throw fail("flow.notNow", "Lúc này chưa chạy tiếp (chỉ sau khi bạn bấm Dừng một bước AI) được");
       }
       const note = action.note.trim();
       f.stopped = undefined;
+      f.talk = undefined;
       f.states[f.current] = "running";
       f.phase = "ready";
       log(f, "info", note ? `Chạy tiếp ${LABEL[f.current]}: ${note}` : `Chạy tiếp ${LABEL[f.current]} trong phiên cũ`, f.current);

@@ -1,6 +1,8 @@
-//! Bind a task to the repository confirmed at intake, before Git or AI write anything.
+//! The repository a task works in. Bắt đầu never refuses a checkout because its origin differs
+//! from the issue links (a secondary repo, a fork, another repo entirely): the AI of Phân tích
+//! decides whether it is the right place, and the user can talk it over at the gate. The only
+//! hard stop is a folder or origin that changed under a started task.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use opw_config::{Config, same_path};
@@ -11,14 +13,20 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const KEY: &str = "task.repoBinding";
 
-#[derive(Debug, Serialize, Deserialize)]
+/// The checkout a task was started in, checked again before and after every step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct Binding {
     root: String,
     remote: Option<String>,
+    /// Repos named by the task's issue links when it was started (host/owner/repo).
+    #[serde(default)]
+    pub issue_repos: Vec<String>,
 }
 
 impl Binding {
-    fn read(git: &Git) -> Result<Self, ApiError> {
+    /// The checkout as it is now, for a task whose issue links are in `issue_source`.
+    pub fn read(git: &Git, issue_source: &str) -> Result<Self, ApiError> {
         let root = git
             .toplevel()
             .map_err(|_| ApiError::new("repo.notGit", "Không đọc được thư mục gốc Git."))?;
@@ -29,90 +37,88 @@ impl Binding {
         Ok(Self {
             root: root.to_string_lossy().into_owned(),
             remote,
+            issue_repos: issue_repos(issue_source),
         })
     }
 
+    pub fn remote(&self) -> Option<&str> {
+        self.remote.as_deref()
+    }
+
+    /// The folder and origin are still the ones the task started with.
     pub fn recheck(&self, repo: &Path) -> Result<(), ApiError> {
-        let current = Self::read(&Git::new(repo))?;
-        if !same_path(&self.root, &current.root) || self.remote != current.remote {
-            return Err(ApiError::new(
-                "repo.mismatch",
-                "Repo hoặc origin đã thay đổi từ lúc gắn với task. Kiểm tra lại trong Bắt đầu làm việc.",
-            ));
+        let current = self.rebind(repo)?;
+        if same_path(&self.root, &current.root) && self.remote == current.remote {
+            return Ok(());
         }
-        Ok(())
+        let origin = |r: &Option<String>| r.clone().unwrap_or_else(|| "không có origin".into());
+        Err(ApiError::new(
+            "repo.changed",
+            format!(
+                "Thư mục hoặc origin của repo đã đổi từ lúc bắt đầu task (lúc đầu {} · {}, giờ {} · {}). \
+                 Repo hiện tại đúng thì bấm Dùng repo hiện tại; không thì trả repo về như cũ rồi Thử lại.",
+                self.root,
+                origin(&self.remote),
+                current.root,
+                origin(&current.remote),
+            ),
+        ))
+    }
+
+    /// The same task bound to the checkout as it is now ("Dùng repo hiện tại").
+    pub fn rebind(&self, repo: &Path) -> Result<Self, ApiError> {
+        let mut now = Self::read(&Git::new(repo), "")?;
+        now.issue_repos.clone_from(&self.issue_repos);
+        Ok(now)
+    }
+
+    /// The origin is not one of the issue repos (or the task names none): the analysis checks
+    /// that this checkout is the right place.
+    pub fn needs_check(&self) -> bool {
+        self.remote
+            .as_ref()
+            .is_none_or(|remote| !self.issue_repos.contains(remote))
+    }
+
+    /// Pairs to remember once the user approves a plan made in this checkout.
+    pub fn pairs(&self) -> Vec<(String, String)> {
+        match &self.remote {
+            Some(remote) if self.needs_check() => self
+                .issue_repos
+                .iter()
+                .map(|issue| (issue.clone(), remote.clone()))
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 }
 
-pub(crate) fn check(
-    config: &Config,
-    project: &str,
-    issue_source: &str,
-    git: &Git,
-    confirm_unlinked: bool,
-) -> Result<Binding, ApiError> {
-    let binding = Binding::read(git)?;
-    let project_config = config.projects.get(project);
-    let linked: BTreeSet<String> = extract_issue_links(issue_source)
-        .into_iter()
-        .map(|link| format!("{}/{}", link.domain, link.repo).to_lowercase())
-        .collect();
-    let expected: BTreeSet<String> = if linked.is_empty() {
-        project_config
-            .into_iter()
-            .flat_map(|p| &p.allowed_remotes)
-            .filter_map(|remote| slug(remote))
-            .collect()
-    } else {
-        linked
-            .into_iter()
-            .flat_map(|repo| {
-                let mut candidates: Vec<String> = project_config
-                    .into_iter()
-                    .flat_map(|p| &p.repo_aliases)
-                    .filter(|(issue_repo, _)| slug(issue_repo).as_ref() == Some(&repo))
-                    .flat_map(|(_, remotes)| remotes)
-                    .filter_map(|remote| slug(remote))
-                    .collect();
-                if candidates.is_empty() {
-                    candidates.push(repo);
-                }
-                candidates
-            })
-            .collect()
+/// host/owner/repo of every issue link in `text`, lowercase, in order, without repeats.
+pub(crate) fn issue_repos(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for link in extract_issue_links(text) {
+        let slug = format!("{}/{}", link.domain, link.repo).to_lowercase();
+        if !out.contains(&slug) {
+            out.push(slug);
+        }
+    }
+    out
+}
+
+/// Issue repos the user already worked on in a checkout with this origin (from earlier tasks
+/// of the project).
+pub(crate) fn remembered(config: &Config, project: &str, b: &Binding) -> Vec<String> {
+    let Some(remote) = b.remote() else {
+        return Vec::new();
     };
-    if expected.is_empty() {
-        return if confirm_unlinked {
-            Ok(binding)
-        } else {
-            Err(ApiError::new(
-                "repo.unverified",
-                "Task chưa có link issue hoặc repo đã xác nhận. Kiểm tra repo và xác nhận trong Bắt đầu làm việc.",
-            ))
-        };
-    }
-    if binding
-        .remote
-        .as_ref()
-        .is_some_and(|remote| expected.contains(remote))
-    {
-        return if expected.len() == 1 || confirm_unlinked {
-            Ok(binding)
-        } else {
-            Err(ApiError::new(
-                "repo.unverified",
-                "Task hoặc project có nhiều repo phù hợp. Kiểm tra và xác nhận repo của task này.",
-            ))
-        };
-    }
-    Err(ApiError::new(
-        "repo.mismatch",
-        format!(
-            "Repo không khớp task thuộc project {project}. Origin đang chọn là {}; repo dự kiến là {}. Chọn repo đúng hoặc khai báo mirror cho repo của issue trong projects.<project>.repoAliases.",
-            binding.remote.as_deref().unwrap_or("không xác định"),
-            expected.iter().cloned().collect::<Vec<_>>().join(", "),
-        ),
-    ))
+    config
+        .projects
+        .get(project)
+        .into_iter()
+        .flat_map(|p| &p.repo_aliases)
+        .filter(|(_, origins)| origins.iter().any(|o| slug(o).as_deref() == Some(remote)))
+        .filter_map(|(issue, _)| slug(issue))
+        .collect()
 }
 
 fn slug(entry: &str) -> Option<String> {

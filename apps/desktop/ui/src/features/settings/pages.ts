@@ -25,6 +25,8 @@ export const ENTRIES: SettingEntry[] = [
   { page: "repos", id: "workspaces", label: t.workspaces, keywords: "workspace thư mục folder desktop quét scan" },
   { page: "repos", id: "config", label: t.editConfig, keywords: "config json cấu hình repo branch mẫu template" },
   { page: "repos", id: "harnessLibs", label: t.harnessLibs, keywords: "harness thư viện library scratch test tmp" },
+  { page: "repos", id: "repoChecks", label: t.repoChecks, keywords: "kiểm tra check lint eslint tsc prettier lệnh command" },
+  { page: "repos", id: "repoPairs", label: t.repoPairs, keywords: "repo phụ chính fork mirror issue origin nhớ" },
   ...AI_STEPS.map(
     (step): SettingEntry => ({
       page: "steps",
