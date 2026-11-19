@@ -316,6 +316,7 @@ export const vi = {
     drop: {
       startFirst: "Bắt đầu task trước: kéo sang Đang làm.",
       pushByItself: "Task tự sang Chờ push khi bước Push summary xong.",
+      verifyBeforeDone: "Task cần được xác nhận sẵn sàng bàn giao trước khi chuyển sang Đã xong.",
       stopToPause: (step: string) => `${step} đang chạy: bấm Dừng trước rồi mới tạm dừng.`,
       stopToFinish: (step: string) => `${step} đang chạy: bấm Dừng trước rồi mới đánh dấu xong.`,
     },
@@ -398,6 +399,7 @@ export const vi = {
     repo: "Repo",
     repoPick: "Chọn repo…",
     repoSuggested: "gợi ý từ link issue trong mô tả task",
+    confirmUnlinkedRepo: "Tôi đã kiểm tra đây là repo của task này.",
     repoRemembered: "đã dùng cho project này",
     repoNone: (dirs: string) => `Không thấy repo git nào trong ${dirs}. Dán đường dẫn repo vào ô bên dưới.`,
     repoOther: "Repo ở chỗ khác",
@@ -451,6 +453,7 @@ export const vi = {
     stop: "Dừng",
     stopHint: "Dừng tiến trình AI của bước này. Sau đó gõ hướng dẫn rồi Chạy tiếp (AI làm tiếp trong phiên đó), hoặc Chạy lại từ đầu.",
     retry: "Thử lại",
+    reanalyze: "Quay lại Phân tích",
     retryFresh: "Chạy lại từ đầu",
     stoppedLabel: "Đã dừng, chờ bạn",
     retryFreshHint: "Chạy lại bước này bằng phiên mới, như chưa chạy lần nào (bỏ những gì AI làm dở trong phiên vừa dừng)",

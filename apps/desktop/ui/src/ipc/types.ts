@@ -425,6 +425,7 @@ export interface StartRequest {
   repo: string;
   base: string;
   branch: string;
+  confirmUnlinkedRepo?: boolean;
   /** starting again a task that finished a round: where to carry on (none = where it stopped) */
   carryOn?: CarryOn;
 }

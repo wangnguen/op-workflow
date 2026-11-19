@@ -815,6 +815,12 @@ button.badge {
   word-break: break-word;
 }
 
+.dialog-inline-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .board-wrap {
   display: flex;
   flex-direction: column;

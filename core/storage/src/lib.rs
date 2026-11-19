@@ -341,6 +341,15 @@ impl Store {
         Ok(())
     }
 
+    /// Keep the selected repo and its verified identity in the same database transaction.
+    pub fn upsert_task_with_binding(&self, t: &TaskRow, key: &str, binding: &str) -> StorageResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.upsert_task(t)?;
+        self.kv_set(t.wp_id, key, "", binding, &t.updated_at)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn task(&self, wp_id: u64) -> StorageResult<Option<TaskRow>> {
         Ok(self
             .conn

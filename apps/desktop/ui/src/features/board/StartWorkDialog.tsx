@@ -133,6 +133,8 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
   const [showDirty, setShowDirty] = useState(false);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [unlinkedRepo, setUnlinkedRepo] = useState<string | null>(null);
+  const [confirmedRepo, setConfirmedRepo] = useState<string | null>(null);
   const [del, setDel] = useState<Deleting | null>(null);
   const filterRef = useRef<HTMLInputElement>(null);
   const request = useRef(0);
@@ -234,7 +236,10 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
   const remoteName = `origin/${name}`;
   const remoteExists = !localExists && (repo?.branches.some((b) => b.remote && b.name === remoteName) ?? false);
   const dirty = repo?.dirtyCount ?? 0;
-  const canStart = !!repo && dirty === 0 && !!base && name !== "" && !starting && repoBusy === null;
+  const confirmRepo = !!repo && repo.path === unlinkedRepo;
+  const canStart =
+    !!repo && dirty === 0 && !!base && name !== "" && !starting && repoBusy === null &&
+    (!confirmRepo || confirmedRepo === repo.path);
 
   const pickBase = (b: string) => {
     setBase(b);
@@ -333,10 +338,17 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
     setStarting(true);
     setStartError(null);
     const carryOn = finished ? carry.pick()?.carryOn : undefined;
-    startTask({ wpId: task.wpId, repo: repo.path, base, branch: name, carryOn })
+    startTask({
+      wpId: task.wpId, repo: repo.path, base, branch: name, carryOn,
+      confirmUnlinkedRepo: confirmRepo && confirmedRepo === repo.path,
+    })
       .then(onStarted)
       .catch((e: unknown) => {
         setStartError(errorMessage(e));
+        if (errorCode(e) === "repo.unverified") {
+          setUnlinkedRepo(repo.path);
+          setConfirmedRepo(null);
+        }
         if (errorCode(e) === "repo.dirty") loadRepo(repo.path, "load", true);
       })
       .finally(() => setStarting(false));
@@ -605,6 +617,13 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
           )}
 
           {startError && <p className="dialog-error">{startError}</p>}
+          {confirmRepo && (
+            <label className="dialog-inline-check">
+              <input type="checkbox" checked={confirmedRepo === repo?.path} disabled={starting}
+                onChange={(event) => setConfirmedRepo(event.target.checked ? (repo?.path ?? null) : null)} />
+              {t.confirmUnlinkedRepo}
+            </label>
+          )}
         </div>
 
         <footer className="sheet-foot">

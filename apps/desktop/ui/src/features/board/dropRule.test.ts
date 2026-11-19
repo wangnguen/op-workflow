@@ -18,8 +18,8 @@ describe("dropping a card on a column", () => {
     expect(r.kind === "refuse" && r.reason).toContain("Bắt đầu task trước");
   });
 
-  it("pauses or finishes a task in progress, never while a step runs", () => {
-    expect(kinds("active", step("pending"))).toEqual(["pause", "none", "refuse", "finish"]);
+  it("pauses a task in progress and leaves completion to the workflow", () => {
+    expect(kinds("active", step("pending"))).toEqual(["pause", "none", "refuse", "refuse"]);
     expect(kinds("active", step("running"))).toEqual(["refuse", "none", "refuse", "refuse"]);
     const pause = dropRule({ column: "active", step: step("running") }, "inbox");
     expect(pause.kind === "refuse" && pause.reason).toBe("Viết code đang chạy: bấm Dừng trước rồi mới tạm dừng.");

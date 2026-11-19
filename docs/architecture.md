@@ -5,7 +5,7 @@
 | Tauri shell (apps/desktop/src-tauri)                     |
 |  windows, tray, notifications, commands  <-->  React UI  |
 +----------------------------------------------------------+
-          |  Rust calls; Tauri Channel streams; no open port
+          |  Rust calls; Tauri Channel streams
           v
 +----------------------------------------------------------+
 | core/ (Rust workspace, no Tauri deps)                    |
@@ -54,4 +54,4 @@ App đọc OpenProject (`tracker`, GET), kiểm tra GitHub Releases (`update`, t
 
 - App không commit, không push. Mọi tiến trình AI chạy kèm môi trường git chặn commit/push (`opw_vcs::guard_env`), xem [ADR 0002](adr/0002-no-commit-no-push.md).
 - App chỉ đọc OpenProject, không ghi gì lên đó. Bạn tự đổi trạng thái task trên OpenProject.
-- IPC app dùng Tauri, không mở server riêng. Chrome DevTools và dev server của bài test có thể mở cổng; tiến trình AI bật được dọn sau lần chạy. CSP chặt; secret trong Windows Credential Manager.
+- UI dùng IPC của Tauri. `orchestrator::flow_mcp` phục vụ MCP Streamable HTTP trên loopback cho từng tiến trình AI với token riêng theo lần chạy. Công cụ đọc task/tiêu chí và nộp kết luận; `flow` xác minh kết quả rồi áp dụng máy trạng thái. Chrome DevTools và dev server của bài test dùng các cổng riêng. Secret OpenProject lưu trong Windows Credential Manager.

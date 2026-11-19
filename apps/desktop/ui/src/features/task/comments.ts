@@ -18,6 +18,32 @@ export function oneLine(text: string): string {
   return text.split(/\s+/).filter(Boolean).join(" ");
 }
 
+/** OpenProject leaves escaped separators in the raw comment. Keep a paragraph break there. */
+export function openProjectCommentText(text: string): string {
+  const lines: string[] = [];
+  let fence: string | undefined;
+  let separated = false;
+  for (const line of text.split(/\r?\n/)) {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      if (marker?.[1]?.startsWith(fence) && !marker[2]?.trim()) fence = undefined;
+    } else if (marker?.[1]) {
+      fence = marker[1];
+    } else if (/^ {0,3}\\?-{2,}[ \t]*$/.test(line)) {
+      separated = true;
+      continue;
+    }
+    if (separated) {
+      separated = false;
+      const previous = lines.at(-1);
+      if (previous?.trim() && line.trim()) lines.push("");
+      else if (previous !== undefined && !previous.trim() && !line.trim()) continue;
+    }
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
 /** Why OpenProject could not be read, and how old the saved comments shown instead are. */
 export function readProblem(view: CommentsView | undefined, now: number): string | undefined {
   if (!view?.error) return undefined;

@@ -21,6 +21,7 @@ use std::time::Duration;
 use crate::browsertest;
 use crate::checks::{self, Check, CheckKind, CheckResult, CheckRunner, ProcessRunner};
 use crate::devserver::{self, AppProcess, AppStarter, ShellStarter, Up};
+use crate::flow_mcp::{self, Outcome};
 use crate::harness;
 use crate::quotagate;
 use opw_agents::ModelChoice;
@@ -45,6 +46,7 @@ use opw_domain::workflow::{AfterFix, Phase, StepKind, StepState, Workflow, Workf
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
 use opw_vcs::Git;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const PLAN_FILE: &str = "plan.md";
 pub const PUSH_FILE: &str = "push.md";
@@ -84,6 +86,7 @@ pub struct Job {
     pub cwd: PathBuf,
     pub stdin: Option<String>,
     pub timeout: Duration,
+    mcp_token: Option<flow_mcp::Credential>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,12 +133,16 @@ impl Launcher for CliLauncher {
             Provider::Codex => opw_agents::cli::find_codex(),
         }
         .ok_or(LaunchError::Missing)?;
+        let mut env = opw_vcs::guard_env(&self.hooks_dir);
+        if let Some(secret) = &job.mcp_token {
+            env.push((flow_mcp::TOKEN_ENV.into(), secret.0.clone()));
+        }
         let spec = RunSpec {
             program,
             args: job.args.clone(),
             cwd: job.cwd.clone(),
             stdin: job.stdin.clone(),
-            env: opw_vcs::guard_env(&self.hooks_dir),
+            env,
             account: Account::Subscription,
             timeout: job.timeout,
             sweep: true,
@@ -165,6 +172,12 @@ struct Saved {
     fixes: u32,
     /// Feedback on the plan for the next analyze.
     feedback: Option<String>,
+    /// Why the previous draft failed its read-only verification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audit_feedback: Option<String>,
+    /// Exact contents verified at the plan gate. Replaced when approved answers are appended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified_plan: Option<String>,
     /// When the phase last changed.
     since: Option<String>,
     /// A process was running when this was saved.
@@ -1028,6 +1041,7 @@ struct Inner {
     /// The user quit the app: running steps were stopped and no new one starts.
     quitting: AtomicBool,
     quota_source: Mutex<Option<QuotaSource>>,
+    require_mcp: bool,
 }
 
 /// The workflow engine shared by the Tauri commands.
@@ -1082,6 +1096,11 @@ struct Claim {
     choice: ModelChoice,
     /// Permission mode picked in Settings; `None` = the app's own flags for the step.
     mode: Option<String>,
+    /// A run inside another step (the automatic repair of Kiểm tra, the review of a harness): the
+    /// outer step reports to the app, and what this run gives back is checked by the app itself.
+    nested: bool,
+    /// A fresh read-only analysis run that may verify the draft but cannot replace it.
+    plan_audit: bool,
 }
 
 /// What an AI run gave back, whichever CLI ran it.
@@ -1107,6 +1126,24 @@ impl Flow {
     /// Load every saved workflow. A step that was running when the app closed is marked failed
     /// (its process is gone) so the user can retry it.
     pub fn new(store: Arc<Mutex<Store>>, launcher: Arc<dyn Launcher>, runs_dir: Option<PathBuf>) -> Self {
+        Self::with_verification(store, launcher, runs_dir, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_without_mcp(
+        store: Arc<Mutex<Store>>,
+        launcher: Arc<dyn Launcher>,
+        runs_dir: Option<PathBuf>,
+    ) -> Self {
+        Self::with_verification(store, launcher, runs_dir, false)
+    }
+
+    fn with_verification(
+        store: Arc<Mutex<Store>>,
+        launcher: Arc<dyn Launcher>,
+        runs_dir: Option<PathBuf>,
+        require_mcp: bool,
+    ) -> Self {
         let at = now();
         let mut tasks = HashMap::new();
         if let Ok(s) = store.lock() {
@@ -1178,6 +1215,7 @@ impl Flow {
                 browsers: Mutex::new(HashMap::new()),
                 quitting: AtomicBool::new(false),
                 quota_source: Mutex::new(None),
+                require_mcp,
             }),
         }
     }
@@ -1403,7 +1441,7 @@ impl Flow {
         let start = {
             let mut tasks = self.inner.lock_tasks();
             let entry = tasks.get_mut(&wp_id).ok_or_else(flow_missing)?;
-            let start = apply_action(entry, &ctx, &action, &self.inner.store)?;
+            let start = apply_action(entry, &ctx, &action, &self.inner.store, self.inner.require_mcp)?;
             if !matches!(action, FlowAction::Run | FlowAction::Retry) || start {
                 self.inner.persist(wp_id, entry);
             }
@@ -2074,12 +2112,95 @@ fn not_now(what: &str) -> ApiError {
     ApiError::new("flow.notNow", format!("Lúc này chưa {what} được"))
 }
 
+fn plan_digest(ctx: &TaskCtx, brief: &str, plan: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"opw-plan-audited-v1\0");
+    for part in [
+        ctx.row.project.as_str(),
+        ctx.row.repo.as_deref().unwrap_or(""),
+        ctx.row.base.as_deref().unwrap_or(""),
+        ctx.row.branch.as_deref().unwrap_or(""),
+        brief,
+        plan.trim_end(),
+    ] {
+        hash.update((part.len() as u64).to_le_bytes());
+        hash.update(part.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+fn plan_stamp(ctx: &TaskCtx) -> Option<String> {
+    Some(plan_digest(ctx, &ctx.read(BRIEF_FILE)?, &ctx.read(PLAN_FILE)?))
+}
+
+fn require_current_plan(saved: &Saved, ctx: &TaskCtx) -> Result<(), FlowError> {
+    if saved.verified_plan.is_some() && saved.verified_plan == plan_stamp(ctx) {
+        return Ok(());
+    }
+    Err(flow_error(
+        "mcp.planStale",
+        "Brief hoặc plan đã đổi, hoặc plan chưa được xác minh. Quay lại Phân tích rồi duyệt plan mới.",
+    ))
+}
+
+fn validate_analysis(plan: &str, output: &str) -> Result<(), FlowError> {
+    const SECTIONS: [&str; 6] = [
+        "Nguyên nhân",
+        "Phương án",
+        "Đề xuất",
+        "File sẽ sửa",
+        "Kế hoạch test",
+        "Rủi ro",
+    ];
+    let mut sections = HashSet::new();
+    let mut section = None;
+    for line in plan.lines().map(str::trim) {
+        if let Some(title) = line.strip_prefix("## ") {
+            section = Some(title);
+        } else if !line.is_empty() {
+            if let Some(title) = section {
+                sections.insert(title);
+            }
+        }
+    }
+    let missing: Vec<_> = SECTIONS
+        .into_iter()
+        .filter(|name| !sections.contains(name))
+        .collect();
+    if !missing.is_empty() {
+        return Err(flow_error(
+            "mcp.planIncomplete",
+            format!(
+                "Plan thiếu nội dung ở các mục {}. Xem kết quả trong Chat rồi bấm Thử lại.",
+                missing.join(", ")
+            ),
+        ));
+    }
+    let final_block = text::fenced_blocks(output).pop();
+    let valid = final_block.is_some_and(|block| {
+        block.lang.eq_ignore_ascii_case("json")
+            && serde_json::from_str::<serde_json::Value>(&block.body).is_ok_and(|data| {
+                data.get("questions").is_some_and(serde_json::Value::is_array)
+                    && data.get("harness").is_some_and(serde_json::Value::is_object)
+                    && data.get("browserTest").is_some_and(serde_json::Value::is_object)
+            })
+    });
+    if !valid {
+        return Err(flow_error(
+            "mcp.planIncomplete",
+            "Plan thiếu khối JSON hợp lệ cho câu hỏi, Harness và Test trình duyệt. Xem Chat rồi bấm Thử lại.",
+        ));
+    }
+    Ok(())
+}
+
 /// Apply a button to the saved state. Returns `true` when a step should start now.
 fn apply_action(
     entry: &mut Entry,
     ctx: &TaskCtx,
     action: &FlowAction,
     store: &Mutex<Store>,
+    require_mcp: bool,
 ) -> Result<bool, ApiError> {
     use WorkflowEvent as E;
     let running = entry.run.is_some();
@@ -2200,6 +2321,9 @@ fn apply_action(
             if phase != Phase::Gate(GateKind::PlanReview) {
                 return Err(not_now("duyệt plan"));
             }
+            if require_mcp {
+                require_current_plan(&entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
+            }
             let open = entry.saved.questions.iter().filter(|q| !q.answered()).count();
             if open > 0 {
                 return Err(ApiError::new(
@@ -2212,6 +2336,9 @@ fn apply_action(
             if !entry.saved.questions.is_empty() {
                 write_task_file(ctx, PLAN_FILE, &plan_with_answers(&plan, &entry.saved.questions))
                     .map_err(|e| ApiError::new(e.code, e.message))?;
+            }
+            if require_mcp {
+                entry.saved.verified_plan = plan_stamp(ctx);
             }
             event(entry, E::PlanApproved)?;
             push_log(
@@ -2229,6 +2356,7 @@ fn apply_action(
             }
             event(entry, E::PlanRejected)?;
             entry.saved.feedback = Some(feedback.to_owned());
+            entry.saved.verified_plan = None;
             push_log(
                 entry,
                 Some(StepKind::Analyze),
@@ -2373,6 +2501,9 @@ fn apply_action(
             Ok(false)
         }
         FlowAction::SelfCode => {
+            if require_mcp {
+                require_current_plan(&entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
+            }
             event(entry, E::SelfCode)?;
             push_log(
                 entry,
@@ -2478,6 +2609,15 @@ fn apply_action(
             if phase == Phase::NotStarted || entry.saved.finished {
                 return Err(not_now("đánh dấu xong"));
             }
+            if require_mcp && phase != Phase::AwaitingPush {
+                return Err(ApiError::new(
+                    "flow.notReady",
+                    "Task chưa được xác nhận sẵn sàng bàn giao. Hoàn thành các bước đang chờ trước.",
+                ));
+            }
+            if require_mcp {
+                require_current_plan(&entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
+            }
             entry.saved.finished = true;
             entry.saved.since = Some(now());
             let text = match (phase == Phase::AwaitingPush, *forced) {
@@ -2506,6 +2646,8 @@ fn apply_action(
                 }
                 if step == StepKind::Analyze {
                     entry.saved.feedback = None;
+                    entry.saved.audit_feedback = None;
+                    entry.saved.verified_plan = None;
                 }
                 // asked for by hand: Review chốt runs even on code Tự review already saw
                 if step == StepKind::FinalReview {
@@ -3071,6 +3213,8 @@ impl Inner {
                 stop,
                 choice,
                 mode,
+                nested: false,
+                plan_audit: false,
             },
             text,
         ))
@@ -3157,6 +3301,7 @@ impl Inner {
                     }
                     if step == StepKind::Analyze {
                         entry.saved.feedback = None;
+                        entry.saved.audit_feedback = None;
                     }
                     note.clone_from(&done.note);
                     let cost = done.cost.map(|c| format!(" ({})", usd(c))).unwrap_or_default();
@@ -3506,13 +3651,18 @@ impl Inner {
 
     /// Create the run's raw log, starting with the prompt the app sends (the Chat tab shows it);
     /// returns the file and its name relative to the runs folder.
-    fn open_log(&self, ctx: &TaskCtx, step: StepKind, job: &Job) -> (Option<std::fs::File>, Option<String>) {
+    fn open_log(&self, ctx: &TaskCtx, claim: &Claim, job: &Job) -> (Option<std::fs::File>, Option<String>) {
         use std::io::Write;
         let Some(runs) = self.runs_dir.as_ref() else {
             return (None, None);
         };
         let stamp = now().replace([':', '.'], "-");
-        let name = format!("{}/{stamp}-{}.jsonl", ctx.row.display_id, step_key(step));
+        let suffix = if claim.plan_audit {
+            "analyze-audit"
+        } else {
+            step_key(claim.step)
+        };
+        let name = format!("{}/{stamp}-{suffix}.jsonl", ctx.row.display_id);
         let path = runs.join(&name);
         let file = path
             .parent()
@@ -3541,6 +3691,119 @@ impl Inner {
         id
     }
 
+    fn attach_mcp(
+        &self,
+        ctx: &TaskCtx,
+        claim: &Claim,
+        job: &mut Job,
+    ) -> Result<Option<flow_mcp::Run>, FlowError> {
+        if !self.require_mcp || claim.nested || flow_mcp::criteria(claim.step, claim.plan_audit).is_empty() {
+            return Ok(None);
+        }
+        let rows = self.findings(ctx.row.wp_id);
+        let (plan, checks, findings) = self
+            .with_saved(ctx.row.wp_id, |s| {
+                let plan = (claim.step != StepKind::Analyze)
+                    .then(|| ctx.read(PLAN_FILE))
+                    .flatten();
+                let selected = s.workflow.fixing().is_some();
+                let findings: Vec<FindingView> = rows
+                    .iter()
+                    .filter(|row| {
+                        claim.step == StepKind::PushSummary
+                            || (selected && claim.step.is_fix() && (row.state == "fixing" || to_fix(row)))
+                    })
+                    .map(|row| finding_view(row, s))
+                    .collect();
+                (plan, checked_lines(s), findings)
+            })
+            .unwrap_or_default();
+        let context = serde_json::json!({
+            "taskId": ctx.row.display_id,
+            "project": ctx.row.project,
+            "repo": job.cwd,
+            "branch": ctx.row.branch,
+            "base": ctx.row.base,
+            "step": claim.step,
+            "purpose": if claim.plan_audit { "verifyPlan" } else { "executeStep" },
+            "brief": ctx.read(BRIEF_FILE),
+            "approvedPlan": plan,
+            "checksActuallyRun": checks,
+            "findings": findings,
+        });
+        let mcp = flow_mcp::Run::start(claim.step, claim.plan_audit, &job.cwd, context).map_err(|e| {
+            flow_error(
+                "mcp.start",
+                format!("Không mở được MCP để xác minh bước: {e}. Bấm Thử lại."),
+            )
+        })?;
+        let instructions = flow_mcp::instructions(claim.step, claim.plan_audit);
+        if let Some(prompt) = job.stdin.as_mut() {
+            *prompt = format!("{instructions}\n\n{prompt}");
+        } else if let Some(prompt) = job.args.get_mut(1).filter(|arg| arg.starts_with('/')) {
+            prompt.push(' ');
+            prompt.push_str(&instructions);
+        } else {
+            return Err(flow_error(
+                "mcp.prompt",
+                "Không gắn được hướng dẫn xác minh vào bước này.",
+            ));
+        }
+        mcp.configure(job.agent, &mut job.args);
+        job.mcp_token = Some(flow_mcp::Credential(mcp.token().to_owned()));
+        Ok(Some(mcp))
+    }
+
+    fn check_mcp(
+        &self,
+        ctx: &TaskCtx,
+        claim: &Claim,
+        mcp: Option<flow_mcp::Run>,
+        answer: &str,
+    ) -> Result<Option<String>, FlowError> {
+        let Some(mcp) = mcp else { return Ok(None) };
+        let verdict = mcp.finish().ok_or_else(|| flow_error(
+            "mcp.missingVerdict",
+            "AI đã thoát nhưng chưa nộp kết quả xác minh. Bước chưa hoàn thành. Xem Chat rồi bấm Thử lại.",
+        ))?;
+        let summary = opw_context::redact(&verdict.summary, &[]);
+        let summary = if claim.plan_audit {
+            summary
+        } else {
+            short(&summary)
+        };
+        let browser_question = claim.step == StepKind::BrowserTest && browsertest::question(answer).is_some();
+        match verdict.outcome {
+            Outcome::Completed if !browser_question => {
+                self.log(
+                    ctx.row.wp_id,
+                    Some(claim.step),
+                    "info",
+                    &format!("AI xác nhận đạt tiêu chí: {summary}"),
+                    true,
+                );
+                Ok(verdict.result_text)
+            }
+            Outcome::NeedsUser if browser_question => Ok(None),
+            Outcome::Completed => Err(flow_error(
+                "mcp.verdictConflict",
+                "AI báo hoàn thành nhưng kết quả trình duyệt vẫn đang hỏi bạn. Bấm Thử lại.",
+            )),
+            Outcome::Mismatch => Err(flow_error(
+                "mcp.mismatch",
+                format!("AI phát hiện lệch yêu cầu hoặc repo: {summary}"),
+            )),
+            Outcome::Blocked => Err(flow_error(
+                "mcp.blocked",
+                format!("AI chưa thể hoàn thành bước: {summary}"),
+            )),
+            Outcome::NeedsUser => Err(flow_error(
+                "mcp.needsUser",
+                format!("AI cần bạn xử lý trước khi chạy lại: {summary}"),
+            )),
+        }
+    }
+
     /// Run Claude for one step; the final `result` line comes back.
     fn run_claude(
         &self,
@@ -3551,7 +3814,10 @@ impl Inner {
     ) -> Result<RunResult, FlowError> {
         let mut job = job.clone();
         // "Chạy tiếp" after Dừng: the stopped session, the user's words as its next message
-        if let Some(g) = self.take_go_on(ctx.row.wp_id, step, AgentKind::Claude) {
+        let go_on = (!claim.plan_audit)
+            .then(|| self.take_go_on(ctx.row.wp_id, step, AgentKind::Claude))
+            .flatten();
+        if let Some(g) = go_on {
             if let Some(i) = job.args.iter().position(|a| a == "--resume") {
                 let end = (i + 2).min(job.args.len());
                 job.args.drain(i..end);
@@ -3572,18 +3838,26 @@ impl Inner {
         let resumes_cut = self
             .cut_session(ctx.row.wp_id, step, Provider::Claude)
             .is_some_and(|id| job.args.windows(2).any(|w| w[0] == "--resume" && w[1] == id));
+        let mcp = self.attach_mcp(ctx, claim, &mut job)?;
         let job = &job;
         let stop: &AtomicBool = &claim.stop;
         use std::io::Write;
         let wp_id = ctx.row.wp_id;
         let (budget, timeout, key) = limits(step, &ctx.config);
-        let (mut raw, log) = self.open_log(ctx, step, job);
+        let (mut raw, log) = self.open_log(ctx, claim, job);
         let run_id = self.begin_run(ctx, step, "claude", log.as_deref());
         let mut result: Option<RunResult> = None;
         let mut session = String::new();
         let mut used_model = String::new();
-        let quota_hit =
-            |session: &str, why: &str| self.quota_hit(ctx, step, Provider::Claude, Some(session), why);
+        let quota_hit = |session: &str, why: &str| {
+            self.quota_hit(
+                ctx,
+                step,
+                Provider::Claude,
+                (!claim.plan_audit).then_some(session),
+                why,
+            )
+        };
         let mut on_line = |line: &str| {
             if let Some(f) = raw.as_mut() {
                 let _ = writeln!(f, "{line}");
@@ -3621,7 +3895,7 @@ impl Inner {
                 id,
                 &StepRunEnd {
                     state,
-                    session_id: sid,
+                    session_id: sid.filter(|_| !claim.plan_audit),
                     cost_usd: r.map(|r| r.cost_usd),
                     tokens_in: r.map(|r| r.tokens_in),
                     tokens_out: r.map(|r| r.tokens_out),
@@ -3687,7 +3961,12 @@ impl Inner {
                     ))
                 }
             }
-            Some(r) => Ok(r),
+            Some(mut r) => {
+                if let Some(text) = self.check_mcp(ctx, claim, mcp, &r.text)? {
+                    r.text = text;
+                }
+                Ok(r)
+            }
             None if looks_signed_out(&outcome.stderr_tail) => Err(signed_out(AgentKind::Claude)),
             None if resumes_cut && quotagate::looks_session_lost(&outcome.stderr_tail) => {
                 Err(self.cut_session_lost(wp_id, step, Provider::Claude))
@@ -3715,7 +3994,10 @@ impl Inner {
         let wp_id = ctx.row.wp_id;
         // "Chạy tiếp" after Dừng: `exec … resume <stopped thread> -` with the user's words
         let resumed;
-        let job = match self.take_go_on(wp_id, step, AgentKind::Codex) {
+        let go_on = (!claim.plan_audit)
+            .then(|| self.take_go_on(wp_id, step, AgentKind::Codex))
+            .flatten();
+        let job = match go_on {
             Some(g) => {
                 let mut j = job.clone();
                 match j.args.iter().position(|a| a == "resume") {
@@ -3728,8 +4010,11 @@ impl Inner {
             }
             None => job,
         };
+        let mut job = job.clone();
+        let mcp = self.attach_mcp(ctx, claim, &mut job)?;
+        let job = &job;
         let (_, timeout, key) = limits(step, &ctx.config);
-        let (mut raw, log) = self.open_log(ctx, step, job);
+        let (mut raw, log) = self.open_log(ctx, claim, job);
         let run_id = self.begin_run(ctx, step, "codex", log.as_deref());
         let mut thread = String::new();
         let mut last = String::new();
@@ -3762,7 +4047,7 @@ impl Inner {
                 id,
                 &StepRunEnd {
                     state: if ok { "done" } else { "failed" },
-                    session_id: Some(thread.as_str()).filter(|t| !t.is_empty()),
+                    session_id: Some(thread.as_str()).filter(|t| !claim.plan_audit && !t.is_empty()),
                     cost_usd: None,
                     tokens_in: Some(tokens_in),
                     tokens_out: Some(tokens_out),
@@ -3792,7 +4077,13 @@ impl Inner {
             return Err(self.cut_session_lost(wp_id, step, Provider::Codex));
         }
         if (failed.is_some() || !outcome.success()) && quotagate::looks_quota_hit(&quota_text) {
-            return Err(self.quota_hit(ctx, step, Provider::Codex, Some(&thread), &quota_text));
+            return Err(self.quota_hit(
+                ctx,
+                step,
+                Provider::Codex,
+                (!claim.plan_audit).then_some(thread.as_str()),
+                &quota_text,
+            ));
         }
         if let Some(m) = failed {
             if looks_signed_out(&m) || looks_signed_out(&outcome.stderr_tail) {
@@ -3808,6 +4099,9 @@ impl Inner {
                 "step.failed",
                 format!("Codex dừng lỗi: {}", exit_why(&outcome)),
             ));
+        }
+        if let Some(text) = self.check_mcp(ctx, claim, mcp, &last)? {
+            last = text;
         }
         Ok((last, thread))
     }
@@ -4003,6 +4297,42 @@ fn execute(inner: &Inner, ctx: &TaskCtx, claim: &Claim) -> Result<Done, FlowErro
             "Không thấy thư mục repo của task (đã xoá hoặc đổi chỗ?)",
         )
     })?;
+    let binding = if inner.require_mcp {
+        let stored = inner
+            .lock_store()
+            .map_err(|e| flow_error(&e.code, e.message))?
+            .kv_get(ctx.row.wp_id, crate::task_repo::KEY, "")
+            .map_err(|e| flow_error("storage", e.to_string()))?;
+        let binding = if let Some(value) = stored {
+            serde_json::from_str::<crate::task_repo::Binding>(&value).map_err(|_| {
+                flow_error(
+                    "repo.unverified",
+                    "Thông tin repo đã lưu không đọc được. Gắn lại repo trong Bắt đầu làm việc.",
+                )
+            })?
+        } else {
+            let brief = ctx.read(BRIEF_FILE).unwrap_or_default();
+            crate::task_repo::check(
+                &ctx.config,
+                &ctx.row.project,
+                crate::task_repo::legacy_issues(&brief),
+                &Git::new(&repo),
+                false,
+            )
+            .map_err(|e| flow_error(&e.code, e.message))?
+        };
+        binding
+            .recheck(&repo)
+            .map_err(|e| flow_error(&e.code, e.message))?;
+        if step != StepKind::Analyze {
+            inner
+                .with_saved(ctx.row.wp_id, |s| require_current_plan(s, ctx))
+                .transpose()?;
+        }
+        Some(binding)
+    } else {
+        None
+    };
     let git = Git::new(&repo);
     if let Some(branch) = ctx.row.branch.as_deref() {
         let current = git
@@ -4020,7 +4350,19 @@ fn execute(inner: &Inner, ctx: &TaskCtx, claim: &Claim) -> Result<Done, FlowErro
     let before = git_snap(&repo).map_err(|e| flow_error("repo.git", e))?;
     let result = run_step(inner, ctx, claim, &repo);
     // a surprise in git matters more than how the step itself ended
-    if let Ok(after) = git_snap(&repo) {
+    if let Some(binding) = &binding {
+        binding
+            .recheck(&repo)
+            .map_err(|e| flow_error(&e.code, e.message))?;
+    }
+    let after = git_snap(&repo);
+    if inner.require_mcp && after.is_err() {
+        return Err(flow_error(
+            "repo.git",
+            "Không đọc được trạng thái Git sau bước chạy. Kiểm tra repo rồi thử lại.",
+        ));
+    }
+    if let Ok(after) = after {
         if let Some(what) = git_surprise(step, &before, &after) {
             return Err(flow_error(
                 "git.unexpected",
@@ -4030,6 +4372,14 @@ fn execute(inner: &Inner, ctx: &TaskCtx, claim: &Claim) -> Result<Done, FlowErro
                 ),
             ));
         }
+    }
+    if inner.require_mcp && result.is_ok() {
+        if claim.stop.load(Ordering::Relaxed) {
+            return Err(flow_error("step.stopped", "Bạn đã dừng bước này."));
+        }
+        inner
+            .with_saved(ctx.row.wp_id, |s| require_current_plan(s, ctx))
+            .transpose()?;
     }
     result
 }
@@ -4164,7 +4514,7 @@ fn run_checks(
         }
         let broken: Vec<&CheckResult> = results.iter().filter(|r| r.broken.is_some()).collect();
         if !broken.is_empty() || round >= CHECK_FIX_ROUNDS {
-            if !own_step {
+            if !own_step && !inner.require_mcp {
                 return Ok(ChecksDone {
                     ran: true,
                     note: format!("{note} (xem tab Tiến trình; chạy lại Kiểm tra sau khi sửa tay)"),
@@ -4191,6 +4541,8 @@ fn run_checks(
             stop: claim.stop.clone(),
             choice: model_choice(StepKind::Fix, &ctx.config),
             mode: permission_mode(StepKind::Fix, &ctx.config),
+            nested: true,
+            plan_audit: false,
         };
         let allowed = config.allow_bash.clone();
         let session = inner.with_saved(wp_id, |s| s.session_of(fixer.agent)).flatten();
@@ -4265,6 +4617,7 @@ fn code_job(
         cwd: repo.to_path_buf(),
         stdin: Some(prompt),
         timeout,
+        mcp_token: None,
     }
 }
 
@@ -4545,6 +4898,9 @@ fn review_harness(
         stop: claim.stop.clone(),
         choice: ModelChoice::default(),
         mode: None,
+        // the app reads its findings; the harness build already reported to the app
+        nested: true,
+        plan_audit: false,
     };
     let brief = ctx.read(BRIEF_FILE).unwrap_or_default();
     let plan = ctx.read(PLAN_FILE).unwrap_or_default();
@@ -4579,6 +4935,7 @@ fn review_harness(
             cwd: repo.to_path_buf(),
             stdin: Some(prompt),
             timeout,
+            mcp_token: None,
         };
         let r = inner.run_claude(ctx, StepKind::Harness, &job, &review)?;
         (
@@ -4806,6 +5163,34 @@ fn build_harness(
     Ok((state, r.cost))
 }
 
+/// The findings a Sửa lỗi run took (marked `fixing` before the AI starts). When the step does not
+/// end well (stopped, failed, verdict missing, Kiểm tra still red) they go back as they were, so
+/// Thử lại / Chạy tiếp fixes them again instead of finding nothing left to fix and passing.
+struct TakenFindings<'a> {
+    store: &'a Mutex<Store>,
+    rows: Vec<FindingRow>,
+}
+
+impl TakenFindings<'_> {
+    /// The step ended well: leave the findings where the run put them.
+    fn keep(mut self) {
+        self.rows.clear();
+    }
+}
+
+impl Drop for TakenFindings<'_> {
+    fn drop(&mut self) {
+        if self.rows.is_empty() {
+            return;
+        }
+        if let Ok(store) = self.store.lock() {
+            for f in &self.rows {
+                let _ = store.upsert_finding(f);
+            }
+        }
+    }
+}
+
 fn settle_harness_review_fixes(
     inner: &Inner,
     wp_id: u64,
@@ -5018,6 +5403,7 @@ fn run_browser_test(
         cwd: repo.to_path_buf(),
         stdin: Some(prompt),
         timeout,
+        mcp_token: None,
     };
     let ran = inner.run_claude(ctx, StepKind::BrowserTest, &job, claim);
     // Dừng: keep the window and the app as they are, for "Chạy tiếp" (closed when the task
@@ -5207,6 +5593,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         cwd: repo.to_path_buf(),
         stdin,
         timeout,
+        mcp_token: None,
     };
     // the code session, when this step's AI wrote it (another AI cannot go on in it)
     let (session, feedback, fixes, issue, note) = inner
@@ -5260,7 +5647,8 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 })
                 .collect();
             let answers: Vec<(&str, &str)> = answers.iter().map(|(q, a)| (q.as_str(), a.as_str())).collect();
-            let mut prompt = prompts::analyze(&brief, previous, &answers);
+            let audit_feedback = inner.with_saved(wp_id, |s| s.audit_feedback.clone()).flatten();
+            let mut prompt = prompts::analyze(&brief, previous, &answers, audit_feedback.as_deref());
             // notes from earlier work on the repo: where it runs, how it is tested
             let memory = browsertest::claude_projects().and_then(|p| browsertest::repo_memory(&p, repo));
             let dirs: Vec<String> = memory.iter().map(|m| m.to_string_lossy().into_owned()).collect();
@@ -5290,6 +5678,53 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                         agent_name(claim.agent)
                     ),
                 ));
+            }
+            let mut cost = r.cost;
+            if inner.require_mcp {
+                validate_analysis(&answer.plan, &r.text)?;
+                if claim.stop.load(Ordering::Relaxed) {
+                    return Err(flow_error("step.stopped", "Bạn đã dừng bước này."));
+                }
+                inner.log(
+                    wp_id,
+                    Some(step),
+                    "info",
+                    "Đối chiếu plan với brief và code trong phiên chỉ đọc mới.",
+                    true,
+                );
+                // The draft finished. A quota cut in the fresh audit can only retry from analysis.
+                inner.with_saved(wp_id, |s| s.cut = None);
+                let audit = Claim {
+                    plan_audit: true,
+                    mode: None,
+                    stop: claim.stop.clone(),
+                    choice: claim.choice.clone(),
+                    ..*claim
+                };
+                let (provider, args) = if codex {
+                    let mut args = codex::analyze_args();
+                    args.insert(args.len() - 1, "--ephemeral".into());
+                    (Provider::Codex, codex::with_model(args, &audit.choice))
+                } else {
+                    let mut args = claude::analyze_args(budget, &[]);
+                    args.push("--no-session-persistence".into());
+                    (Provider::Claude, claude::with_model(args, &audit.choice))
+                };
+                let audit_prompt = prompts::audit_plan(&r.text, feedback.as_deref(), &answers);
+                let verify = job(provider, args, Some(audit_prompt));
+                let verified = inner.run_ai(ctx, step, &verify, &audit).map_err(|mut err| {
+                    if matches!(
+                        err.code.as_str(),
+                        "mcp.mismatch" | "mcp.blocked" | "mcp.needsUser"
+                    ) {
+                        inner.with_saved(wp_id, |s| s.audit_feedback = Some(err.message.clone()));
+                    }
+                    if err.code != "step.stopped" {
+                        err.message = format!("Đối chiếu plan: {}", err.message);
+                    }
+                    err
+                })?;
+                cost = cost.zip(verified.cost).map(|(draft, audit)| draft + audit);
             }
             write_task_file(ctx, PLAN_FILE, &answer.plan)?;
             set_session(&r.session);
@@ -5359,11 +5794,14 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 }
                 s.questions = questions;
                 s.proposals = proposals;
+                if inner.require_mcp {
+                    s.verified_plan = Some(plan_digest(ctx, &brief, &answer.plan));
+                }
             });
             Ok(Done {
                 event: E::StepSucceeded(StepKind::Analyze),
                 note,
-                cost: r.cost,
+                cost,
             })
         }
         StepKind::Implement => {
@@ -5514,6 +5952,10 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     });
                 }
             }
+            let taken = TakenFindings {
+                store: &inner.store,
+                rows: items.iter().map(|(f, _)| (*f).clone()).collect(),
+            };
             let list: Vec<FixItem> = items
                 .iter()
                 .map(|(f, harness)| FixItem {
@@ -5554,6 +5996,8 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 stop: claim.stop.clone(),
                 choice: claim.choice.clone(),
                 mode: None,
+                nested: false,
+                plan_audit: false,
             });
             let claim = scratch_only.as_ref().unwrap_or(claim);
             let shell = shell_of(claim, &allowed);
@@ -5637,6 +6081,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 Some(c) => Some(c + again.cost),
                 None => (again.cost > 0.0).then_some(again.cost),
             };
+            taken.keep();
             Ok(Done {
                 event: E::StepSucceeded(step),
                 note: format!(
@@ -5701,6 +6146,17 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             })
         }
         StepKind::PushSummary => {
+            // "Không sửa" at a findings gate is a decision; a finding picked for Sửa and never
+            // fixed is not
+            let picked = inner.findings(wp_id).iter().filter(|f| to_fix(f)).count();
+            if inner.require_mcp && picked > 0 {
+                return Err(flow_error(
+                    "mcp.openFindings",
+                    format!(
+                        "Còn {picked} lỗi bạn đã chọn Sửa nhưng chưa sửa. Mở tab Lỗi review: chạy Sửa lỗi, hoặc Bỏ chọn / Chấp nhận / Để sau."
+                    ),
+                ));
+            }
             let issue = issue.or_else(|| {
                 crate::issues::github_links(&brief)
                     .iter()
@@ -5806,6 +6262,7 @@ fn codex_read_review(
         cwd: repo,
         stdin: Some(prompt),
         timeout,
+        mcp_token: None,
     };
     let (answer, _) = inner.run_codex(ctx, step, &job, claim)?;
     let text = std::fs::read_to_string(&out).unwrap_or(answer);
@@ -6000,7 +6457,7 @@ mod tests {
             jobs: Mutex::new(Vec::new()),
             missing,
         });
-        let flow = Flow::new(s.store.clone(), fake.clone(), None);
+        let flow = Flow::new_without_mcp(s.store.clone(), fake.clone(), None);
         // never a real Chrome or dev server in tests (it made the browser test slow and flaky)
         flow.set_app_starter(Arc::new(FakeStarter::default()));
         (flow, fake)
@@ -6022,6 +6479,265 @@ mod tests {
     fn run(flow: &Flow, ctx: &TaskCtx, action: FlowAction) -> TaskDetail {
         flow.act(ctx.clone(), action).unwrap();
         settle(flow, ctx)
+    }
+
+    #[test]
+    fn mcp_verdict_controls_plan_and_unverified_context_blocks_implementation() {
+        for agent in ["claude", "codex"] {
+            verify_mcp_plan_gate(agent);
+        }
+    }
+
+    fn verify_mcp_plan_gate(agent: &str) {
+        use serde_json::{Value, json};
+
+        let Some(s) = setup() else { return };
+        let mut config = Config::default();
+        config.steps.analyze.agent = Some(agent.into());
+        let ctx = s.ctx(1, &config);
+        std::fs::write(
+            s.repo.join("a.ts"),
+            "export const byId = (rows) => new Map(rows.map(row => [row.collaborationUser, row.name]));\n",
+        )
+        .unwrap();
+        std::fs::write(
+            s.repo.join("FolderRow.tsx"),
+            "export const folder = (accessible_by) => ({ collaborationUser: accessible_by.id });\n",
+        )
+        .unwrap();
+        git(&s.repo, &["add", "a.ts", "FolderRow.tsx"]);
+        git(
+            &s.repo,
+            &["commit", "-q", "-m", "Add another producer of collaborationUser"],
+        );
+        git(
+            &s.repo,
+            &["remote", "add", "origin", "https://github.com/o/r.git"],
+        );
+        let binding = crate::task_repo::check(
+            &ctx.config,
+            "Web",
+            "https://github.com/o/r/issues/279",
+            &Git::new(&s.repo),
+            false,
+        )
+        .unwrap();
+        s.store
+            .lock()
+            .unwrap()
+            .upsert_task_with_binding(
+                &ctx.row,
+                crate::task_repo::KEY,
+                &serde_json::to_string(&binding).unwrap(),
+            )
+            .unwrap();
+        let calls = AtomicUsize::new(0);
+        let fake = Arc::new(Fake {
+            script: Box::new(move |job: &Job, _stop: &AtomicBool, out: &mut dyn FnMut(&str)| {
+                const PLAN: &str = "## Nguyên nhân\na.ts:1\n## Phương án\nA\n## Đề xuất\nA\n## File sẽ sửa\na.ts\n## Kế hoạch test\nKiểm tra A\n## Rủi ro\n{risk}\n\n```json\n{\"questions\":[],\"harness\":{\"recommend\":false},\"browserTest\":{\"recommend\":false}}\n```";
+                const WRONG_RISK: &str = "Group ID luôn vắng mặt trong Map.";
+                const COUNTEREXAMPLE: &str = "FolderRow.tsx:1 gán accessible_by.id vào collaborationUser, a.ts:1 dùng làm key của Map; group ID có thể đã tồn tại.";
+                let index = calls.fetch_add(1, Ordering::SeqCst);
+                let url = if job.agent == Provider::Claude {
+                    let config: Value = serde_json::from_str(&flag(job, "--mcp-config").unwrap()).unwrap();
+                    config["mcpServers"]["op_workflow"]["url"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                } else {
+                    let url = job
+                        .args
+                        .iter()
+                        .find_map(|arg| arg.strip_prefix("mcp_servers.op_workflow.url=\""))
+                        .unwrap();
+                    url.trim_end_matches('"').to_owned()
+                };
+                let credential = job.mcp_token.as_ref().unwrap();
+                let send = |method: &str, params: Value| {
+                    let request = json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
+                    let mut response = ureq::post(&url)
+                        .header("Authorization", format!("Bearer {}", credential.0))
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json, text/event-stream")
+                        .send(request.to_string().as_bytes())
+                        .unwrap();
+                    serde_json::from_str::<Value>(&response.body_mut().read_to_string().unwrap()).unwrap()
+                };
+                let call =
+                    |name, args| send("tools/call", json!({"name":name,"arguments":args}))["result"].clone();
+                let report = |outcome, evidence| {
+                    let mut payload =
+                        json!({"outcome":outcome,"summary":"đối chiếu a.ts","evidence":evidence});
+                    if outcome == "completed" && matches!(index, 2 | 4) {
+                        let risk = if index == 2 { WRONG_RISK } else { COUNTEREXAMPLE };
+                        payload["resultText"] = json!(PLAN.replace("{risk}", risk));
+                    }
+                    call("report_step_result", payload)
+                };
+                assert_eq!(
+                    send("initialize", json!({"protocolVersion":"2025-11-25"}))["result"]["protocolVersion"],
+                    "2025-11-25"
+                );
+                assert_eq!(
+                    send("tools/list", json!({}))["result"]["tools"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                assert_eq!(report("mismatch", vec![])["isError"], true);
+                let contract = call("get_step_contract", json!({}));
+                let data: Value =
+                    serde_json::from_str(contract["content"][0]["text"].as_str().unwrap()).unwrap();
+                assert_eq!(data["context"]["taskId"], "WP-1");
+                assert_eq!(data["criteria"].as_array().unwrap().len(), 3);
+                let audit_evidence = || {
+                    ["coverage", "dataFlow", "verification"]
+                        .map(|criterion| {
+                            json!({"criterion":criterion,"detail":COUNTEREXAMPLE,
+                               "sources":[{"file":"FolderRow.tsx","line":1},{"file":"a.ts","line":1}]})
+                        })
+                        .to_vec()
+                };
+                match index {
+                    0 => {} // CLI success alone cannot complete the step.
+                    1 => assert_eq!(report("mismatch", vec![])["isError"], false),
+                    2 | 4 => {
+                        assert_eq!(data["context"]["purpose"], "executeStep");
+                        if index == 4 {
+                            let prompt = job.stdin.as_deref().unwrap();
+                            assert!(prompt.contains("<audit_feedback>"));
+                            assert!(prompt.contains(COUNTEREXAMPLE));
+                        }
+                        let evidence = |line| {
+                            vec![
+                                json!({"criterion":"scope","detail":"Fix org"}),
+                                json!({"criterion":"rootCause","detail":"exported value","sources":[{"file":"a.ts","line":line}]}),
+                                json!({"criterion":"plan","detail":"Change a, then run the check"}),
+                            ]
+                        };
+                        assert_eq!(report("completed", vec![])["isError"], true);
+                        assert_eq!(report("completed", evidence(500))["isError"], true);
+                        assert_eq!(report("completed", evidence(1))["isError"], false);
+                        assert_eq!(report("mismatch", vec![])["isError"], true);
+                    }
+                    3 | 5 => {
+                        assert_eq!(data["context"]["purpose"], "verifyPlan");
+                        assert_eq!(data["criteria"][1]["id"], "dataFlow");
+                        assert_eq!(data["criteria"][1]["requiresSource"], true);
+                        let flags = if job.agent == Provider::Claude {
+                            ["--no-session-persistence", "--restricted"]
+                        } else {
+                            ["--ephemeral", "read-only"]
+                        };
+                        assert!(flags.iter().all(|flag| job.args.iter().any(|arg| arg == flag)));
+                        assert!(
+                            !job.args
+                                .iter()
+                                .any(|arg| matches!(arg.as_str(), "resume" | "--resume" | "--add-dir"))
+                        );
+                        let prompt = job.stdin.as_deref().unwrap();
+                        assert!(prompt.contains("<draft_plan>"));
+                        assert_eq!(prompt.contains(WRONG_RISK), index == 3);
+                        if index == 3 {
+                            let mut incomplete = audit_evidence();
+                            incomplete[1]["sources"] = json!([]);
+                            assert_eq!(report("completed", incomplete)["isError"], true);
+                            assert_eq!(
+                                call(
+                                    "report_step_result",
+                                    json!({"outcome":"mismatch","summary":COUNTEREXAMPLE})
+                                )["isError"],
+                                false
+                            );
+                        } else {
+                            assert_eq!(report("completed", audit_evidence())["isError"], false);
+                        }
+                    }
+                    6 => {
+                        assert_eq!(data["context"]["step"], "implement");
+                        assert!(
+                            data["context"]["approvedPlan"]
+                                .as_str()
+                                .unwrap()
+                                .contains("a.ts:1")
+                        );
+                        std::fs::write(job.cwd.join("a.ts"), "export const a = 2;\n").unwrap();
+                        assert_eq!(
+                            report(
+                                "completed",
+                                vec![
+                                    json!({"criterion":"scope","detail":"Fix org"}),
+                                    json!({"criterion":"implementation","detail":"Changed a to 2","sources":[{"file":"a.ts","line":1}]}),
+                                    json!({"criterion":"checks","detail":"App checks run next"}),
+                                ]
+                            )["isError"],
+                            false
+                        );
+                    }
+                    _ => panic!("Implementation started with stale input"),
+                }
+                if job.agent == Provider::Claude {
+                    out(&result_line("done"));
+                } else {
+                    out(r#"{"type":"thread.started","thread_id":"test-thread"}"#);
+                    out(r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#);
+                }
+                ok()
+            }),
+            jobs: Mutex::new(Vec::new()),
+            missing: false,
+        });
+        let flow = Flow::new(s.store.clone(), fake.clone(), None);
+        flow.started(&ctx, None).unwrap();
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(d.error.unwrap().code, "mcp.missingVerdict");
+        assert!(!ctx.file(PLAN_FILE).exists());
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        assert_eq!(d.error.unwrap().code, "mcp.mismatch");
+        assert!(!ctx.file(PLAN_FILE).exists());
+        assert_eq!(
+            flow.act(ctx.clone(), FlowAction::Finish { forced: true })
+                .unwrap_err()
+                .code,
+            "flow.notReady"
+        );
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        assert_eq!(d.gate.unwrap().kind, GateKind::Error);
+        let err = d.error.unwrap();
+        assert_eq!(err.code, "mcp.mismatch");
+        assert!(err.message.contains("Đối chiếu plan"));
+        assert!(err.message.contains("FolderRow.tsx:1"));
+        assert!(!ctx.file(PLAN_FILE).exists());
+        assert_eq!(fake.jobs.lock().unwrap().len(), 4);
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        assert_eq!(d.gate.unwrap().kind, GateKind::PlanReview, "{:?}", d.error);
+        assert!(ctx.read(PLAN_FILE).unwrap().contains("FolderRow.tsx:1"));
+        assert_eq!(fake.jobs.lock().unwrap().len(), 6);
+        let brief = ctx.read(BRIEF_FILE).unwrap();
+        std::fs::write(ctx.file(BRIEF_FILE), "New requirement").unwrap();
+        assert_eq!(
+            flow.act(ctx.clone(), FlowAction::ApprovePlan).unwrap_err().code,
+            "mcp.planStale"
+        );
+        std::fs::write(ctx.file(BRIEF_FILE), brief).unwrap();
+        git(
+            &s.repo,
+            &["remote", "set-url", "origin", "https://github.com/o/other.git"],
+        );
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(d.error.unwrap().code, "repo.mismatch");
+        assert_eq!(fake.jobs.lock().unwrap().len(), 6);
+        git(
+            &s.repo,
+            &["remote", "set-url", "origin", "https://github.com/o/r.git"],
+        );
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        assert_eq!(
+            (d.status, d.current),
+            (FlowStatus::Ready, Some(StepKind::ReviewLocal))
+        );
+        assert_eq!(fake.jobs.lock().unwrap().len(), 7);
     }
 
     const HIGH: &str = "Review\n```json\n{\"findings\":[{\"severity\":\"high\",\"file\":\"a.ts\",\"line\":1,\"title\":\"Null org\",\"detail\":\"crash\",\"suggestion\":\"guard\"}]}\n```";
@@ -7044,6 +7760,73 @@ mod tests {
     /// Tự review's high is fixed, so the code moved after it and Review chốt runs. Its answer has
     /// no findings block: the step fails, and Tiến trình shows a failed run although the process
     /// ended well.
+    #[test]
+    fn a_failed_fix_gives_its_findings_back_and_thu_lai_fixes_them_again() {
+        use opw_domain::finding::FindingState;
+        let Some(s) = setup() else { return };
+        let reviews = AtomicUsize::new(0);
+        let fixes = AtomicUsize::new(0);
+        let inner = happy(CLEAN);
+        let is_fix =
+            |job: &Job| kind(job) == "code" && job.stdin.as_deref().is_some_and(|p| p.contains("Null org"));
+        let (flow, fake) = flow_with(
+            &s,
+            false,
+            move |job: &Job, stop: &AtomicBool, out: &mut dyn FnMut(&str)| {
+                if kind(job) == "review" {
+                    let first = reviews.fetch_add(1, Ordering::SeqCst) == 0;
+                    out(&result_line(if first { HIGH } else { CLEAN }));
+                    return ok();
+                }
+                // the first fix dies before it reports anything
+                if is_fix(job) && fixes.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return RunOutcome {
+                        code: Some(1),
+                        ..RunOutcome::default()
+                    };
+                }
+                inner(job, stop, out)
+            },
+        );
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        run(&flow, &ctx, FlowAction::Run);
+        run(&flow, &ctx, FlowAction::ApprovePlan);
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(d.gate.as_ref().map(|g| g.kind), Some(GateKind::Findings));
+        pick_all(&flow, &ctx);
+        let d = run(&flow, &ctx, FlowAction::PickFindings { fix: true });
+        assert!(d.error.is_some(), "{:?}", d.gate);
+        // still picked and open, not left "fixing" as if the dead run had fixed it
+        let f = flow
+            .detail(&ctx)
+            .findings
+            .into_iter()
+            .find(|f| f.title == "Null org")
+            .unwrap();
+        assert_eq!((f.state, f.chosen), (FindingState::Open, true));
+        let d = run(&flow, &ctx, FlowAction::Retry);
+        assert_eq!(
+            d.gate.as_ref().map(|g| g.kind),
+            Some(GateKind::AfterFix),
+            "{:?}",
+            d.error
+        );
+        let jobs = fake.jobs.lock().unwrap().clone();
+        assert_eq!(
+            jobs.iter().filter(|j| is_fix(j)).count(),
+            2,
+            "Thử lại ran the fix again"
+        );
+        let f = flow
+            .detail(&ctx)
+            .findings
+            .into_iter()
+            .find(|f| f.title == "Null org")
+            .unwrap();
+        assert_eq!(f.state, FindingState::Fixing);
+    }
+
     #[test]
     fn final_review_runs_after_a_fix_and_an_unreadable_answer_is_a_failed_run() {
         let Some(s) = setup() else { return };
@@ -8439,7 +9222,7 @@ mod tests {
         assert_eq!(flow.quota_waits_due("2099-01-01T00:00:05Z", 95.0), vec![]);
 
         // A restart and a retry failing before init must both keep the interrupted session.
-        let flow = Flow::new(s.store.clone(), fake.clone(), None);
+        let flow = Flow::new_without_mcp(s.store.clone(), fake.clone(), None);
         assert_eq!(
             run(&flow, &ctx, FlowAction::Retry).error.unwrap().code,
             "quota.hit"
@@ -8517,7 +9300,7 @@ mod tests {
         assert_eq!(last.title, "WP-2 · Tự chạy dừng vì hạn mức");
 
         // The pre-launch wait survives a restart. Parking the task prevents any automatic run.
-        let flow = Flow::new(s.store.clone(), fake, None);
+        let flow = Flow::new_without_mcp(s.store.clone(), fake, None);
         let level = used.clone();
         flow.set_quota_source(move |_| Some(quota_at(*level.lock().unwrap())));
         assert!(flow.quota_waits_due("2099-11-17T09:00:00Z", 95.0).is_empty());
@@ -8862,7 +9645,7 @@ mod tests {
             missing: false,
         });
         let runs_dir = s.tasks.with_file_name("runs");
-        let flow = Flow::new(s.store.clone(), fake.clone(), Some(runs_dir.clone()));
+        let flow = Flow::new_without_mcp(s.store.clone(), fake.clone(), Some(runs_dir.clone()));
         let mut config = Config::default();
         config.repos.insert(
             s.repo.to_string_lossy().into_owned(),
@@ -9079,6 +9862,7 @@ mod tests {
             cwd: PathBuf::new(),
             stdin: None,
             timeout: Duration::from_secs(1),
+            mcp_token: None,
         };
         let prompt = prompt_of(&job);
         assert!(prompt.starts_with("/review-local Non-interactive run."));

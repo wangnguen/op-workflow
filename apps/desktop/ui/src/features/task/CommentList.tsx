@@ -6,7 +6,7 @@ import { vi } from "../../i18n/vi";
 import type { CommentView, CommentsView } from "../../ipc/types";
 import { formatDateTime, formatRelative } from "../../shared/format";
 import { Icon } from "../../shared/ui/Icon";
-import { oneLine } from "./comments";
+import { oneLine, openProjectCommentText } from "./comments";
 import "./task.css";
 
 const t = vi.flow.comments;
@@ -42,7 +42,8 @@ interface ItemProps {
 
 export function CommentItem(p: ItemProps) {
   const { c, now, who } = p;
-  if (c.mine) return <OwnComment {...p} />;
+  const text = p.where === "openProject" ? openProjectCommentText(c.text) : c.text;
+  if (c.mine) return <OwnComment {...p} text={text} />;
   return (
     <li className={`comment${c.isNew ? " is-new" : ""}`}>
       <div className="comment-meta">
@@ -57,7 +58,7 @@ export function CommentItem(p: ItemProps) {
         )}
         <OpenLink {...p} />
       </div>
-      <p className="comment-text">{c.text}</p>
+      <p className="comment-text">{text}</p>
     </li>
   );
 }
@@ -76,8 +77,8 @@ function OpenLink({ c, where, onOpen }: ItemProps) {
 
 /** The user's own comment: one folded line (who, when, start of the text); click to read it all.
  *  The row keeps its height while the text slides open below it. */
-function OwnComment(p: ItemProps) {
-  const { c, now, who } = p;
+function OwnComment(p: ItemProps & { text: string }) {
+  const { c, now, who, text } = p;
   const [open, setOpen] = useState(false);
   return (
     <li className={`comment comment--mine${open ? " is-open" : ""}`}>
@@ -96,12 +97,12 @@ function OwnComment(p: ItemProps) {
           {formatRelative(c.createdAt, now)}
         </span>
         <span className="comment-excerpt faint" aria-hidden={open}>
-          {oneLine(c.text)}
+          {oneLine(text)}
         </span>
       </button>
       <div className="comment-fold-body" inert={!open}>
         <div>
-          <p className="comment-text">{c.text}</p>
+          <p className="comment-text">{text}</p>
           {c.url && (
             <div className="comment-own-foot">
               <OpenLink {...p} />

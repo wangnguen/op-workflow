@@ -81,7 +81,7 @@ pub fn options(config: &Config, wp: &WorkPackage, saved: Option<&TaskRow>) -> St
                 RepoOption {
                     path: path_text,
                     name,
-                    remote,
+                    remote: slug,
                     suggested,
                     remembered: rank != usize::MAX,
                 },
@@ -147,6 +147,22 @@ fn with_branch_line(brief: &str, branch: &str, base: &str) -> String {
         }
     }
     out
+}
+
+fn with_repo_line(brief: &str, repo: &str) -> String {
+    let mut lines: Vec<&str> = brief.split_inclusive('\n').collect();
+    let Some(line) = lines.get_mut(1).filter(|line| line.starts_with("Task: ")) else {
+        return brief.to_owned();
+    };
+    let Some((before, _)) = line.rsplit_once(" · Repo: ") else {
+        return brief.to_owned();
+    };
+    let updated = format!(
+        "{before} · Repo: {repo}{}",
+        if line.ends_with('\n') { "\n" } else { "" }
+    );
+    *line = &updated;
+    lines.concat()
 }
 
 fn git_error(e: VcsError) -> ApiError {
@@ -292,7 +308,10 @@ pub struct StartInput<'a> {
 
 /// Create (or switch to) the branch, remember the choices, write the brief. Returns the result
 /// and the row to store as the active task.
-pub fn start(input: StartInput<'_>, req: &StartRequest) -> Result<(StartResult, TaskRow), ApiError> {
+pub(crate) fn start(
+    input: StartInput<'_>,
+    req: &StartRequest,
+) -> Result<(StartResult, TaskRow, crate::task_repo::Binding), ApiError> {
     let StartInput {
         config,
         config_path,
@@ -309,6 +328,14 @@ pub fn start(input: StartInput<'_>, req: &StartRequest) -> Result<(StartResult, 
         return Err(ApiError::new("base.empty", "Chưa chọn base"));
     }
     let (git, top) = open_repo(&req.repo)?;
+    let source = details.as_ref().map_or(wp, |(fresh, _)| fresh);
+    let binding = crate::task_repo::check(
+        config,
+        &source.project,
+        &source.description,
+        &git,
+        req.confirm_unlinked_repo,
+    )?;
     let created = git.start_branch(branch, base).map_err(git_error)?;
 
     let mut warnings = Vec::new();
@@ -316,7 +343,7 @@ pub fn start(input: StartInput<'_>, req: &StartRequest) -> Result<(StartResult, 
     let template = template_from_branch(branch, wp.id);
     if let Some(path) = config_path {
         let memory = StartMemory {
-            project: &wp.project,
+            project: &source.project,
             repo: &repo_key,
             branch_template: template.as_deref(),
             base,
@@ -385,7 +412,7 @@ pub fn start(input: StartInput<'_>, req: &StartRequest) -> Result<(StartResult, 
             // only the branch line and, when OpenProject answered, the comments are refreshed.
             let text = match std::fs::read_to_string(file) {
                 Ok(old) => {
-                    let kept = with_branch_line(&old, branch, base);
+                    let kept = with_repo_line(&with_branch_line(&old, branch, base), &repo_name);
                     if comments_read {
                         replace_comment_section(&kept, &render_comment_section(&brief_comments, &[]))
                     } else {
@@ -413,7 +440,7 @@ pub fn start(input: StartInput<'_>, req: &StartRequest) -> Result<(StartResult, 
         wp_id: wp.id,
         display_id: task_id.clone(),
         title: fresh.subject.clone(),
-        project: wp.project.clone(),
+        project: fresh.project.clone(),
         repo: Some(repo_key),
         branch: Some(branch.to_owned()),
         base: Some(base.to_owned()),
@@ -430,6 +457,7 @@ pub fn start(input: StartInput<'_>, req: &StartRequest) -> Result<(StartResult, 
             issue_links: github_issue_count,
         },
         row,
+        binding,
     ))
 }
 
@@ -612,6 +640,7 @@ mod tests {
             base: "development".into(),
             branch: "f/WP-188001".into(),
             carry_on: None,
+            confirm_unlinked_repo: false,
         };
         let input = || StartInput {
             config: &cfg,
@@ -632,7 +661,50 @@ mod tests {
             task_url: "https://op.example.com/work_packages/188001".into(),
             now: "2026-11-13T09:00:00Z".into(),
         };
-        let (res, row) = start(input(), &req).unwrap();
+        let wrong_repo = StartRequest {
+            repo: root.path().join("api").to_string_lossy().into_owned(),
+            confirm_unlinked_repo: true,
+            ..req.clone()
+        };
+        assert_eq!(start(input(), &wrong_repo).unwrap_err().code, "repo.mismatch");
+        assert_eq!(
+            Git::new(root.path().join("api")).current_branch().unwrap(),
+            "development"
+        );
+        assert!(!cfg_path.exists());
+        let mut alias_cfg = cfg.clone();
+        alias_cfg
+            .projects
+            .entry(task.project.clone())
+            .or_default()
+            .repo_aliases
+            .insert(
+                "github.com/acme/upstream".into(),
+                vec!["github.com/acme/web".into()],
+            );
+        assert!(
+            crate::task_repo::check(
+                &alias_cfg,
+                &task.project,
+                "https://github.com/acme/upstream/issues/12",
+                &Git::new(&web),
+                false,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            crate::task_repo::check(
+                &alias_cfg,
+                &task.project,
+                "https://github.com/acme/unrelated/issues/12",
+                &Git::new(&web),
+                true,
+            )
+            .unwrap_err()
+            .code,
+            "repo.mismatch"
+        );
+        let (res, row, _) = start(input(), &req).unwrap();
         assert!(res.created);
         assert!(res.warnings.is_empty(), "{:?}", res.warnings);
         assert_eq!(Git::new(&web).current_branch().unwrap(), "f/WP-188001");
@@ -666,7 +738,7 @@ mod tests {
         let edited = std::fs::read_to_string(&brief_file).unwrap() + "\n## Ghi chú của tôi\nđừng đổi API\n";
         std::fs::write(&brief_file, edited).unwrap();
         git_ok(&web, &["switch", "development"]);
-        let (res, _) = start(input(), &req).unwrap();
+        let (res, _, _) = start(input(), &req).unwrap();
         assert!(!res.created);
         let again = std::fs::read_to_string(&brief_file).unwrap();
         assert!(again.contains("đừng đổi API"), "{again}");
@@ -715,8 +787,9 @@ mod tests {
             base: "development".into(),
             branch: "feature/188004".into(),
             carry_on: None,
+            confirm_unlinked_repo: true,
         };
-        let (res, _) = start(
+        let (res, _, _) = start(
             StartInput {
                 config: &cfg,
                 config_path: None,

@@ -556,6 +556,7 @@ pub struct RepoOption {
     pub name: String,
     /// Remote `origin`, shown to tell same-named folders apart.
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Origin identity as host/path, with credentials removed.
     pub remote: Option<String>,
     /// Remote matches an issue link in the task description.
     pub suggested: bool,
@@ -650,6 +651,9 @@ pub struct StartRequest {
     pub repo: String,
     pub base: String,
     pub branch: String,
+    /// The user checked a repository that the task does not identify by a link or project mapping.
+    #[serde(default)]
+    pub confirm_unlinked_repo: bool,
     /// Starting again a task that finished a round: where to carry on (as "Làm tiếp"). `None`
     /// = stay where it stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]

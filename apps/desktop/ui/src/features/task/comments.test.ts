@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mockNewComments, mockTaskComments } from "../../ipc/mockTask";
 import type { CommentsView, CommentView } from "../../ipc/types";
-import { commentCounts, knownEmpty, oneLine, readProblem } from "./comments";
+import { commentCounts, knownEmpty, oneLine, openProjectCommentText, readProblem } from "./comments";
 
 const c = (id: string, isNew: boolean, mine: boolean): CommentView => ({
   id,
@@ -43,6 +43,20 @@ describe("comment tab", () => {
 
   it("folds an own comment to one line", () => {
     expect(oneLine("  Đã sửa:\n\nkiểm tra   org null ")).toBe("Đã sửa: kiểm tra org null");
+  });
+
+  it("removes escaped OpenProject separators and keeps the bilingual paragraphs", () => {
+    const raw = ["追加確認をお願いします。", "\\---  ", "API を確認", "", "/", "", "Nhờ kiểm tra.", "", "\\--", "", "Giữ `/api/user`."];
+    expect(openProjectCommentText(raw.join("\r\n"))).toBe(
+      "追加確認をお願いします。\n\nAPI を確認\n\n/\n\nNhờ kiểm tra.\n\nGiữ `/api/user`.",
+    );
+  });
+
+  it("keeps hyphens in code, options, and list items", () => {
+    const raw = ["Dùng --flag", "----", "- kiểm tra", "````text", "\\---", "```", "--", "````"];
+    expect(openProjectCommentText(raw.join("\n"))).toBe(
+      ["Dùng --flag", "", "- kiểm tra", "````text", "\\---", "```", "--", "````"].join("\n"),
+    );
   });
 
   it("preview: own comments are shown but not counted as new", () => {

@@ -14,6 +14,7 @@ pub mod demo;
 pub mod devserver;
 pub mod diffview;
 pub mod flow;
+mod flow_mcp;
 pub mod folders;
 pub mod harness;
 pub mod issues;
@@ -25,6 +26,7 @@ pub mod quotagate;
 pub mod selftest;
 pub mod start;
 pub mod steps;
+mod task_repo;
 pub mod tray;
 pub mod updater;
 
@@ -738,7 +740,7 @@ impl AppService {
         };
         let in_brief = details.as_ref().ok().and_then(|(_, c)| comments::max_id(c));
         let config = self.config();
-        let (mut result, row) = start::start(
+        let (mut result, row, binding) = start::start(
             start::StartInput {
                 config: &config,
                 config_path: self.config_path.as_deref(),
@@ -758,8 +760,10 @@ impl AppService {
             let store = store
                 .lock()
                 .map_err(|_| ApiError::new("storage", "Dữ liệu cục bộ đang bị khoá"))?;
+            let binding =
+                serde_json::to_string(&binding).map_err(|e| ApiError::new("storage", e.to_string()))?;
             store
-                .upsert_task(&row)
+                .upsert_task_with_binding(&row, task_repo::KEY, &binding)
                 .map_err(|e| ApiError::new("storage", e.to_string()))?;
             let detail = format!(
                 "{} from {}",
@@ -2173,7 +2177,7 @@ mod tests {
                 updated_at: "2026-11-14T08:00:00Z".into(),
             })
             .unwrap();
-        let flow = Flow::new(store.clone(), Arc::new(NoAi), None);
+        let flow = Flow::new_without_mcp(store.clone(), Arc::new(NoAi), None);
         let svc = AppService::with_flow(store, flow, Config::default(), tmp.path().to_path_buf());
         assert_eq!(svc.task_detail(8).unwrap_err().code, "task.notFound");
         let d = svc.task_detail(7).unwrap();

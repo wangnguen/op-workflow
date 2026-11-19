@@ -28,8 +28,8 @@ export function dropRule(card: Pick<TaskCard, "column" | "step">, to: TaskColumn
       return to === "active" ? { kind: "start" } : { kind: "refuse", reason: d.startFirst };
     case "active":
       if (to === "awaitingPush") return { kind: "refuse", reason: d.pushByItself };
-      if (running) return { kind: "refuse", reason: to === "inbox" ? d.stopToPause(running) : d.stopToFinish(running) };
-      return to === "inbox" ? { kind: "pause" } : { kind: "finish" };
+      if (to === "done") return { kind: "refuse", reason: d.verifyBeforeDone };
+      return running ? { kind: "refuse", reason: d.stopToPause(running) } : { kind: "pause" };
     case "awaitingPush":
       if (to === "active") return { kind: "continue" };
       if (running) return { kind: "refuse", reason: to === "inbox" ? d.stopToPause(running) : d.stopToFinish(running) };

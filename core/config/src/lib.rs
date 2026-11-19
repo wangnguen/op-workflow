@@ -113,6 +113,11 @@ impl Default for HandoffConfig {
 pub struct ProjectConfig {
     pub repos: Vec<String>,
     pub branch: Option<String>,
+    /// Explicit identities used for tasks with no issue link.
+    pub allowed_remotes: Vec<String>,
+    /// Issue repo identity -> local origin identities, for mirrors or migrations.
+    /// Never filled from the user's last selection.
+    pub repo_aliases: BTreeMap<String, Vec<String>>,
 }
 
 impl ProjectConfig {

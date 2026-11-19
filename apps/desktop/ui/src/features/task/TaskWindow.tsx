@@ -467,10 +467,18 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
               {t.login}
             </button>
           )}
-          <button className="btn btn--primary btn--sm" disabled={disabled} onClick={() => onAction({ type: "retry" })}>
-            <Icon name="refresh" size={12} />
-            {t.retry}
-          </button>
+          {d.error?.code === "mcp.planStale" ? (
+            <button className="btn btn--primary btn--sm" disabled={disabled}
+              onClick={() => onAction({ type: "reopen", step: "analyze" })}>
+              <Icon name="refresh" size={12} />
+              {t.reanalyze}
+            </button>
+          ) : (
+            <button className="btn btn--primary btn--sm" disabled={disabled} onClick={() => onAction({ type: "retry" })}>
+              <Icon name="refresh" size={12} />
+              {t.retry}
+            </button>
+          )}
         </>
       );
     } else if (kind === "planReview") {
