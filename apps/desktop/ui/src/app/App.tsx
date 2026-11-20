@@ -112,6 +112,7 @@ export function App() {
               selected={wsPicked}
               onSelect={setWsPicked}
               onChanged={refreshAll}
+              onOpenTask={openTask}
             />
           )}
           {tab === "sessions" && (

@@ -178,6 +178,8 @@ pub enum AfterFix {
 pub enum WorkflowEvent {
     Start,
     StepSucceeded(StepKind),
+    /// A human marked the analysis complete without leaving a plan for review.
+    AnalysisDoneByUser,
     /// Passed as "bỏ qua": an optional step with nothing to run (Kiểm tra without a command), or
     /// Review chốt when the code has not changed since Tự review (its result stands).
     StepSkipped(StepKind),
@@ -232,6 +234,8 @@ pub struct Workflow {
     /// Optional steps this task runs; the other optional steps are skipped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     uses: Vec<StepKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    disabled: Vec<StepKind>,
     /// Order of `states` on disk ([`LAYOUT`]).
     layout: u8,
 }
@@ -253,6 +257,8 @@ struct SavedWorkflow {
     fix_for: Option<StepKind>,
     #[serde(default)]
     uses: Vec<StepKind>,
+    #[serde(default)]
+    disabled: Vec<StepKind>,
     #[serde(default)]
     layout: u8,
 }
@@ -286,6 +292,7 @@ impl TryFrom<SavedWorkflow> for Workflow {
             round: s.round,
             fix_for: s.fix_for,
             uses: s.uses,
+            disabled: s.disabled,
             layout: LAYOUT,
         })
     }
@@ -331,6 +338,24 @@ impl Default for Workflow {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn workspace_selects_an_enabled_step_and_passes_a_disabled_tail() {
+    use WorkflowEvent as E;
+    let mut workflow = Workflow::new();
+    workflow.apply(E::Start).unwrap();
+    workflow.apply(E::StepSucceeded(StepKind::Intake)).unwrap();
+    assert!(workflow.select(StepKind::Harness).is_err());
+    workflow.set_enabled(StepKind::Analyze, false).unwrap();
+    workflow.set_enabled(StepKind::PushSummary, false).unwrap();
+    workflow.select(StepKind::FinalReview).unwrap();
+    workflow.apply(E::StepSkipped(StepKind::FinalReview)).unwrap();
+    assert_eq!(workflow.state_of(StepKind::Intake), StepState::Done);
+    assert_eq!(workflow.state_of(StepKind::Analyze), StepState::Skipped);
+    assert_eq!(workflow.state_of(StepKind::PushSummary), StepState::Skipped);
+    assert_eq!(workflow.phase(), Phase::AwaitingPush);
+}
+
 impl Workflow {
     pub fn new() -> Self {
         Self {
@@ -340,6 +365,7 @@ impl Workflow {
             round: 0,
             fix_for: None,
             uses: Vec::new(),
+            disabled: Vec::new(),
             layout: LAYOUT,
         }
     }
@@ -355,6 +381,66 @@ impl Workflow {
         if on && step.is_optional() {
             self.uses.push(step);
         }
+    }
+
+    pub fn enabled(&self, step: StepKind) -> bool {
+        !self.disabled.contains(&step) && (!step.is_optional() || self.uses(step))
+    }
+
+    pub fn set_enabled(&mut self, step: StepKind, on: bool) -> DomainResult<()> {
+        if step == StepKind::Intake || self.phase == Phase::NotStarted {
+            return Err(DomainError::NotCurrentStep(step));
+        }
+        if step.is_optional() {
+            self.set_uses(step, on);
+        } else {
+            self.disabled.retain(|s| *s != step);
+            if !on {
+                self.disabled.push(step);
+            }
+        }
+        if !on && self.phase == Phase::Running(step) {
+            self.run(step)?;
+        }
+        Ok(())
+    }
+
+    /// Select any enabled step without resetting the records of steps already completed.
+    /// The engine checks that no process is running before it changes the selection.
+    pub fn select(&mut self, step: StepKind) -> DomainResult<()> {
+        if step == StepKind::Intake
+            || !self.enabled(step)
+            || matches!(self.phase, Phase::NotStarted | Phase::Paused)
+        {
+            return Err(DomainError::NotCurrentStep(step));
+        }
+        if let Phase::Running(previous) = self.phase {
+            if previous != step {
+                self.set(previous, StepState::Pending);
+            }
+        }
+        self.fix_for = match step {
+            StepKind::Fix => Some(
+                self.gate_review()
+                    .filter(|s| *s == StepKind::Harness)
+                    .unwrap_or(StepKind::ReviewLocal),
+            ),
+            StepKind::FixCross => Some(
+                self.gate_review()
+                    .filter(|s| {
+                        matches!(
+                            s,
+                            StepKind::CrossReview | StepKind::BrowserTest | StepKind::FinalReview
+                        )
+                    })
+                    .unwrap_or(StepKind::CrossReview),
+            ),
+            _ => None,
+        };
+        if step == StepKind::CrossReview {
+            return self.start_cross_review();
+        }
+        self.run(step)
     }
 
     pub fn phase(&self) -> Phase {
@@ -453,6 +539,10 @@ impl Workflow {
             (Phase::Running(cur), E::StepSucceeded(step)) => {
                 self.ensure_current(cur, step)?;
                 self.on_step_succeeded(step)
+            }
+            (Phase::Running(StepKind::Analyze), E::AnalysisDoneByUser) => {
+                self.set(StepKind::Analyze, StepState::Done);
+                self.run(StepKind::Implement)
             }
             (Phase::Running(cur), E::StepSkipped(step))
                 if step.is_optional() || step == StepKind::FinalReview =>
@@ -730,11 +820,19 @@ impl Workflow {
 
     /// Move to `step`; an optional step the task does not use is skipped on the way.
     fn run(&mut self, step: StepKind) -> DomainResult<()> {
-        if step.is_optional() && !self.uses(step) {
-            self.set(step, StepState::Skipped);
+        if !self.enabled(step) {
+            if matches!(
+                self.state_of(step),
+                StepState::Pending | StepState::Running | StepState::Failed
+            ) {
+                self.set(step, StepState::Skipped);
+            }
             return match step.next() {
                 Some(next) => self.run(next),
-                None => Ok(()),
+                None => {
+                    self.phase = Phase::AwaitingPush;
+                    Ok(())
+                }
             };
         }
         self.set(step, StepState::Running);

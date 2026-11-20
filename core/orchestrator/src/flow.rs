@@ -24,6 +24,7 @@ use crate::devserver::{self, AppProcess, AppStarter, ShellStarter, Up};
 use crate::flow_mcp::{self, Outcome};
 use crate::harness;
 use crate::quotagate;
+use crate::sessions::{Sessions, StepMessage, StepReply};
 use opw_agents::ModelChoice;
 use opw_agents::claude::{self, ClaudeEvent, Denial, RunResult};
 use opw_agents::codex::{self, CodexEvent};
@@ -158,6 +159,7 @@ impl Launcher for CliLauncher {
 #[serde(rename_all = "camelCase", default)]
 struct Saved {
     workflow: Workflow,
+    workspace: bool,
     /// Code session: the analysis's, then Viết code / Sửa lỗi go on in it when the same AI
     /// runs them (`session_agent`; `None` = Claude, as every save before 6b).
     session: Option<String>,
@@ -553,6 +555,8 @@ impl HarnessState {
 #[derive(Debug)]
 struct Running {
     step: StepKind,
+    session_step: bool,
+    session_id: Option<String>,
     agent: AgentKind,
     task_id: String,
     repo: Option<String>,
@@ -723,6 +727,18 @@ pub fn step_key(step: StepKind) -> &'static str {
 
 fn step_from_key(key: &str) -> Option<StepKind> {
     StepKind::ALL.into_iter().find(|s| step_key(*s) == key)
+}
+
+fn uses_main_session(step: StepKind, agent: AgentKind) -> bool {
+    matches!(
+        step,
+        StepKind::Analyze
+            | StepKind::ReviewLocal
+            | StepKind::Fix
+            | StepKind::FixCross
+            | StepKind::PushSummary
+            | StepKind::Checks
+    ) || (step == StepKind::Implement && agent == AgentKind::Claude)
 }
 
 /// Vietnamese name of a step, as the UI shows it.
@@ -1143,6 +1159,7 @@ struct Inner {
     quota_source: Mutex<Option<QuotaSource>>,
     require_mcp: bool,
     config_path: Mutex<Option<PathBuf>>,
+    sessions: Mutex<Option<Sessions>>,
 }
 
 /// The workflow engine shared by the Tauri commands.
@@ -1211,6 +1228,7 @@ struct AiRun {
     cost: Option<f64>,
     /// Calls refused by the allow list (Claude only).
     denials: usize,
+    manual: bool,
 }
 
 /// What a step produced: the event for the state machine, one line about the result (the
@@ -1222,6 +1240,60 @@ struct Done {
 }
 
 impl Flow {
+    pub fn set_sessions(&self, sessions: Sessions) {
+        *self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sessions);
+    }
+
+    pub fn workspace(&self, ctx: &TaskCtx) -> opw_domain::session::WorkspaceFlow {
+        use opw_domain::session::{WorkspaceFlow, WorkspaceStep};
+        self.ensure(ctx);
+        let tasks = self.inner.lock_tasks();
+        let entry = &tasks[&ctx.row.wp_id];
+        let running = entry.run.as_ref().map(|r| r.step);
+        WorkspaceFlow {
+            enabled: entry.saved.workspace,
+            auto: ctx.auto(&entry.saved),
+            running,
+            session_step: entry.run.as_ref().is_some_and(|r| r.session_step),
+            gate: if entry.saved.plan_change.is_some() {
+                Some(GateKind::PlanChanged)
+            } else if let Phase::Gate(gate) = entry.saved.workflow.phase() {
+                Some(gate)
+            } else {
+                None
+            },
+            error: entry.saved.error.clone(),
+            steps: StepKind::ALL
+                .into_iter()
+                .skip(1)
+                .map(|step| WorkspaceStep {
+                    step,
+                    enabled: entry.saved.workflow.enabled(step),
+                    state: entry.saved.workflow.state_of(step),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn complete_workspace_step(&self, ctx: &TaskCtx, step: StepKind) -> Result<(), ApiError> {
+        let tasks = self.inner.lock_tasks();
+        let run = tasks
+            .get(&ctx.row.wp_id)
+            .and_then(|e| e.run.as_ref())
+            .filter(|r| r.step == step && r.session_step)
+            .ok_or_else(|| ApiError::new("step.missing", "Bước này chưa gửi vào phiên hoặc đã xong"))?;
+        let sessions = self.inner.sessions().ok_or_else(flow_missing)?;
+        let id = run
+            .session_id
+            .as_deref()
+            .ok_or_else(|| ApiError::new("step.missing", "Bước này chưa gửi vào phiên"))?;
+        sessions.complete_flow_step(id, step)
+    }
+
     pub fn set_config_path(&self, path: PathBuf) {
         *self.inner.config_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
     }
@@ -1356,6 +1428,7 @@ impl Flow {
                 quota_source: Mutex::new(None),
                 require_mcp,
                 config_path: Mutex::new(None),
+                sessions: Mutex::new(None),
             }),
         }
     }
@@ -1579,17 +1652,45 @@ impl Flow {
         self.ensure(&ctx);
         self.observe_plan(&ctx);
         if let FlowAction::Talk { text } = &action {
+            if let Some(sessions) = self.inner.sessions() {
+                if let Some(id) = sessions.task_session(ctx.row.wp_id) {
+                    sessions.send(&id, text, false)?;
+                    self.inner.log(
+                        ctx.row.wp_id,
+                        None,
+                        "info",
+                        "Đã gửi câu hỏi vào chat Workspace",
+                        true,
+                    );
+                    return Ok(());
+                }
+            }
             return self.talk(ctx, text);
         }
         let wp_id = ctx.row.wp_id;
-        let start = {
+        let claim = {
             let mut tasks = self.inner.lock_tasks();
             let entry = tasks.get_mut(&wp_id).ok_or_else(flow_missing)?;
+            let previous = matches!(action, FlowAction::RunWorkspaceStep { .. }).then(|| entry.saved.clone());
             let start = apply_action(entry, &ctx, &action, &self.inner.store, self.inner.require_mcp)?;
-            if !matches!(action, FlowAction::Run | FlowAction::Retry) || start {
+            if !start && !matches!(action, FlowAction::Run | FlowAction::Retry) {
                 self.inner.persist(wp_id, entry);
             }
-            start
+            if start {
+                match self.inner.claim_in(&mut tasks, &ctx) {
+                    Ok((claim, text)) => Some((claim, text)),
+                    Err(error) => {
+                        if let Some(saved) = previous {
+                            if let Some(entry) = tasks.get_mut(&wp_id) {
+                                entry.saved = saved;
+                            }
+                        }
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            }
         };
         // the task left the question gate another way: nothing waits on its Chrome window now
         let left = match &action {
@@ -1600,8 +1701,10 @@ impl Flow {
         if left {
             self.inner.close_browser(wp_id);
         }
-        if start {
-            let claim = self.inner.claim(&ctx)?;
+        if let Some((claim, text)) = claim {
+            if let Ok(store) = self.inner.store.lock() {
+                let _ = store.log_event(&now(), Some(wp_id), "flow.info", Some(&text));
+            }
             let inner = self.inner.clone();
             std::thread::Builder::new()
                 .name(format!("opw-flow-{wp_id}"))
@@ -2275,6 +2378,7 @@ pub(crate) fn chat_item(i: transcript::Item) -> ChatItem {
             K::End => ChatKind::End,
             K::Error => ChatKind::Error,
         },
+        step: None,
         text: i.text,
         tool: i.tool,
         output: i.output,
@@ -2407,6 +2511,10 @@ fn plan_stamp(ctx: &TaskCtx) -> Option<String> {
 }
 
 fn require_current_plan(saved: &Saved, ctx: &TaskCtx) -> Result<(), FlowError> {
+    // A Workspace flow can begin at any step. There is no approved plan to invalidate yet.
+    if saved.workspace && saved.verified_plan.is_none() {
+        return Ok(());
+    }
     if saved.verified_plan.is_some() && saved.verified_plan == plan_stamp(ctx) {
         return Ok(());
     }
@@ -2577,6 +2685,8 @@ fn apply_action(
                     ..
                 }
                 | FlowAction::SetAuto { .. }
+                | FlowAction::SetWorkspaceFlow { .. }
+                | FlowAction::SetWorkspaceStep { .. }
                 | FlowAction::Stop
         )
     {
@@ -2950,6 +3060,45 @@ fn apply_action(
             );
             push_log(entry, Some(*step), "info", &text);
             Ok(false)
+        }
+        FlowAction::SetWorkspaceFlow { on } => {
+            if running {
+                return Err(not_now("đổi flow khi có bước đang chạy"));
+            }
+            entry.saved.workspace = *on;
+            if !on {
+                entry.saved.auto = Some(false);
+            }
+            Ok(false)
+        }
+        FlowAction::SetWorkspaceStep { step, on } => {
+            if running || !entry.saved.workspace || entry.saved.finished {
+                return Err(not_now("bật/tắt bước"));
+            }
+            entry
+                .saved
+                .workflow
+                .set_enabled(*step, *on)
+                .map_err(|e| ApiError::new("flow.invalid", e.to_string()))?;
+            if !entry.saved.picked.contains(step) {
+                entry.saved.picked.push(*step);
+            }
+            Ok(false)
+        }
+        FlowAction::RunWorkspaceStep { step } => {
+            if running || !entry.saved.workspace || entry.saved.finished {
+                return Err(not_now("chạy bước"));
+            }
+            if *step == StepKind::Implement && phase == Phase::Gate(GateKind::PlanReview) {
+                return apply_action(entry, ctx, &FlowAction::ApprovePlan, store, require_mcp);
+            }
+            entry
+                .saved
+                .workflow
+                .select(*step)
+                .map_err(|e| ApiError::new("flow.invalid", e.to_string()))?;
+            entry.saved.error = None;
+            Ok(true)
         }
         FlowAction::SelfCode => {
             if phase != Phase::Gate(GateKind::PlanReview) {
@@ -3597,18 +3746,27 @@ impl Inner {
         }
     }
 
-    /// Mark the current step as running. Refuses while another task runs a step in the same repo.
-    fn claim(&self, ctx: &TaskCtx) -> Result<Claim, ApiError> {
-        let mut tasks = self.lock_tasks();
-        let (claim, text) = self.claim_in(&mut tasks, ctx)?;
-        drop(tasks);
-        if let Ok(store) = self.store.lock() {
-            let _ = store.log_event(&now(), Some(ctx.row.wp_id), "flow.info", Some(&text));
-        }
-        Ok(claim)
+    fn sessions(&self) -> Option<Sessions> {
+        self.sessions.lock().ok()?.clone()
     }
 
-    /// [`Inner::claim`] with the tasks lock already held; also returns the log line to keep.
+    /// Steps that run in the task's Workspace session leave its id as the task's Claude session,
+    /// so a step with its own `claude -p` (Harness, a cut run) may resume it. Two processes must
+    /// not write one transcript while the chat may hold it: that run continues in a fork.
+    fn fork_workspace_session(&self, wp_id: u64, job: &mut Job) {
+        let Some(workspace) = self.sessions().and_then(|s| s.task_session(wp_id)) else {
+            return;
+        };
+        let resumes = job
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--resume" && w[1] == workspace);
+        if resumes && !job.args.iter().any(|a| a == "--fork-session") {
+            job.args.push("--fork-session".into());
+        }
+    }
+
+    /// Claims a step under the tasks lock and returns the log line to keep.
     fn claim_in(&self, tasks: &mut HashMap<u64, Entry>, ctx: &TaskCtx) -> Result<(Claim, String), ApiError> {
         if self.quitting.load(Ordering::Relaxed) {
             return Err(ApiError::new(
@@ -3648,12 +3806,30 @@ impl Inner {
             }
         }
         let agent = ctx.agent_for(step);
+        let sessions = self.sessions();
+        let session_step = sessions.is_some() && uses_main_session(step, agent) && step != StepKind::Checks;
+        // a step sent into the task's session (or Kiểm tra, whose fixes go there) needs it free;
+        // Review chéo, Harness, Test trình duyệt… run in their own process and do not wait for it
+        if session_step || step == StepKind::Checks {
+            if let Some(s) = &sessions {
+                if let Some(id) = s.task_session(ctx.row.wp_id) {
+                    s.flow_ready(&id)?;
+                }
+            }
+        }
+        let agent = if session_step { AgentKind::Claude } else { agent };
         let choice = model_choice(step, &ctx.config);
-        let mode = permission_mode(step, &ctx.config).filter(|_| agent != AgentKind::Shell);
+        let mode = if session_step {
+            step_config(step, &ctx.config.steps).and_then(|c| c.permission_mode.clone())
+        } else {
+            permission_mode(step, &ctx.config).filter(|_| agent != AgentKind::Shell)
+        };
         let command = command_label(step, agent, ctx.repo().as_deref());
         let stop = Arc::new(AtomicBool::new(false));
         entry.run = Some(Running {
             step,
+            session_step,
+            session_id: None,
             agent,
             task_id: ctx.row.display_id.clone(),
             repo,
@@ -3848,7 +4024,7 @@ impl Inner {
         let go_on = entry.saved.plan_change.is_none()
             && kind == "ok"
             && match entry.saved.workflow.phase() {
-                Phase::Running(StepKind::Checks) => true,
+                Phase::Running(StepKind::Checks) => !entry.saved.workspace || ctx.auto(&entry.saved),
                 // after a fix of what the harness found, the app runs it again: no tokens either
                 Phase::Running(StepKind::Harness) if rerun_harness => true,
                 Phase::Running(_) => after_checks || ctx.auto(&entry.saved),
@@ -4334,6 +4510,7 @@ impl Inner {
                 add_to_prompt(&mut job, &prompts::talk_carry(&text));
             }
         }
+        self.fork_workspace_session(ctx.row.wp_id, &mut job);
         let mcp = self.attach_mcp(ctx, claim, &mut job)?;
         let job = &job;
         let stop: &AtomicBool = &claim.stop;
@@ -4595,6 +4772,18 @@ impl Inner {
 
     /// Run the step's AI on `job` (built for that AI); text, session and cost come back alike.
     fn run_ai(&self, ctx: &TaskCtx, step: StepKind, job: &Job, claim: &Claim) -> Result<AiRun, FlowError> {
+        if uses_main_session(step, claim.agent) && ctx.repo().as_ref() == Some(&job.cwd) {
+            if let Some(sessions) = self.sessions() {
+                let reply = self.run_main_session(&sessions, ctx, step, job, claim)?;
+                return Ok(AiRun {
+                    text: reply.result.text,
+                    session: reply.result.session_id,
+                    cost: Some(reply.result.cost_usd),
+                    denials: reply.result.denials.len(),
+                    manual: reply.manual,
+                });
+            }
+        }
         if claim.agent == AgentKind::Codex {
             let (text, thread) = self.run_codex(ctx, step, job, claim)?;
             return Ok(AiRun {
@@ -4602,6 +4791,7 @@ impl Inner {
                 session: thread,
                 cost: None,
                 denials: 0,
+                manual: false,
             });
         }
         let r = self.run_claude(ctx, step, job, claim)?;
@@ -4610,7 +4800,95 @@ impl Inner {
             session: r.session_id,
             cost: Some(r.cost_usd),
             denials: r.denials.len(),
+            manual: false,
         })
+    }
+
+    fn run_main_session(
+        &self,
+        sessions: &Sessions,
+        ctx: &TaskCtx,
+        step: StepKind,
+        job: &Job,
+        claim: &Claim,
+    ) -> Result<StepReply, FlowError> {
+        let repo = ctx
+            .row
+            .repo
+            .as_deref()
+            .ok_or_else(|| flow_error("repo.missing", "Task chưa có repo"))?;
+        let id = sessions
+            .ensure_task(ctx.row.wp_id, repo)
+            .map_err(|e| flow_error(&e.code, e.message))?
+            .id;
+        // "Chạy tiếp" after Dừng: the session already holds the step, only the user's words go
+        let go_on = if claim.nested {
+            None
+        } else {
+            self.take_go_on(ctx.row.wp_id, step, AgentKind::Claude)
+        };
+        let prompt = match &go_on {
+            Some(g) if step == StepKind::Analyze => prompts::go_on_analysis(&g.note),
+            Some(g) => prompts::go_on(&g.note, None),
+            None => job.stdin.clone().unwrap_or_else(|| {
+                job.args
+                    .windows(2)
+                    .find(|p| p[0] == "-p" && p[1].starts_with('/'))
+                    .map_or_else(|| prompt_of(job), |p| p[1].clone())
+            }),
+        };
+        let prompt = if claim.nested || prompt.starts_with('/') {
+            prompt
+        } else {
+            format!(
+                "{prompt}\n\nThis is the Workspace step \"{}\". When you finish it, look up the op_workflow MCP tools with ToolSearch if needed. Call get_active_step, then complete_step with its returned id and your summary.",
+                step_label(step)
+            )
+        };
+        let run_id = self.begin_run(ctx, step, "claude", None);
+        if let Some(r) = self
+            .lock_tasks()
+            .get_mut(&ctx.row.wp_id)
+            .and_then(|e| e.run.as_mut())
+        {
+            r.session_id = Some(id.clone());
+        }
+        let reply = sessions
+            .run_flow_step(
+                &id,
+                StepMessage {
+                    step,
+                    prompt: &prompt,
+                    mode: claim
+                        .mode
+                        .as_deref()
+                        .filter(|m| opw_domain::session::MODES.contains(m)),
+                    model: claim.choice.model.as_deref(),
+                    wait_for_report: !claim.nested,
+                },
+                &claim.stop,
+                job.timeout,
+            )
+            .map_err(|e| flow_error(&e.code, e.message));
+        if let (Some(run_id), Ok(store)) = (run_id, self.store.lock()) {
+            let r = reply.as_ref().ok().map(|r| &r.result);
+            let _ = store.end_step_run(
+                run_id,
+                &StepRunEnd {
+                    state: if reply.is_ok() { "done" } else { "failed" },
+                    session_id: Some(&id),
+                    ended_at: &now(),
+                    cost_usd: r.map(|r| r.cost_usd),
+                    tokens_in: r.map(|r| r.tokens_in),
+                    tokens_out: r.map(|r| r.tokens_out),
+                    ..StepRunEnd::default()
+                },
+            );
+        }
+        if let Ok(reply) = &reply {
+            self.log(ctx.row.wp_id, Some(step), "info", &reply.summary, true);
+        }
+        reply
     }
 
     fn round_of(&self, wp_id: u64) -> u8 {
@@ -5250,7 +5528,11 @@ fn run_checks(
         // the AI of Sửa lỗi fixes them, in its code session when it has one
         let fixer = Claim {
             step,
-            agent: agent_for(StepKind::Fix, &ctx.config),
+            agent: if inner.sessions().is_some() {
+                AgentKind::Claude
+            } else {
+                agent_for(StepKind::Fix, &ctx.config)
+            },
             stop: claim.stop.clone(),
             choice: model_choice(StepKind::Fix, &ctx.config),
             mode: permission_mode(StepKind::Fix, &ctx.config),
@@ -6384,6 +6666,13 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
             };
             let r = inner.run_ai(ctx, step, &analyze, claim)?;
             let answer = text::plan_answer(&r.text);
+            if r.manual && answer.plan.is_empty() {
+                return Ok(Done {
+                    event: E::AnalysisDoneByUser,
+                    note: "Bạn đánh dấu xong trong Workspace".into(),
+                    cost: r.cost,
+                });
+            }
             if answer.plan.is_empty() {
                 return Err(flow_error(
                     "plan.empty",
@@ -6393,7 +6682,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     ),
                 ));
             }
-            if inner.require_mcp {
+            if inner.require_mcp && !r.manual {
                 validate_analysis(&answer.plan, &r.text)?;
             }
             write_task_file(ctx, PLAN_FILE, &answer.plan)?;
@@ -6474,6 +6763,11 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         StepKind::Implement => {
             let plan = ctx
                 .read(PLAN_FILE)
+                .or_else(|| {
+                    inner
+                        .sessions()
+                        .map(|_| "Use the task brief and the decisions in this conversation.".into())
+                })
                 .ok_or_else(|| flow_error("plan.missing", "Không đọc được plan.md"))?;
             let allowed = ctx.repo_config().allow_bash;
             let shell = shell_of(claim, &allowed);
@@ -6570,11 +6864,20 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     "claude",
                 )
             };
-            let r = inner.run_claude(ctx, step, &job(Provider::Claude, cl(args), stdin), claim)?;
+            let job = job(Provider::Claude, cl(args), stdin);
+            let shared = inner.sessions().filter(|_| step == StepKind::ReviewLocal);
+            let (r, manual) = if let Some(sessions) = shared {
+                let reply = inner.run_main_session(&sessions, ctx, step, &job, claim)?;
+                (reply.result, reply.manual)
+            } else {
+                (inner.run_claude(ctx, step, &job, claim)?, false)
+            };
             if resume.is_some() {
                 set_session(&r.session_id);
             }
-            let raw = text::findings_from_text(&r.text).ok_or_else(unreadable_review)?;
+            let raw = text::findings_from_text(&r.text)
+                .or_else(|| manual.then(Vec::new))
+                .ok_or_else(unreadable_review)?;
             save_review_notes(ctx, step, &r.text);
             let findings = inner.merge(ctx, step, 0, source, &raw)?;
             let (event, note) = review_event(step, &findings, &raw);
@@ -6859,7 +7162,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                 )
             };
             let r = inner.run_ai(ctx, step, &push, claim)?;
-            if r.text.trim().is_empty() {
+            if r.text.trim().is_empty() && !r.manual {
                 return Err(flow_error(
                     "push.empty",
                     format!(
@@ -6868,7 +7171,9 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     ),
                 ));
             }
-            write_task_file(ctx, PUSH_FILE, &r.text)?;
+            if !r.text.trim().is_empty() {
+                write_task_file(ctx, PUSH_FILE, &r.text)?;
+            }
             Ok(Done {
                 event: E::StepSucceeded(StepKind::PushSummary),
                 note: "đã viết commit message + PR description".into(),

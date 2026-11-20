@@ -178,7 +178,9 @@ impl SessionLog {
         {
             return;
         }
-        self.push(Item::new(ItemKind::User, cut(&text, TEXT_MAX)));
+        let mut item = Item::new(ItemKind::User, cut(&text, TEXT_MAX));
+        item.message_id = v["uuid"].as_str().map(str::to_owned);
+        self.push(item);
     }
 
     fn tool_result(&mut self, block: &Value) {

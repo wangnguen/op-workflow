@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::view::ChatItem;
+use crate::view::{ChatItem, FlowError, GateKind};
+use crate::workflow::{StepKind, StepState};
 
 /// What a session is for. Later parts add the separate review, harness and browser sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +90,26 @@ pub struct WorkspaceTask {
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFlow {
+    pub enabled: bool,
+    pub auto: bool,
+    pub running: Option<StepKind>,
+    pub session_step: bool,
+    pub gate: Option<GateKind>,
+    pub error: Option<FlowError>,
+    pub steps: Vec<WorkspaceStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceStep {
+    pub step: StepKind,
+    pub enabled: bool,
+    pub state: StepState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

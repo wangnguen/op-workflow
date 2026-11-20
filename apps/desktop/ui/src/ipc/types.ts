@@ -844,6 +844,7 @@ export type ChatKind = "prompt" | "user" | "text" | "thinking" | "tool" | "end" 
 
 /** One item of the Chat tab. */
 export interface ChatItem {
+  step?: StepKind;
   kind: ChatKind;
   /** the prompt, the message, the tool's input (command, path) or the error */
   text: string;
@@ -1038,6 +1039,9 @@ export type FlowAction =
   | { type: "answerQuestion"; id: string; answer?: string; aiDecides?: boolean }
   /** turn Harness / Test trình duyệt on or off for this task, before the flow gets there */
   | { type: "setUses"; step: StepKind; on: boolean }
+  | { type: "setWorkspaceFlow"; on: boolean }
+  | { type: "setWorkspaceStep"; step: StepKind; on: boolean }
+  | { type: "runWorkspaceStep"; step: StepKind }
   | { type: "selfCodeDone" }
   /** Test trình duyệt: the dev server the app starts (remembered for the repo); empty url = none */
   | { type: "setDevServer"; url: string; commands: DevCommand[]; howTo?: string }
@@ -1123,6 +1127,16 @@ export interface WorkspaceTask {
   project: string;
   repo?: string;
   branch?: string;
+}
+
+export interface WorkspaceFlow {
+  enabled: boolean;
+  auto: boolean;
+  running: StepKind | null;
+  sessionStep: boolean;
+  gate: GateKind | null;
+  error: { code: string; message: string } | null;
+  steps: { step: StepKind; enabled: boolean; state: StepState }[];
 }
 
 export interface WorkspaceSnapshot {

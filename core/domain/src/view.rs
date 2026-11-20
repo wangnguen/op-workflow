@@ -1386,6 +1386,8 @@ pub enum ChatKind {
 #[serde(rename_all = "camelCase")]
 pub struct ChatItem {
     pub kind: ChatKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<StepKind>,
     /// The prompt, the message, the tool's input (command, path) or the error.
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1581,7 +1583,9 @@ pub enum FlowAction {
     /// Brief changed after the plan was approved: keep the plan and go on.
     KeepPlan,
     /// Error gate: ask the AI about the failure (read only); its answer joins `TaskDetail.talk`.
-    Talk { text: String },
+    Talk {
+        text: String,
+    },
     /// The task's repo folder or origin changed since Bắt đầu: bind the task to it as it is now
     /// and run the step again.
     UseCurrentRepo,
@@ -1600,7 +1604,9 @@ pub enum FlowAction {
     /// Plan gate: the AI codes the plan.
     ApprovePlan,
     /// Plan gate: analyze again with this feedback.
-    RejectPlan { feedback: String },
+    RejectPlan {
+        feedback: String,
+    },
     /// Plan gate: the user codes by hand.
     SelfCode,
     /// Plan gate: answer one of the analysis's questions (`answer`), or leave it to the AI.
@@ -1614,7 +1620,21 @@ pub enum FlowAction {
     },
     /// Turn an optional step (Harness, Test trình duyệt) on or off for this task, until the flow
     /// gets there.
-    SetUses { step: StepKind, on: bool },
+    SetUses {
+        step: StepKind,
+        on: bool,
+    },
+    /// Show or hide the task's optional workflow in Workspace.
+    SetWorkspaceFlow {
+        on: bool,
+    },
+    SetWorkspaceStep {
+        step: StepKind,
+        on: bool,
+    },
+    RunWorkspaceStep {
+        step: StepKind,
+    },
     /// Test trình duyệt: the dev server the app starts for this task, remembered for the repo
     /// too. An empty URL clears both (the AI starts the app itself again).
     #[serde(rename_all = "camelCase")]
@@ -1636,9 +1656,13 @@ pub enum FlowAction {
     /// The user finished coding by hand.
     SelfCodeDone,
     /// Findings gate: fix the picked findings (`fix`), or go on without fixing.
-    PickFindings { fix: bool },
+    PickFindings {
+        fix: bool,
+    },
     /// After-fix gate: the answer to "Review chéo lại?".
-    AfterFix { choice: AfterFix },
+    AfterFix {
+        choice: AfterFix,
+    },
     /// "Bỏ khỏi thư viện": take the harness this task kept out of the repo's harness library.
     DropHarness,
     /// Write the push summary again (optionally for another issue number).
@@ -1662,7 +1686,9 @@ pub enum FlowAction {
         note: Option<String>,
     },
     /// Turn auto-advance on/off for this task.
-    SetAuto { on: bool },
+    SetAuto {
+        on: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

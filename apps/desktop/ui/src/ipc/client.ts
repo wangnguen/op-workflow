@@ -71,6 +71,8 @@ import type {
   TerminalFrame,
   TerminalKind,
   WorkspaceSnapshot,
+  WorkspaceFlow,
+  StepKind,
   CloseChoice,
   AlertView,
   ApiError,
@@ -131,6 +133,47 @@ export async function controlTerminal(
   id: string, kind: TerminalKind, view: string, action: TerminalAction,
 ): Promise<void> {
   if (isTauri()) await invoke("terminal_control", { id, kind, view, action });
+}
+
+const previewFlows = new Map<number, WorkspaceFlow>();
+
+export async function getWorkspaceFlow(wpId: number): Promise<WorkspaceFlow> {
+  if (isTauri()) return invoke("workspace_flow", { wpId });
+  let view = previewFlows.get(wpId);
+  if (!view) {
+    const detail = mockTaskDetail(wpId);
+    view = {
+      enabled: false, auto: detail.autoAdvance, running: null, sessionStep: false,
+      gate: null, error: null,
+      steps: detail.steps.filter((s) => s.kind !== "intake").map((s) => ({
+        step: s.kind, enabled: !["harness", "browserTest"].includes(s.kind), state: s.state,
+      })),
+    };
+    previewFlows.set(wpId, view);
+  }
+  return view;
+}
+
+export async function workspaceFlowAction(wpId: number, action: FlowAction): Promise<WorkspaceFlow> {
+  if (isTauri()) {
+    await flowAction(wpId, action);
+  } else {
+    const view = await getWorkspaceFlow(wpId);
+    if (action.type === "setWorkspaceFlow") previewFlows.set(wpId, { ...view, enabled: action.on });
+    if (action.type === "setAuto") previewFlows.set(wpId, { ...view, auto: action.on });
+    if (action.type === "setWorkspaceStep" || action.type === "runWorkspaceStep") {
+      previewFlows.set(wpId, {
+        ...view,
+        steps: view.steps.map((s) => s.step !== action.step ? s : action.type === "setWorkspaceStep"
+          ? { ...s, enabled: action.on } : { ...s, state: "done" }),
+      });
+    }
+  }
+  return getWorkspaceFlow(wpId);
+}
+
+export async function completeWorkspaceStep(wpId: number, step: StepKind): Promise<void> {
+  if (isTauri()) await invoke("workspace_step_done", { wpId, step });
 }
 
 export const getAppInfo = (): Promise<AppInfo> => call("app_info", mockAppInfo);

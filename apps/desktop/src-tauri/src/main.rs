@@ -150,6 +150,8 @@ fn main() {
             window_api::set_on_close,
             session_api::workspace_snapshot,
             session_api::workspace_repos,
+            session_api::workspace_flow,
+            session_api::workspace_step_done,
             session_api::session_new,
             session_api::session_chat,
             session_api::session_send,

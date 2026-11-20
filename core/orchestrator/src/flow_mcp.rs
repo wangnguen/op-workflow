@@ -198,7 +198,19 @@ struct Session {
     context: Value,
     repo: PathBuf,
     report: Mutex<Report>,
+    active: Option<ActiveStep>,
 }
+
+#[derive(Default)]
+pub(crate) struct SessionStep {
+    pub id: String,
+    pub name: String,
+    pub summary: Option<String>,
+    pub manual: bool,
+}
+
+pub(crate) type ActiveStep = Arc<Mutex<Option<SessionStep>>>;
+pub(crate) const SESSION_INSTRUCTIONS: &str = "A Workspace step may be sent in this conversation, including a /review-local or /push-summary command. When you have actually finished the requested work, use the op_workflow MCP tool get_active_step, then complete_step with the id it returned and a brief result. Wait for the user in the conversation when you need input. Do not report completion for ordinary conversation with no active step.";
 
 #[derive(Default)]
 struct Report {
@@ -214,6 +226,14 @@ pub(crate) struct Run {
 
 impl Run {
     pub fn start(step: StepKind, repo: &Path, context: Value) -> io::Result<Self> {
+        Self::open(step, repo, context, None)
+    }
+
+    pub fn workspace(repo: &Path, active: ActiveStep) -> io::Result<Self> {
+        Self::open(StepKind::Intake, repo, Value::Null, Some(active))
+    }
+
+    fn open(step: StepKind, repo: &Path, context: Value, active: Option<ActiveStep>) -> io::Result<Self> {
         let repo = std::fs::canonicalize(repo)?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
@@ -235,6 +255,7 @@ impl Run {
             context,
             repo,
             report: Mutex::default(),
+            active,
         });
         let router = Router::new()
             .route("/mcp", axum::routing::any(handle))
@@ -318,6 +339,22 @@ impl Run {
             }
         }
     }
+
+    pub fn configure_workspace(&self, args: &mut Vec<String>) {
+        let url = format!("http://{}/mcp", self.session.host);
+        args.extend([
+            "--mcp-config".into(),
+            json!({"mcpServers": {NAME: {
+                "type": "http", "url": url,
+                "headers": {"Authorization": format!("Bearer ${{{TOKEN_ENV}}}")}
+            }}})
+            .to_string(),
+            "--allowedTools".into(),
+            TOOL_PREFIX.into(),
+            "--append-system-prompt".into(),
+            SESSION_INSTRUCTIONS.into(),
+        ]);
+    }
 }
 
 impl Drop for Run {
@@ -381,6 +418,14 @@ fn rpc(s: &Session, request: &Value) -> Option<Value> {
     };
     let id = id?;
     let params = &request["params"];
+    if let Some(active) = &s.active {
+        if let Some(result) = workspace_rpc(active, method, params) {
+            return Some(json!({"jsonrpc":"2.0","id":id,"result":result}));
+        }
+        if method.starts_with("tools/") {
+            return Some(error(id, -32602, "Unknown tool"));
+        }
+    }
     let result = match method {
         "initialize" => {
             let version = params["protocolVersion"]
@@ -426,6 +471,48 @@ fn rpc(s: &Session, request: &Value) -> Option<Value> {
         _ => return Some(error(id, -32601, "Method not found")),
     };
     Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
+}
+
+fn workspace_rpc(active: &ActiveStep, method: &str, params: &Value) -> Option<Value> {
+    match method {
+        "tools/list" => Some(json!({"tools":[
+            {"name":"get_active_step","description":"Read the current Workspace step and its completion id.",
+                "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
+                "annotations":{"readOnlyHint":true}},
+            {"name":"complete_step","description":"Report that the work requested by the current Workspace step is done.",
+                "inputSchema":{"type":"object","required":["id","summary"],"additionalProperties":false,
+                "properties":{"id":{"type":"string"},"summary":{"type":"string","minLength":1,"maxLength":2000}}}}
+        ]})),
+        "tools/call" => {
+            let mut active = active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let reply = match params["name"].as_str()? {
+                "get_active_step" => {
+                    let result = active.as_ref().map(|s| json!({"id":s.id,"step":s.name}));
+                    tool(json!({"active":result}), false)
+                }
+                "complete_step" => {
+                    let a = &params["arguments"];
+                    let step = active
+                        .as_mut()
+                        .filter(|s| a["id"].as_str() == Some(&s.id) && s.summary.is_none() && !s.manual);
+                    let summary = a["summary"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty() && s.chars().count() <= 2000);
+                    match (step, summary) {
+                        (Some(s), Some(summary)) => {
+                            s.summary = Some(summary.to_owned());
+                            tool(json!({"recorded":true}), false)
+                        }
+                        _ => tool(json!("No matching active step or invalid summary"), true),
+                    }
+                }
+                _ => return None,
+            };
+            Some(reply)
+        }
+        _ => None,
+    }
 }
 
 fn tool(value: Value, is_error: bool) -> Value {
@@ -525,4 +612,36 @@ fn valid_source(repo: &Path, source: &Source) -> bool {
                 .nth(source.line - 1)
                 .is_some_and(|line| line.is_ok())
         })
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    #[test]
+    fn a_completion_cannot_finish_a_newer_step_or_be_replayed() {
+        let active = Arc::new(Mutex::new(Some(SessionStep {
+            id: "current".into(),
+            name: "implement".into(),
+            ..SessionStep::default()
+        })));
+        let report = |id| {
+            workspace_rpc(
+                &active,
+                "tools/call",
+                &json!({
+                    "name":"complete_step","arguments":{"id":id,"summary":"Implemented and checked"}
+                }),
+            )
+            .unwrap()["isError"]
+                .as_bool()
+        };
+        assert_eq!(report("previous"), Some(true));
+        assert_eq!(report("current"), Some(false));
+        assert_eq!(report("current"), Some(true));
+        assert_eq!(
+            active.lock().unwrap().as_ref().unwrap().summary.as_deref(),
+            Some("Implemented and checked")
+        );
+    }
 }

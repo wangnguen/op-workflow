@@ -48,6 +48,7 @@ pub enum ItemKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub kind: ItemKind,
+    pub message_id: Option<String>,
     /// The prompt, the message, the tool's input (command, path) or the error.
     pub text: String,
     pub tool: Option<String>,
@@ -65,6 +66,7 @@ impl Item {
     pub(crate) fn new(kind: ItemKind, text: String) -> Self {
         Self {
             kind,
+            message_id: None,
             text,
             tool: None,
             output: None,

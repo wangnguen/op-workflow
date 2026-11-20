@@ -4,6 +4,7 @@
 
 use opw_domain::session::{AskAnswer, NewSession, SessionChat, SessionView, WorkspaceSnapshot};
 use opw_domain::view::ApiError;
+use opw_domain::workflow::StepKind;
 use opw_orchestrator::AppService;
 use tauri::{AppHandle, Emitter, State};
 
@@ -27,6 +28,23 @@ pub fn workspace_snapshot(service: State<'_, AppService>) -> WorkspaceSnapshot {
 #[tauri::command(async)]
 pub fn workspace_repos(service: State<'_, AppService>) -> Vec<String> {
     service.workspace_repos()
+}
+
+#[tauri::command(async)]
+pub fn workspace_flow(
+    wp_id: u64,
+    service: State<'_, AppService>,
+) -> Result<opw_domain::session::WorkspaceFlow, ApiError> {
+    service.workspace_flow(wp_id)
+}
+
+#[tauri::command(async)]
+pub fn workspace_step_done(
+    wp_id: u64,
+    step: StepKind,
+    service: State<'_, AppService>,
+) -> Result<(), ApiError> {
+    service.workspace_step_done(wp_id, step)
 }
 
 #[tauri::command(async)]

@@ -1,5 +1,5 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { vi } from "../../i18n/vi";
+import { Fragment, lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { stepLabel, vi } from "../../i18n/vi";
 import {
   answerSession,
   errorCode,
@@ -22,6 +22,7 @@ import type { Option } from "../settings/stepChoice";
 import { AskCard } from "./AskCard";
 import { repoName } from "./chatState";
 import { useSessionChat } from "./useSessionChat";
+import { WorkspaceSteps } from "./WorkspaceSteps";
 
 const TerminalPane = lazy(() => import("./TerminalPane").then((m) => ({ default: m.TerminalPane })));
 
@@ -46,9 +47,10 @@ interface Props {
   /** the session was taken off the list */
   onHidden: () => void;
   onChanged: () => void;
+  onOpenTask: (wpId: number, tab: string) => void;
 }
 
-export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Props) {
+export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOpenTask }: Props) {
   const { chat, error, reload, setSession } = useSessionChat(sessionId);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState<string>();
@@ -169,6 +171,18 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
 
   return (
     <div className="ws-chat">
+      {task && (
+        <WorkspaceSteps key={task.wpId} wpId={task.wpId} session={session}
+          beforeRun={async () => {
+            if (!sessionId) {
+              const created = await newSession({ wpId: task.wpId });
+              if (draftMode) await setSessionMode(created.id, draftMode);
+              onCreated(created.id);
+            }
+            setView(undefined);
+          }}
+          onChanged={onChanged} onOpenTask={onOpenTask} />
+      )}
       <div className="ws-tabs" role="group" aria-label={ws.views}>
         <button className="btn btn--sm" aria-pressed={tab === "chat"} onClick={() => switchTab("chat")}>
           {ws.tabChat}
@@ -293,7 +307,12 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
             <p className="ws-chat-empty dim">{task ? t.draftTask(task.taskId) : t.draftFree}</p>
           )}
           {chat && chat.dropped > 0 && <p className="faint">{t.dropped(chat.dropped)}</p>}
-          {chat?.items.map((item, i) => <ChatItemView key={i} item={item} />)}
+          {chat?.items.map((item, i) => (
+            <Fragment key={i}>
+              {item.step && <span className="chip ws-step-label">{stepLabel[item.step]}</span>}
+              <ChatItemView item={item} />
+            </Fragment>
+          ))}
           {chat?.partial && (
             <div className="chat-item chat-text is-partial">
               <Markdown text={chat.partial} className="task-md" />

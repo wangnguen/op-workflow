@@ -274,6 +274,9 @@ impl AppService {
             sessions.start_janitor();
             sessions
         });
+        if let (Some(flow), Some(sessions)) = (&flow, &sessions) {
+            flow.set_sessions(sessions.clone());
+        }
         let updater = Updater::start(config.update.clone(), CORE_VERSION);
         Self {
             config: Mutex::new(config),
@@ -1170,6 +1173,17 @@ impl AppService {
     pub fn open_resume(&self, wp_id: u64, run_id: i64) -> Result<(), ApiError> {
         let (ctx, flow) = self.task_ctx(wp_id)?;
         let (repo, provider, session) = flow.resume_target(&ctx, run_id)?;
+        if provider == Provider::Claude
+            && self
+                .sessions
+                .as_ref()
+                .is_some_and(|s| s.task_session(wp_id).as_deref() == Some(session.as_str()))
+        {
+            return Err(ApiError::new(
+                "session.workspace",
+                "Mở phiên chính trong Workspace rồi chọn Terminal của phiên hoặc Mở trong VS Code",
+            ));
+        }
         let (exe, flag, name) = match provider {
             Provider::Claude => (opw_agents::cli::find_claude(), "--resume", "claude"),
             Provider::Codex => (opw_agents::cli::find_codex(), "resume", "codex"),
@@ -2241,7 +2255,7 @@ impl AppService {
             let repo = row.repo.ok_or_else(|| {
                 ApiError::new("session.repo", "Task chưa có repo: bấm Bắt đầu làm việc trước")
             })?;
-            return sessions.create(Some(wp_id), &repo);
+            return sessions.ensure_task(wp_id, &repo);
         }
         let repo = req.repo.as_deref().map(str::trim).unwrap_or_default();
         if repo.is_empty() || !opw_config::expand_home(repo).is_dir() {
@@ -2255,6 +2269,16 @@ impl AppService {
 
     pub fn session_chat(&self, id: &str) -> Result<SessionChat, ApiError> {
         self.sessions()?.chat(id)
+    }
+
+    pub fn workspace_flow(&self, wp_id: u64) -> Result<opw_domain::session::WorkspaceFlow, ApiError> {
+        let (ctx, flow) = self.task_ctx(wp_id)?;
+        Ok(flow.workspace(&ctx))
+    }
+
+    pub fn workspace_step_done(&self, wp_id: u64, step: StepKind) -> Result<(), ApiError> {
+        let (ctx, flow) = self.task_ctx(wp_id)?;
+        flow.complete_workspace_step(&ctx, step)
     }
 
     pub fn session_send(&self, id: &str, text: &str, force: bool) -> Result<SessionView, ApiError> {

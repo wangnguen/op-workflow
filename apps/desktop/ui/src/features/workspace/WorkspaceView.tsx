@@ -13,11 +13,12 @@ interface Props {
   selected: Selection | undefined;
   onSelect: (s: Selection | undefined) => void;
   onChanged: () => void;
+  onOpenTask: (wpId: number, tab: string) => void;
 }
 
 /** Where the work happens (PLAN.md §5): the tree of tasks and sessions, and the chat of the one
  *  picked. */
-export function WorkspaceView({ snapshot, selected, onSelect, onChanged }: Props) {
+export function WorkspaceView({ snapshot, selected, onSelect, onChanged, onOpenTask }: Props) {
   const [creating, setCreating] = useState(false);
   const data = snapshot ?? { tasks: [], sessions: [] };
   const session = selected?.kind === "session" ? data.sessions.find((s) => s.id === selected.id) : undefined;
@@ -48,6 +49,7 @@ export function WorkspaceView({ snapshot, selected, onSelect, onChanged }: Props
               onChanged();
             }}
             onChanged={onChanged}
+            onOpenTask={onOpenTask}
           />
         ) : (
           <div className="placeholder">

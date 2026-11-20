@@ -28,7 +28,9 @@ use opw_storage::{SessionRow, Store};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::flow_mcp::{self, ActiveStep, SessionStep};
 use crate::terminals::{Pane, TerminalKind, TerminalSink, statusline_settings};
+use opw_domain::workflow::StepKind;
 
 /// Sessions the app runs say so (`entrypoint` in the transcript and the status file). Without it
 /// the CLI writes `sdk-cli`, and the VS Code extension leaves those out of its session list;
@@ -110,6 +112,7 @@ struct Proc {
     pid: u32,
     run_no: u64,
     stderr: Arc<Mutex<String>>,
+    total_cost: f64,
 }
 
 struct Entry {
@@ -140,10 +143,18 @@ struct Entry {
     seq: u64,
     error: Option<String>,
     /// Messages typed before the folder trust question was answered.
-    held: Vec<String>,
+    held: Vec<(String, Option<String>)>,
     /// set_permission_mode request id → mode, to fall back from a refused `auto`.
     mode_requests: HashMap<String, String>,
     next_req: u64,
+    active_step: ActiveStep,
+    step_labels: HashMap<String, StepKind>,
+    step_result: Option<opw_agents::claude::RunResult>,
+    step_output: String,
+    step_cost: f64,
+    step_mode: Option<String>,
+    step_model: Option<String>,
+    mcp: Option<flow_mcp::Run>,
 }
 
 impl Entry {
@@ -173,6 +184,14 @@ impl Entry {
             held: Vec::new(),
             mode_requests: HashMap::new(),
             next_req: 0,
+            active_step: Arc::default(),
+            step_labels: HashMap::new(),
+            step_result: None,
+            step_output: String::new(),
+            step_cost: 0.0,
+            step_mode: None,
+            step_model: None,
+            mcp: None,
         }
     }
 
@@ -245,7 +264,7 @@ impl Entry {
                 .items()
                 .iter()
                 .cloned()
-                .map(crate::flow::chat_item)
+                .map(|i| self.chat_item(i))
                 .collect(),
             dropped: u32::try_from(self.log.dropped()).unwrap_or(u32::MAX),
             partial: self.partial.clone(),
@@ -280,13 +299,28 @@ impl Entry {
         Ok(())
     }
 
-    fn say(&mut self, text: &str) -> Result<(), ApiError> {
-        self.write(&json!({
+    fn say(&mut self, text: &str, uuid: Option<&str>) -> Result<(), ApiError> {
+        if uuid.is_some() {
+            if let Some(mode) = self.step_mode.take() {
+                self.request_mode(&mode)?;
+            }
+            if let Some(model) = self.step_model.take() {
+                self.control(json!({"subtype":"set_model","model":model}))?;
+            }
+        }
+        let mut payload = json!({
             "type": "user",
             "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
             "parent_tool_use_id": null,
             "session_id": "",
-        }))?;
+        });
+        if let Some(uuid) = uuid {
+            payload["uuid"] = json!(uuid);
+        }
+        self.write(&payload)?;
+        if uuid.is_some() {
+            self.log.apply(&payload);
+        }
         self.open_turns += 1;
         self.last_activity = Instant::now();
         self.started = true;
@@ -294,6 +328,17 @@ impl Entry {
             self.row.title = first_line(text, TITLE_MAX);
         }
         Ok(())
+    }
+
+    fn chat_item(&self, i: opw_agents::transcript::Item) -> opw_domain::view::ChatItem {
+        let step = i
+            .message_id
+            .as_ref()
+            .and_then(|id| self.step_labels.get(id))
+            .copied();
+        let mut item = crate::flow::chat_item(i);
+        item.step = step;
+        item
     }
 
     /// Read the transcript again when it changed and nothing here writes to it.
@@ -328,6 +373,7 @@ impl Entry {
         self.partial.clear();
         self.open_turns = 0;
         self.held.clear();
+        self.mcp = None;
     }
 
     fn pane(&self, kind: TerminalKind) -> Option<&Pane> {
@@ -714,6 +760,7 @@ struct Inner {
     /// repo → the user's trust answer this run (`true` = trusted / attested).
     trust: Mutex<HashMap<String, bool>>,
     run_no: AtomicU64,
+    create_task: Mutex<()>,
     quitting: AtomicBool,
     quota: Mutex<Option<QuotaSink>>,
 }
@@ -724,6 +771,20 @@ type QuotaSink = Arc<dyn Fn(QuotaSnapshot) + Send + Sync>;
 #[derive(Clone)]
 pub struct Sessions {
     inner: Arc<Inner>,
+}
+
+pub(crate) struct StepReply {
+    pub result: opw_agents::claude::RunResult,
+    pub summary: String,
+    pub manual: bool,
+}
+
+pub(crate) struct StepMessage<'a> {
+    pub step: StepKind,
+    pub prompt: &'a str,
+    pub mode: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub wait_for_report: bool,
 }
 
 impl std::fmt::Debug for Sessions {
@@ -749,6 +810,7 @@ impl Sessions {
                 sink: Mutex::new(None),
                 trust: Mutex::new(HashMap::new()),
                 run_no: AtomicU64::new(0),
+                create_task: Mutex::new(()),
                 quitting: AtomicBool::new(false),
                 quota: Mutex::new(None),
             }),
@@ -799,6 +861,7 @@ impl Sessions {
             }
             if e.terminal.as_mut().is_some_and(|p| p.pty.exit_code().is_some()) {
                 let _ = e.terminal.take().expect("checked").close();
+                e.mcp = None;
                 e.refresh();
                 self.emit(&id, &mut e);
             }
@@ -820,10 +883,11 @@ impl Sessions {
                     e.open_turns = 0;
                     self.emit(&id, &mut e);
                 }
-            } else if e.last_activity.elapsed() > IDLE_CLOSE {
+            } else if e.last_activity.elapsed() > IDLE_CLOSE && lock(&e.active_step).is_none() {
                 if let Some(proc) = e.proc.take() {
                     close_proc(proc, EXIT_WAIT);
                 }
+                e.mcp = None;
                 self.emit(&id, &mut e);
             }
         }
@@ -861,7 +925,7 @@ impl Sessions {
             items: e.log.items()[from..]
                 .iter()
                 .cloned()
-                .map(crate::flow::chat_item)
+                .map(|i| e.chat_item(i))
                 .collect(),
             dropped: u32::try_from(e.log.dropped()).unwrap_or(u32::MAX),
             partial: e.partial.clone(),
@@ -892,6 +956,15 @@ impl Sessions {
             task.as_ref().map(|t| t.display_id.clone()),
             task.and_then(|t| t.branch),
         );
+        if let Some(wp_id) = entry.row.wp_id {
+            entry.step_labels = self
+                .store()
+                .kv_get(wp_id, "session-step-labels", &id)
+                .ok()
+                .flatten()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+        }
         if !entry.started {
             entry.started = transcript_path(&entry.row.repo, &entry.row.id).is_some();
         }
@@ -949,6 +1022,18 @@ impl Sessions {
             .filter(|r| r.wp_id == Some(wp_id) && r.kind == "main")
             .max_by(|a, b| a.created_at.cmp(&b.created_at))
             .map(|r| r.id)
+    }
+
+    pub fn ensure_task(&self, wp_id: u64, repo: &str) -> Result<SessionView, ApiError> {
+        let _serial = lock(&self.inner.create_task);
+        if let Some(id) = self.task_session(wp_id) {
+            let arc = self.entry(&id)?;
+            let e = lock(&arc);
+            if opw_config::same_path(&e.row.repo, repo) {
+                return Ok(e.view(None));
+            }
+        }
+        self.create(Some(wp_id), repo)
     }
 
     /// Everything the chat pane shows; a session not running here is read from its transcript.
@@ -1018,8 +1103,9 @@ impl Sessions {
             return Err(err("session.repo", "Không còn thư mục của phiên"));
         }
         let mut env = opw_vcs::guard_env(&self.inner.hooks_dir);
+        let mut mcp = None;
         let (program, args) = if kind == TerminalKind::Claude {
-            if e.open_turns > 0 || !e.asks.is_empty() {
+            if e.open_turns > 0 || !e.asks.is_empty() || lock(&e.active_step).is_some() {
                 return Err(err(
                     "session.busy",
                     "Kết thúc lượt hiện tại trong chat trước khi mở terminal",
@@ -1073,6 +1159,10 @@ impl Sessions {
                 }
                 args.extend(["--settings".into(), statusline_settings()]);
             }
+            mcp = self.prepare_mcp(&e, &cwd, &mut args);
+            if let Some(server) = &mcp {
+                env.push((flow_mcp::TOKEN_ENV.into(), server.token().into()));
+            }
             (exe, args)
         } else {
             if e.shell.is_some() {
@@ -1103,6 +1193,7 @@ impl Sessions {
             e.last_pid = pane.pty.pid();
             e.statusline_at = None;
             e.terminal = Some(pane);
+            e.mcp = mcp;
         } else {
             e.shell = Some((kind, pane));
         }
@@ -1141,6 +1232,7 @@ impl Sessions {
                 };
                 let result = pane.expect("owned pane").close();
                 if kind == TerminalKind::Claude {
+                    e.mcp = None;
                     e.refresh();
                 }
                 self.emit(id, &mut e);
@@ -1159,6 +1251,23 @@ impl Sessions {
         }
         let arc = self.entry(id)?;
         let mut e = lock(&arc);
+        if e.open_turns > 0 && lock(&e.active_step).is_some() {
+            return Err(err(
+                "session.busy",
+                "Chờ tin nhắn của bước trả lời xong trước khi gửi tiếp",
+            ));
+        }
+        self.send_locked(id, &mut e, text, force, None)
+    }
+
+    fn send_locked(
+        &self,
+        id: &str,
+        e: &mut Entry,
+        text: &str,
+        force: bool,
+        uuid: Option<&str>,
+    ) -> Result<SessionView, ApiError> {
         self.ensure_open()?;
         if e.terminal.is_some() {
             return Err(err(
@@ -1179,14 +1288,14 @@ impl Sessions {
                 }
             }
             if e.asks.iter().any(|a| a.view.kind == AskKind::Trust) {
-                e.held.push(text.to_owned());
+                e.held.push((text.to_owned(), uuid.map(str::to_owned)));
                 return Ok(e.view(None));
             }
             e.refresh();
             match self.trust_run(&e.row.repo) {
-                Some(run) => self.spawn(id, &mut e, &run)?,
+                Some(run) => self.spawn(id, e, &run)?,
                 None => {
-                    e.held.push(text.to_owned());
+                    e.held.push((text.to_owned(), uuid.map(str::to_owned)));
                     let folder = e.row.repo.clone();
                     e.asks.push(Pending {
                         view: SessionAsk {
@@ -1203,16 +1312,189 @@ impl Sessions {
                         suggestions: Value::Null,
                         tool_use_id: None,
                     });
-                    self.emit(id, &mut e);
+                    self.emit(id, e);
                     return Ok(e.view(None));
                 }
             }
         }
-        e.say(text)?;
+        e.say(text, uuid)?;
         e.error = None;
-        self.save(&mut e);
-        self.emit(id, &mut e);
+        self.save(e);
+        self.emit(id, e);
         Ok(e.view(None))
+    }
+
+    fn prepare_mcp(&self, e: &Entry, repo: &Path, args: &mut Vec<String>) -> Option<flow_mcp::Run> {
+        e.row.wp_id?;
+        let server = flow_mcp::Run::workspace(repo, e.active_step.clone()).ok()?;
+        server.configure_workspace(args);
+        Some(server)
+    }
+
+    pub(crate) fn flow_ready(&self, id: &str) -> Result<(), ApiError> {
+        let arc = self.entry(id)?;
+        let e = lock(&arc);
+        self.flow_ready_entry(id, &e)
+    }
+
+    fn flow_ready_entry(&self, id: &str, e: &Entry) -> Result<(), ApiError> {
+        if e.terminal.is_some() {
+            return Err(err(
+                "session.terminal",
+                "Đóng Terminal của phiên để chạy bước trong chat",
+            ));
+        }
+        if e.view(status_files().get(id)).outside.is_some() {
+            return Err(err(
+                "session.outside",
+                "Đóng phiên ở ứng dụng ngoài trước khi chạy bước",
+            ));
+        }
+        if e.open_turns > 0 || !e.asks.is_empty() || lock(&e.active_step).is_some() {
+            return Err(err(
+                "session.busy",
+                "Chờ lượt hiện tại của phiên kết thúc trước khi chạy bước",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn run_flow_step(
+        &self,
+        id: &str,
+        message: StepMessage<'_>,
+        stop: &AtomicBool,
+        timeout: Duration,
+    ) -> Result<StepReply, ApiError> {
+        let StepMessage {
+            step,
+            prompt,
+            mode,
+            model,
+            wait_for_report,
+        } = message;
+        let arc = self.entry(id)?;
+        let uuid = new_uuid();
+        {
+            let mut e = lock(&arc);
+            self.flow_ready_entry(id, &e)?;
+            self.ensure_open()?;
+            *lock(&e.active_step) = Some(SessionStep {
+                id: uuid.clone(),
+                name: crate::flow::step_key(step).to_owned(),
+                ..SessionStep::default()
+            });
+            e.step_result = None;
+            e.step_output.clear();
+            e.step_cost = 0.0;
+            e.step_mode = mode.map(str::to_owned);
+            e.step_model = model.map(str::to_owned);
+            e.step_labels.insert(uuid.clone(), step);
+            if let Some(wp_id) = e.row.wp_id {
+                if let Ok(labels) = serde_json::to_string(&e.step_labels) {
+                    let _ = self
+                        .store()
+                        .kv_set(wp_id, "session-step-labels", id, &labels, &now());
+                }
+            }
+            if let Err(error) = self.send_locked(id, &mut e, prompt, false, Some(&uuid)) {
+                lock(&e.active_step).take();
+                return Err(error);
+            }
+        }
+        let started = Instant::now();
+        loop {
+            {
+                let mut e = lock(&arc);
+                let stopped = stop.load(Ordering::Acquire) || self.inner.quitting.load(Ordering::Acquire);
+                if stopped || started.elapsed() >= timeout {
+                    if e.open_turns > 0 {
+                        let _ = e.control(json!({"subtype":"interrupt"}));
+                        if let Some(p) = e.proc.take() {
+                            close_proc(p, EXIT_WAIT);
+                        }
+                    }
+                    if e.proc.is_none() {
+                        e.clear_turn();
+                    }
+                    lock(&e.active_step).take();
+                    self.emit(id, &mut e);
+                    return Err(if stopped {
+                        err("step.stopped", "Bạn đã dừng bước này")
+                    } else {
+                        err("step.timeout", "Hết thời gian chờ bước")
+                    });
+                }
+                if e.proc.is_none() && e.asks.is_empty() {
+                    lock(&e.active_step).take();
+                    return Err(err(
+                        "session.stopped",
+                        e.error.as_deref().unwrap_or("Phiên đã đóng"),
+                    ));
+                }
+                if e.open_turns == 0
+                    && e.step_result.as_ref().is_some_and(|r| r.is_error)
+                    && e.step_output.is_empty()
+                {
+                    let result = e.step_result.take().expect("checked");
+                    lock(&e.active_step).take();
+                    return Err(err(
+                        "session.result",
+                        if result.text.is_empty() {
+                            "Claude không hoàn tất lượt này. Xem chat rồi thử lại.".into()
+                        } else {
+                            result.text
+                        },
+                    ));
+                }
+                let done = {
+                    let mut active = lock(&e.active_step);
+                    let valid = active.as_ref().is_some_and(|s| {
+                        s.manual || s.summary.is_some() || (!wait_for_report && e.step_result.is_some())
+                    });
+                    if valid && e.open_turns == 0 && e.asks.is_empty() {
+                        active.take()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(done) = done {
+                    let mut result = e.step_result.take().unwrap_or_default();
+                    result.session_id = id.to_owned();
+                    result.cost_usd = e.step_cost;
+                    if !e.step_output.trim().is_empty() {
+                        result.text = std::mem::take(&mut e.step_output);
+                    }
+                    return Ok(StepReply {
+                        result,
+                        manual: done.manual,
+                        summary: done.summary.unwrap_or_else(|| {
+                            if done.manual {
+                                "Bạn đánh dấu xong".into()
+                            } else {
+                                "Đã trả lời trong phiên".into()
+                            }
+                        }),
+                    });
+                }
+            }
+            std::thread::sleep(Duration::from_millis(120));
+        }
+    }
+
+    pub(crate) fn complete_flow_step(&self, id: &str, step: StepKind) -> Result<(), ApiError> {
+        let arc = self.entry(id)?;
+        let e = lock(&arc);
+        if e.open_turns > 0 || !e.asks.is_empty() {
+            return Err(err("session.busy", "Chờ lượt hiện tại kết thúc rồi bấm Xong"));
+        }
+        let mut active = lock(&e.active_step);
+        let current = active
+            .as_mut()
+            .filter(|s| s.name == crate::flow::step_key(step))
+            .ok_or_else(|| err("step.missing", "Bước này chưa gửi vào phiên hoặc đã xong"))?;
+        current.manual = true;
+        Ok(())
     }
 
     /// The trust a new process runs with, or `None` when the user has to be asked.
@@ -1246,7 +1528,8 @@ impl Sessions {
         }
         let resume =
             e.transcript.as_ref().is_some_and(|p| p.is_file()) || transcript_path(&e.row.repo, id).is_some();
-        let args = session_args(id, resume, e.row.mode.as_deref(), *trust == TrustRun::UserOnly);
+        let mut args = session_args(id, resume, e.row.mode.as_deref(), *trust == TrustRun::UserOnly);
+        let mcp = self.prepare_mcp(e, &repo, &mut args);
         let mut cmd = Command::new(exe);
         cmd.args(&args)
             .current_dir(&repo)
@@ -1257,6 +1540,9 @@ impl Sessions {
             cmd.env_remove(k);
         }
         cmd.envs(opw_vcs::guard_env(&self.inner.hooks_dir));
+        if let Some(server) = &mcp {
+            cmd.env(flow_mcp::TOKEN_ENV, server.token());
+        }
         cmd.env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT);
         hide_window(&mut cmd);
         let mut child = cmd
@@ -1304,7 +1590,9 @@ impl Sessions {
             pid,
             run_no,
             stderr,
+            total_cost: 0.0,
         });
+        e.mcp = mcp;
         e.live_mode = None;
         e.last_activity = Instant::now();
         let mut init = json!({ "subtype": "initialize" });
@@ -1369,6 +1657,19 @@ impl Sessions {
                 }
             }
             "assistant" => {
+                if lock(&e.active_step).is_some()
+                    && v["parent_tool_use_id"].is_null()
+                    && e.step_output.len() < 128 * 1024
+                {
+                    for block in v["message"]["content"].as_array().into_iter().flatten() {
+                        if block["type"] == "text" {
+                            if let Some(text) = block["text"].as_str() {
+                                e.step_output.push_str(text);
+                                e.step_output.push_str("\n\n");
+                            }
+                        }
+                    }
+                }
                 let text = v
                     .pointer("/message/content")
                     .and_then(Value::as_array)
@@ -1384,14 +1685,35 @@ impl Sessions {
                 self.emit(id, &mut e);
             }
             "result" => {
+                if let Some(total) = v["total_cost_usd"].as_f64() {
+                    let delta = e.proc.as_mut().map_or(0.0, |proc| {
+                        let delta = (total - proc.total_cost).max(0.0);
+                        proc.total_cost = total;
+                        delta
+                    });
+                    e.row.cost_usd += delta;
+                    if lock(&e.active_step).is_some() {
+                        e.step_cost += delta;
+                    }
+                }
+                if lock(&e.active_step).is_some() {
+                    let result = opw_agents::claude::parse_line(&v.to_string())
+                        .ok()
+                        .and_then(|events| {
+                            events.into_iter().find_map(|event| match event {
+                                opw_agents::claude::ClaudeEvent::Result(result) => Some(result),
+                                _ => None,
+                            })
+                        });
+                    if let Some(result) = result {
+                        e.step_result = Some(result);
+                    }
+                }
                 e.log.apply(v);
                 e.open_turns = e.open_turns.saturating_sub(1);
                 e.partial.clear();
                 if e.open_turns == 0 {
                     e.asks.clear();
-                }
-                if let Some(total) = v["total_cost_usd"].as_f64() {
-                    e.row.cost_usd = e.row.cost_usd.max(total);
                 }
                 if e.transcript.is_none() {
                     e.transcript = transcript_path(&e.row.repo, id);
@@ -1516,8 +1838,8 @@ impl Sessions {
                 self.emit(id, &mut e);
                 return Err(error);
             }
-            for text in std::mem::take(&mut e.held) {
-                e.say(&text)?;
+            for (text, uuid) in std::mem::take(&mut e.held) {
+                e.say(&text, uuid.as_deref())?;
             }
             self.save(&mut e);
             self.emit(id, &mut e);
