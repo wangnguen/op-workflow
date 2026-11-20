@@ -309,25 +309,31 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
     }
   }
 
+  // the main button and the hide button share the top row; what the button does is under it
+  const go = primary && onGo && selection ? primary : undefined;
+  const pick = JSON.stringify(selection);
   return (
     <aside className="detail-panel">
-      {onHide && (
-        <div className="dp-bar">
-          <HideSideButton side="right" name={vi.side.detail} onHide={onHide} />
-        </div>
-      )}
-      {primary && onGo && selection && (
-        <div className="dp-primary" key={JSON.stringify(selection)}>
-          <button
-            className="btn btn--primary btn--sm"
-            disabled={primary.go.to === "start" && !onStartTask}
-            onClick={() => onGo(primary.go)}
-          >
-            {primary.label}
-          </button>
-          <p className="faint">
-            {primary.go.to === "start" && !onStartTask ? t.startFromBoard : primary.hint}. {t.doubleClick}
-          </p>
+      {(go || onHide) && (
+        <div className={`dp-top${go ? " has-go" : ""}`}>
+          <div className="dp-bar">
+            {go && onGo && (
+              <button
+                key={pick}
+                className="btn btn--primary btn--sm dp-go"
+                disabled={go.go.to === "start" && !onStartTask}
+                onClick={() => onGo(go.go)}
+              >
+                {go.label}
+              </button>
+            )}
+            {onHide && <HideSideButton side="right" name={vi.side.detail} onHide={onHide} />}
+          </div>
+          {go && (
+            <p className="faint dp-go-hint" key={pick}>
+              {go.go.to === "start" && !onStartTask ? t.startFromBoard : go.hint}. {t.doubleClick}
+            </p>
+          )}
         </div>
       )}
       {body}

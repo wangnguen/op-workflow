@@ -34,10 +34,16 @@ describe("AI step verification and limits", () => {
   it("renders explanations below choices and default limit placeholders in both switch states", () => {
     for (const enabled of [true, false]) {
       const html = renderToStaticMarkup(createElement(StepsPage, { view: mockSetVerifyMcp(enabled), onSaved: () => {}, models: mockStepModels(), modelsBusy: false, onReadModels: () => {} }));
-      expect(html).toContain('role="switch"');
+      // an ordinary settings row: the box on the right, both explanations kept in place (the one
+      // that does not apply is hidden), so switching moves nothing
+      expect(html).toContain('data-setting-row="verifyMcp"');
+      expect(html).toMatch(/<input type="checkbox" class="set-check"[^>]*>/);
+      expect(html.includes('class="set-check" aria-label="Kiểm kết luận của AI" checked=""')).toBe(enabled);
       expect(html).toContain(text.settings.steps.verifyMcp);
-      expect(html).toContain(enabled ? text.settings.steps.mcpOn : text.settings.steps.mcpOff);
-      expect(html).toContain('class="set-mcp-hints"');
+      expect(html).toContain('class="set-row-hint set-swap"');
+      expect(html).toContain(text.settings.steps.mcpOn);
+      expect(html).toContain(text.settings.steps.mcpOff);
+      expect(html).toContain(`<span aria-hidden="false">${enabled ? text.settings.steps.mcpOn : text.settings.steps.mcpOff}</span>`);
       expect(html).toContain('placeholder="5"');
       expect(html).toContain('placeholder="20"');
       expect(html).toContain(text.settings.steps.budgetHint);

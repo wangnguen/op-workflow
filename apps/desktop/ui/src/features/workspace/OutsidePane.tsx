@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { vi } from "../../i18n/vi";
-import { errorCode, errorMessage, getOutsideChat } from "../../ipc/client";
+import { adoptOutside, archiveOutside, errorCode, errorMessage, forkOutside, getOutsideChat } from "../../ipc/client";
 import type { OutsideChat, OutsideSession } from "../../ipc/types";
 import { formatHourMinute } from "../../shared/format";
 import { ChatItemView } from "../chat/ChatItems";
+import { Choice } from "./AskCard";
 import { repoName } from "./chatState";
 
 const t = vi.workspace.outsidePane;
@@ -15,6 +16,10 @@ interface Props {
   id: string;
   /** what the list knows about it, shown while the conversation is read */
   known?: OutsideSession;
+  /** a session of the app to show now (this one taken into the app, or its copy) */
+  onOpen: (id: string) => void;
+  /** taken off the list */
+  onArchived: () => void;
 }
 
 /** Cheap fingerprint: a read that changed nothing does not draw the chat again. */
@@ -23,11 +28,14 @@ const mark = (c: OutsideChat) => {
   return [c.items.length, c.dropped, c.session.state, c.session.title, last?.text.length, last?.output?.length].join("|");
 };
 
-/** A Claude session opened outside the app (VS Code, a terminal): its conversation, read-only. */
-export function OutsidePane({ id, known }: Props) {
+/** A Claude session opened outside the app (VS Code, a terminal): its conversation, read-only,
+ *  and the ways to go on with it here. */
+export function OutsidePane({ id, known, onOpen, onArchived }: Props) {
   const [chat, setChat] = useState<OutsideChat>();
   const [closed, setClosed] = useState(false);
   const [error, setError] = useState<string>();
+  const [busy, setBusy] = useState<"adopt" | "fork" | "archive">();
+  const [failure, setFailure] = useState<string>();
   const list = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const seen = useRef("");
@@ -36,6 +44,7 @@ export function OutsidePane({ id, known }: Props) {
     setChat(undefined);
     setClosed(false);
     setError(undefined);
+    setFailure(undefined);
     stick.current = true;
     seen.current = "";
     let alive = true;
@@ -69,8 +78,27 @@ export function OutsidePane({ id, known }: Props) {
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [chat]);
 
+  const act = async (what: "adopt" | "fork" | "archive") => {
+    setBusy(what);
+    setFailure(undefined);
+    try {
+      if (what === "archive") {
+        await archiveOutside(id);
+        onArchived();
+      } else {
+        const s = await (what === "adopt" ? adoptOutside(id) : forkOutside(id));
+        onOpen(s.id);
+      }
+    } catch (e) {
+      if (errorCode(e) === "session.closed") setClosed(true);
+      else setFailure(errorMessage(e));
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
   const s = chat?.session ?? known;
-  const where = s?.openIn ?? "";
+  const where = s?.openIn || t.elsewhere;
   return (
     <div className="ws-chat">
       <div className="ws-chat-body">
@@ -86,7 +114,7 @@ export function OutsidePane({ id, known }: Props) {
                   </span>
                 )}
                 {s && !closed && <span>{vi.workspace.state[s.state] ?? s.state}</span>}
-                {where && !closed && <span>{t.openIn(where)}</span>}
+                {s?.openIn && !closed && <span>{t.openIn(s.openIn)}</span>}
                 {s?.updatedAt && <span>{t.updated(formatHourMinute(s.updatedAt))}</span>}
               </p>
             </div>
@@ -110,7 +138,35 @@ export function OutsidePane({ id, known }: Props) {
         </div>
         <footer className="ws-composer">
           <div className="ws-chat-col">
-            <p className="note">{closed ? t.closed : t.readOnly(where || t.elsewhere)}</p>
+            {failure && <p className="note note--error">{failure}</p>}
+            {closed ? (
+              <p className="note">{t.closed}</p>
+            ) : (
+              <>
+                <p className="faint ws-outside-lead">{t.readOnly(where)}</p>
+                <div className="ask-choices">
+                  <Choice
+                    label={busy === "adopt" ? t.working : t.adopt}
+                    about={t.adoptAbout(where)}
+                    tone="primary"
+                    disabled={busy !== undefined || !s}
+                    onClick={() => void act("adopt")}
+                  />
+                  <Choice
+                    label={busy === "fork" ? t.working : t.fork}
+                    about={t.forkAbout(where)}
+                    disabled={busy !== undefined || !s}
+                    onClick={() => void act("fork")}
+                  />
+                  <Choice
+                    label={busy === "archive" ? t.working : t.archive}
+                    about={t.archiveAbout(where)}
+                    disabled={busy !== undefined || !s}
+                    onClick={() => void act("archive")}
+                  />
+                </div>
+              </>
+            )}
           </div>
         </footer>
       </div>

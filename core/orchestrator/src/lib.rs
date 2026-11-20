@@ -46,12 +46,12 @@ use opw_domain::session::{
 };
 use opw_domain::task::display_id;
 use opw_domain::view::{
-    AgentKind, AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CloseChoice, CommentsView,
-    DataMode, DeleteBranchRequest, DiffView, DistantSession, FindingDecision, FlowAction, FlowStatus,
-    HarnessLib, InboxItem, IssueFetch, IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider,
-    PushCheck, QuotaNote, QuotaSnapshot, RepoChecks, RepoState, SessionStatus, SettingsView, StartOptions,
-    StartRequest, StartResult, StepChoiceRequest, StepRef, StepView, TaskCard, TaskColumn, TaskDetail,
-    TaskSystem, TaskText, TasksDirChange, TodayStats, UpdateView,
+    AgentKind, AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, BrowserState, BrowserStatus, ChatView,
+    CloseChoice, CommentsView, DataMode, DeleteBranchRequest, DiffView, DistantSession, FindingDecision,
+    FlowAction, FlowStatus, HarnessLib, InboxItem, IssueFetch, IssueStatus, NotifyKind, OrbitSnapshot,
+    ProjectMemory, Provider, PushCheck, QuotaNote, QuotaSnapshot, RepoChecks, RepoState, SessionStatus,
+    SettingsView, StartOptions, StartRequest, StartResult, StepChoiceRequest, StepRef, StepView, TaskCard,
+    TaskColumn, TaskDetail, TaskSystem, TaskText, TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
@@ -121,6 +121,7 @@ fn harness_libs(config: &Config) -> Vec<HarnessLib> {
 }
 
 const DB_FILE: &str = "opw.db";
+const NO_TOKEN_NOTICE: &str = "Chưa có token OpenProject nên chưa có task giao cho bạn. Workspace và Phiên vẫn dùng bình thường; muốn nhận task thì mở Cài đặt → OpenProject.";
 const NO_URL_NOTICE: &str = "Chưa có URL OpenProject cho bản này. Mở Cài đặt → OpenProject, nhập URL rồi bấm Kiểm tra & lưu (token đã lưu thì không cần dán lại).";
 pub(crate) const COLUMN_ACTIVE: &str = "active";
 const COLUMN_INBOX: &str = "inbox";
@@ -156,6 +157,8 @@ pub struct AppService {
     models: models::Catalogs,
     /// The Workspace: Claude Code sessions the app runs (PLAN.md §12 B).
     sessions: Option<Sessions>,
+    /// Why the briefs could not move to the Desktop folder on start (Settings shows it).
+    tasks_dir_error: Mutex<Option<String>>,
 }
 
 impl AppService {
@@ -263,7 +266,7 @@ impl AppService {
             flow.set_sessions(sessions.clone());
         }
         let updater = Updater::start(config.update.clone(), CORE_VERSION);
-        Self {
+        let service = Self {
             config: Mutex::new(config),
             config_path,
             data_dir,
@@ -276,6 +279,29 @@ impl AppService {
             alerts,
             models: models::Catalogs::default(),
             sessions,
+            tasks_dir_error: Mutex::new(None),
+        };
+        service.settle_tasks_dir();
+        service
+    }
+
+    /// Briefs live in `Desktop\op-workflow-tasks` unless the user picked another folder: the
+    /// first start creates it and moves the task folders kept in the data folder there. When
+    /// that fails they stay in the data folder and Settings says why.
+    fn settle_tasks_dir(&self) {
+        if self.config().tasks_dir.is_some() || self.config_path.is_none() {
+            return;
+        }
+        let failed = match folders::desktop_suggestion() {
+            Some(desktop) => self
+                .set_tasks_dir(Some(&desktop.to_string_lossy()))
+                .err()
+                .map(|e| e.message),
+            None => Some("Không tìm thấy thư mục Desktop của Windows".to_owned()),
+        };
+        if let Ok(mut slot) = self.tasks_dir_error.lock() {
+            *slot = failed
+                .map(|why| format!("Brief vẫn ở thư mục dữ liệu vì không chuyển ra Desktop được: {why}"));
         }
     }
 
@@ -349,20 +375,11 @@ impl AppService {
         let Some(state) = self.live_state() else {
             return demo::board(demo::tick_now());
         };
-        if state.token.is_none() {
-            let mut board = demo::board(demo::tick_now());
-            board.quota = live_quota(&state);
-            board.links = state.links();
-            board.unread_alerts = self.alerts.unread();
-            return board;
-        }
         let config = self.config();
         let prefix = config.tracker.task_prefix.clone();
         let done = self.done_ids();
-        let mut tasks: Vec<TaskCard> = state
-            .tasks
-            .as_deref()
-            .unwrap_or_default()
+        // no token: no OpenProject list, but the tasks already started still show
+        let mut tasks: Vec<TaskCard> = Self::open_tasks(&state)
             .iter()
             .filter(|wp| !done.contains(&wp.id))
             .map(|wp| Self::task_card(&prefix, wp, &state))
@@ -440,9 +457,12 @@ impl AppService {
             quota: live_quota(&state),
             links: state.links(),
             today: TodayStats { tokens, cost_usd },
-            mode: DataMode::Live,
+            mode: if state.token.is_some() {
+                DataMode::Live
+            } else {
+                DataMode::NoToken
+            },
             notice,
-            tasks_dir_offer: self.tasks_dir_offer(),
             unread_alerts: self.alerts.unread(),
         }
     }
@@ -598,14 +618,9 @@ impl AppService {
         let Some(state) = self.live_state() else {
             return demo::orbit(demo::tick_now());
         };
-        if state.token.is_none() {
-            let mut orbit = demo::orbit(demo::tick_now());
-            orbit.quota = live_quota(&state);
-            return orbit;
-        }
         let config = self.config();
         let prefix = config.tracker.task_prefix.clone();
-        let tasks = state.tasks.as_deref().unwrap_or_default();
+        let tasks = Self::open_tasks(&state);
         let active = self.active_rows();
         let done = self.done_ids();
         let mut systems = active.iter().map(|row| {
@@ -686,14 +701,26 @@ impl AppService {
         }
     }
 
+    /// The tasks OpenProject lists as open and assigned; none without a token (a list fetched
+    /// before the token was removed is not shown).
+    fn open_tasks(state: &LiveState) -> &[WorkPackage] {
+        if state.token.is_none() {
+            return &[];
+        }
+        state.tasks.as_deref().unwrap_or_default()
+    }
+
     /// Why the live inbox is empty or stale, shown above the board and in the empty map.
     fn inbox_notice(&self, state: &LiveState) -> Option<String> {
+        if state.token.is_none() {
+            return Some(NO_TOKEN_NOTICE.to_owned());
+        }
         if state.base_url.is_empty() {
             // a token in Credential Manager is shared by every build, the URL is per data dir
             return Some(NO_URL_NOTICE.to_owned());
         }
         match (&state.tasks_error, &state.tasks, &self.store_error) {
-            (Some(e), _, _) => Some(format!("Không lấy được task từ OpenProject: {e}")),
+            (Some(e), _, _) => Some(format!("Không lấy được task: {e}")),
             (None, None, _) => Some("Đang tải task từ OpenProject…".to_owned()),
             (None, Some(_), Some(e)) => Some(format!("Không mở được dữ liệu cục bộ: {e}")),
             (None, Some(_), None) => None,
@@ -1089,6 +1116,15 @@ impl AppService {
         os::open_url(&url).map_err(|e| ApiError::new("open", e.to_string()))
     }
 
+    /// A link the user clicked in a brief or a chat, in the default browser (https only).
+    pub fn open_link(&self, url: &str) -> Result<(), ApiError> {
+        let url = url.trim();
+        if !url.starts_with("https://") {
+            return Err(ApiError::new("link.refused", "App chỉ mở link https://"));
+        }
+        os::open_url(url).map_err(|e| ApiError::new("open", e.to_string()))
+    }
+
     /// Show the task folder (brief, plan, push summary) in Explorer.
     pub fn open_task_folder(&self, wp_id: u64) -> Result<(), ApiError> {
         let (ctx, _) = self.task_ctx(wp_id)?;
@@ -1188,14 +1224,6 @@ impl AppService {
         }
     }
 
-    /// The Desktop folder to offer while the user has not chosen where briefs go.
-    fn tasks_dir_offer(&self) -> Option<String> {
-        if self.config().tasks_dir.is_some() || self.config_path.is_none() {
-            return None;
-        }
-        folders::desktop_suggestion().map(|p| p.to_string_lossy().into_owned())
-    }
-
     /// `brief.md` of a stored task.
     fn brief_file(&self, wp_id: u64) -> Result<PathBuf, ApiError> {
         let row = self.stored_task(wp_id).ok_or_else(task_not_found)?;
@@ -1236,6 +1264,9 @@ impl AppService {
         opw_config::save_tasks_dir(config_path, &opw_config::contract_home(&new_root))
             .map_err(|e| ApiError::new("config.write", e.to_string()))?;
         self.reload_config();
+        if let Ok(mut slot) = self.tasks_dir_error.lock() {
+            *slot = None;
+        }
         Ok(TasksDirChange {
             path: new_root.to_string_lossy().into_owned(),
             moved,
@@ -1785,6 +1816,52 @@ impl AppService {
         }
     }
 
+    /// Claude Code and Codex on this machine: where, which version, signed in, how "Cài"
+    /// installs them. Starts each CLI two times (`--version`, the sign-in status), so call it
+    /// off the UI thread.
+    pub fn ai_clis(&self) -> Vec<opw_domain::view::AiCli> {
+        [Provider::Claude, Provider::Codex]
+            .into_iter()
+            .map(|provider| {
+                let exe = match provider {
+                    Provider::Claude => opw_agents::cli::find_claude(),
+                    Provider::Codex => opw_agents::cli::find_codex(),
+                };
+                let version = exe.as_deref().and_then(cli_version);
+                let signed_in = exe.as_deref().and_then(|e| match provider {
+                    Provider::Claude => live::claude_signed_in(e),
+                    Provider::Codex => live::codex_signed_in(e),
+                });
+                let install_with = match provider {
+                    Provider::Claude => Some(format!("PowerShell: {}", live::CLAUDE_INSTALL)),
+                    Provider::Codex => opw_agents::cli::find_npm().map(|_| live::CODEX_INSTALL.to_owned()),
+                };
+                opw_domain::view::AiCli {
+                    provider,
+                    path: exe.map(|p| p.to_string_lossy().into_owned()),
+                    version,
+                    signed_in,
+                    install_with,
+                }
+            })
+            .collect()
+    }
+
+    /// "Cài": the CLI's installer in a console. Codex without npm opens its install page and
+    /// says why.
+    pub fn install_cli(&self, provider: Provider) -> Result<(), ApiError> {
+        let live = self
+            .live
+            .as_ref()
+            .ok_or_else(|| ApiError::new("install.unavailable", "Bản demo không cài được"))?;
+        live.open_install(provider).map_err(|why| {
+            if provider == Provider::Codex {
+                let _ = os::open_url(live::CODEX_INSTALL_PAGE);
+            }
+            ApiError::new("install.failed", why)
+        })
+    }
+
     /// Open `claude auth login` / `codex login` in a console; reconnects when it closes.
     pub fn open_login(&self, provider: Provider) -> Result<(), ApiError> {
         let live = self
@@ -1873,10 +1950,11 @@ impl AppService {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             data_dir: self.data_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            browser_debug: opw_browser::find_debug_port().map(|p| p.browser.to_owned()),
+            browser: browser_status(),
             tasks_dir: self.tasks_root().map(|p| p.to_string_lossy().into_owned()),
             tasks_dir_chosen: config.tasks_dir.is_some(),
             tasks_dir_suggested: folders::desktop_suggestion().map(|p| p.to_string_lossy().into_owned()),
+            tasks_dir_error: self.tasks_dir_error.lock().ok().and_then(|e| e.clone()),
             notify: config.notify,
             steps: steps::settings(&config, &self.done_step_runs()),
             verify_mcp: config.steps.verify_mcp,
@@ -2197,6 +2275,7 @@ impl AppService {
             tasks,
             sessions: self.sessions.as_ref().map(Sessions::list).unwrap_or_default(),
             outside: self.outside_sessions(),
+            archived: self.sessions.as_ref().map(Sessions::archived).unwrap_or_default(),
         }
     }
 
@@ -2211,6 +2290,26 @@ impl AppService {
     /// The conversation of a session opened outside the app (read-only).
     pub fn outside_chat(&self, id: &str) -> Result<OutsideChat, ApiError> {
         self.sessions()?.outside_chat(id)
+    }
+
+    /// Archive a session opened outside the app (it stays open where it is).
+    pub fn archive_outside(&self, id: &str) -> Result<(), ApiError> {
+        self.sessions()?.archive_outside(id)
+    }
+
+    /// Put an archived session (the app's or one opened outside) back on the list.
+    pub fn restore_session(&self, id: &str) -> Result<(), ApiError> {
+        self.sessions()?.restore(id)
+    }
+
+    /// "Tiếp tục trong app": a session opened outside the app joins the app's list.
+    pub fn adopt_outside(&self, id: &str) -> Result<opw_domain::session::SessionView, ApiError> {
+        self.sessions()?.adopt(id)
+    }
+
+    /// "Tách bản sao": a copy of a session opened outside the app, typed into here at once.
+    pub fn fork_outside(&self, id: &str) -> Result<opw_domain::session::SessionView, ApiError> {
+        self.sessions()?.fork(id)
     }
 
     /// Settings → Phiên: show or hide Claude sessions opened outside the app.
@@ -2463,6 +2562,48 @@ fn task_not_found() -> ApiError {
         "task.notFound",
         "Không thấy task này trong danh sách lấy từ OpenProject. Bấm Lấy lại ở Cài đặt rồi thử lại.",
     )
+}
+
+/// The first line of `<cli> --version` ("2.1.329 (Claude Code)", "codex-cli 0.169.1"), waiting
+/// at most a few seconds.
+fn cli_version(exe: &std::path::Path) -> Option<String> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    live::hidden(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut out = String::new();
+    std::io::Read::read_to_string(child.stdout.as_mut()?, &mut out).ok()?;
+    out.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_owned)
+}
+
+/// Chrome for "Lấy issue", as Settings shows it.
+fn browser_status() -> BrowserStatus {
+    use opw_browser::ChromeState;
+    let (state, name) = match opw_browser::chrome_state() {
+        ChromeState::Ready(p) => (BrowserState::Ready, Some(p.browser.to_owned())),
+        ChromeState::Closed => (BrowserState::Closed, None),
+        ChromeState::NotEnabled => (BrowserState::NotEnabled, None),
+        ChromeState::Missing => (BrowserState::Missing, None),
+    };
+    BrowserStatus { state, name }
 }
 
 /// Folder name of a repo path from config (`~/Desktop/acme-web` → `acme-web`).

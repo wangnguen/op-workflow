@@ -242,3 +242,27 @@ pub fn terminal_control(
 pub fn outside_chat(id: String, service: State<'_, AppService>) -> Result<OutsideChat, ApiError> {
     service.outside_chat(&id)
 }
+
+/// Take a session opened outside the app off the list ("Lưu trữ").
+#[tauri::command(async)]
+pub fn outside_archive(id: String, service: State<'_, AppService>) -> Result<(), ApiError> {
+    service.archive_outside(&id)
+}
+
+/// Put an archived session back on the list.
+#[tauri::command(async)]
+pub fn session_restore(id: String, service: State<'_, AppService>) -> Result<(), ApiError> {
+    service.restore_session(&id)
+}
+
+/// "Tiếp tục trong app": a session opened outside the app joins the app's list.
+#[tauri::command(async)]
+pub fn outside_adopt(id: String, service: State<'_, AppService>) -> Result<SessionView, ApiError> {
+    service.adopt_outside(&id)
+}
+
+/// "Tách bản sao": a copy of a session opened outside the app.
+#[tauri::command(async)]
+pub fn outside_fork(id: String, service: State<'_, AppService>) -> Result<SessionView, ApiError> {
+    service.fork_outside(&id)
+}

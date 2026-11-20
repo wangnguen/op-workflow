@@ -574,6 +574,15 @@ impl Store {
         Ok(())
     }
 
+    /// Remove one value; `true` when there was one.
+    pub fn kv_delete(&self, wp_id: u64, kind: &str, key: &str) -> StorageResult<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM task_kv WHERE wp_id = ?1 AND kind = ?2 AND key = ?3",
+            params![id_param(wp_id), kind, key],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Replace every value of `kind` for one task with `entries`.
     pub fn kv_replace(
         &self,
@@ -766,6 +775,24 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Sessions taken off the list ("Đã lưu trữ") with when, the most recently archived first.
+    pub fn hidden_sessions(&self) -> StorageResult<Vec<(SessionRow, String)>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}, hidden_at FROM session WHERE hidden_at IS NOT NULL
+             ORDER BY hidden_at DESC"
+        ))?;
+        let rows = stmt.query_map([], |r| Ok((session_row(r)?, r.get::<_, String>(10)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Put an archived session back on the Workspace list.
+    pub fn unhide_session(&self, id: &str) -> StorageResult<bool> {
+        let n = self
+            .conn
+            .execute("UPDATE session SET hidden_at = NULL WHERE id = ?1", [id])?;
+        Ok(n > 0)
+    }
+
     pub fn upsert_finding(&self, f: &FindingRow) -> StorageResult<()> {
         self.conn.execute(
             &format!(
@@ -857,6 +884,27 @@ mod tests {
         assert!(store.hide_session("a1", "2026-11-20T11:00:00Z").unwrap());
         assert_eq!(store.sessions().unwrap().len(), 1);
         assert_eq!(store.session("a1").unwrap().unwrap().title, "Sửa lỗi");
+        let archived = store.hidden_sessions().unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(
+            (archived[0].0.id.as_str(), archived[0].1.as_str()),
+            ("a1", "2026-11-20T11:00:00Z")
+        );
+        assert!(store.unhide_session("a1").unwrap());
+        assert!(store.hidden_sessions().unwrap().is_empty());
+        assert_eq!(store.sessions().unwrap().len(), 2);
+        assert!(!store.unhide_session("none").unwrap());
+    }
+
+    #[test]
+    fn a_value_can_be_deleted() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .kv_set(0, "outside-archived", "s1", "{}", "2026-11-21T00:00:00Z")
+            .unwrap();
+        assert!(store.kv_delete(0, "outside-archived", "s1").unwrap());
+        assert!(!store.kv_delete(0, "outside-archived", "s1").unwrap());
+        assert!(store.kv_get(0, "outside-archived", "s1").unwrap().is_none());
     }
 
     #[test]

@@ -95,6 +95,7 @@ pub fn browser_error(e: BrowserError) -> ApiError {
     let code = match e {
         BrowserError::NotEnabled => "browser.notEnabled",
         BrowserError::NotRunning => "browser.notRunning",
+        BrowserError::Missing => "browser.missing",
         BrowserError::Denied => "browser.denied",
         BrowserError::Protocol(_) => "browser.failed",
     };

@@ -42,6 +42,15 @@ const tt = vi.workspace.terminal;
 const SHELLS = ["powerShell", "gitBash"] as const;
 type Shell = (typeof SHELLS)[number];
 const shellOptions: Option[] = SHELLS.map((s) => ({ value: s, label: tt.shells[s], about: tt.shellAbout[s] }));
+/** the shell picked last, opened by itself the next time the Shell tab is shown */
+const SHELL_KEY = "opw.workspace.shell";
+function savedShell(): Shell {
+  try {
+    return window.localStorage.getItem(SHELL_KEY) === "gitBash" ? "gitBash" : "powerShell";
+  } catch {
+    return "powerShell";
+  }
+}
 type View = "chat" | "claude" | "shell" | "changes" | "brief" | "comments";
 const tc = vi.workspace.composer;
 const tsc = vi.workspace.scripts;
@@ -75,13 +84,11 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
   const [draftMode, setDraftMode] = useState("");
   const [view, setView] = useState<{ id?: string; tab: View }>();
   const tab = view?.id === sessionId ? (view?.tab ?? "chat") : "chat";
-  const [shell, setShell] = useState<Shell>("powerShell");
+  const [shell, setShell] = useState<Shell>(savedShell);
   const [shellRequested, setShellRequested] = useState<string>();
   // a package script picked above the shell, typed into it once it is open
   const [command, setCommand] = useState<{ text: string; nonce: number }>();
   const [scripts, setScripts] = useState<RepoScript[]>();
-  // the script list above the shell: open until a script is picked, then one line
-  const [scriptsOpen, setScriptsOpen] = useState(true);
   const [lastScript, setLastScript] = useState<string>();
   const [caret, setCaret] = useState(0);
   const list = useRef<HTMLDivElement>(null);
@@ -111,7 +118,6 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
       attach.clear();
       setScripts(undefined);
       setCommand(undefined);
-      setScriptsOpen(true);
       setLastScript(undefined);
     }
     shown.current = sessionId;
@@ -223,12 +229,28 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
       alive = false;
     };
   }, [tab, sessionId, scripts]);
+  // the Shell tab shows a shell at once (the kind picked last), no empty page with a button
+  useEffect(() => {
+    if (tab === "shell" && sessionId && !shellKind) setShellRequested(sessionId);
+  }, [tab, sessionId, shellKind]);
   const runScript = (script: RepoScript) => {
     if (!sessionId) return;
     if (!shellKind) setShellRequested(sessionId);
     setCommand({ text: script.run, nonce: Date.now() });
     setLastScript(script.name);
-    setScriptsOpen(false);
+  };
+  // another kind of shell: the open one was closed (by the terminal), the new one opens once
+  // the session no longer reports the old one
+  const switchShell = (next: Shell) => {
+    setShell(next);
+    setCommand(undefined);
+    try {
+      window.localStorage.setItem(SHELL_KEY, next);
+    } catch {
+      // only a convenience: the next Shell tab opens PowerShell again
+    }
+    reload();
+    onChanged();
   };
   const loadDiff = useCallback(() => getSessionDiff(sessionId ?? ""), [sessionId]);
   const openFile = useCallback(
@@ -339,40 +361,21 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
           </button>
         )}
       </div>
-      {tab === "shell" && sessionId && scripts && (
-        <div className={`ws-scripts${scriptsOpen ? " is-open" : ""}`}>
-          <button className="ws-scripts-head" aria-expanded={scriptsOpen}
-            title={scriptsOpen ? tsc.foldHint : tsc.unfoldHint} onClick={() => setScriptsOpen((o) => !o)}>
-            <Icon name="chevron" size={11} className={scriptsOpen ? "is-open" : undefined} />
-            <strong>{tsc.title}</strong>
-            <span className="faint">
-              {scripts.length === 0 ? tsc.none : lastScript ? tsc.ran(lastScript) : tsc.count(scripts.length)}
-              {!scriptsOpen && scripts.length > 0 && ` · ${tsc.pickMore}`}
-            </span>
-          </button>
-          <div className="ws-scripts-body" inert={!scriptsOpen}>
-            <div>
-              <div className="ws-scripts-list" role="group" aria-label={tsc.title}>
-                {scripts.map((sc) => (
-                  <button key={sc.name} className="ws-script" title={sc.run} onClick={() => runScript(sc)}>
-                    <span className="ws-script-name">{sc.name}</span>
-                    <span className="faint mono ws-script-cmd">{sc.command}</span>
-                  </button>
-                ))}
-              </div>
-              {scripts.length > 0 && <p className="faint ws-scripts-about">{tsc.about}</p>}
-            </div>
-          </div>
-        </div>
-      )}
-      {tab === "shell" && !shellKind && (
-        <div className="ws-shell-pick">
-          <span className="faint">{tt.shellKind}</span>
-          <ModeSelect value={shell} options={shellOptions} label={tt.shellKind}
-            onChange={(v) => setShell(v === "gitBash" ? "gitBash" : "powerShell")} />
-          <button className="btn btn--sm" disabled={!sessionId} onClick={() => setShellRequested(sessionId)}>
-            {tt.openShell}
-          </button>
+      {tab === "shell" && sessionId && scripts && scripts.length > 0 && (
+        // one row of names (the command in the tooltip); a pick runs in the shell below
+        <div className="ws-scripts" role="group" aria-label={tsc.title}>
+          <span className="faint ws-scripts-label">{tsc.label}</span>
+          {scripts.map((sc) => (
+            <button
+              key={sc.name}
+              className={`btn btn--sm ws-script${lastScript === sc.name ? " is-last" : ""}`}
+              title={tsc.runs(sc.command)}
+              onClick={() => runScript(sc)}
+            >
+              {sc.name}
+            </button>
+          ))}
+          <span className="faint ws-scripts-about">{tsc.about}</span>
         </div>
       )}
       {claudeShown && (
@@ -387,7 +390,9 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
         <div className="ws-term-wrap" hidden={tab !== "shell"}>
           <Suspense fallback={<p className="dim ws-term-wait">{tt.opening}</p>}>
             <TerminalPane key={`${sessionId}:${shellKind}`} id={sessionId} kind={shellKind}
-              live={session?.shell === shellKind} command={command} onClose={() => closeTerminal(shellKind)} />
+              live={session?.shell === shellKind} command={command} onClose={() => closeTerminal(shellKind)}
+              kinds={{ value: shellKind, options: shellOptions, label: tt.shellKind,
+                onSwitched: (k) => switchShell(k === "gitBash" ? "gitBash" : "powerShell") }} />
           </Suspense>
         </div>
       )}
@@ -447,7 +452,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
                   {t.openVscode}
                 </button>
               )}
-              {session.live ? (
+              {session.live && (
                 <button
                   className="btn btn--sm btn--ghost"
                   title={t.endHint}
@@ -457,17 +462,18 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
                   <Icon name="pause" size={12} />
                   {t.end}
                 </button>
-              ) : (
-                <button
-                  className="btn btn--sm btn--ghost"
-                  title={t.hideHint}
-                  disabled={busy !== undefined || terminal || !!session.shell}
-                  onClick={() => void act("hide", () => hideSession(session.id).then(onHidden))}
-                >
-                  <Icon name="trash" size={12} />
-                  {t.hide}
-                </button>
               )}
+              {/* like the extension: off the list, back from "Đã lưu trữ"; not in the middle of a
+                  turn or while a terminal of it is open */}
+              <button
+                className="btn btn--sm btn--ghost"
+                title={running ? t.archiveBusy : terminal || session.shell ? t.archiveTerminal : t.archiveHint}
+                disabled={busy !== undefined || running || outside || terminal || !!session.shell}
+                onClick={() => void act("hide", () => hideSession(session.id).then(onHidden))}
+              >
+                <Icon name="archive" size={12} />
+                {t.archive}
+              </button>
             </div>
           )}
         </div>
@@ -520,6 +526,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
       <footer className="ws-composer">
         <div className="ws-chat-col">
           {terminal && <p className="note">{tt.chatReadOnly}</p>}
+          {session?.forkOf && <p className="note">{t.forkNote}</p>}
           {outside && session?.outside && (
             <div className="note ws-outside">
               <span>{t.outside(session.outside)}</span>

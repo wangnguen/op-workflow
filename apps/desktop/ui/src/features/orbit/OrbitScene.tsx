@@ -1,7 +1,7 @@
 import type { Spin } from "./geometry";
 import { useRef, useState } from "react";
 import type { PointerEvent, WheelEvent } from "react";
-import type { OrbitSnapshot } from "../../ipc/types";
+import type { OrbitSnapshot, TodayStats } from "../../ipc/types";
 import { VIEW, clampZoom, stepIndex, type Point } from "./geometry";
 import { Asteroids } from "./scene/Asteroids";
 import { DistantStars } from "./scene/DistantStars";
@@ -26,6 +26,15 @@ export interface ViewState {
 
 export const HOME_VIEW: ViewState = { zoom: 1, x: 0, y: 0 };
 
+/** What the sun in the centre shows while no task is in progress. */
+export interface MapSummary {
+  /** sessions with a turn running (the app's and those opened outside it) */
+  running: number;
+  /** sessions waiting for an answer */
+  waiting: number;
+  today?: TodayStats;
+}
+
 interface Props {
   snapshot: OrbitSnapshot;
   selection: Selection | null;
@@ -42,6 +51,7 @@ interface Props {
   onMoveItem: (key: string, p: Point, persist: boolean) => void;
   /** degrees the planetary system has turned (see useSpin) */
   rot?: Spin;
+  summary?: MapSummary;
 }
 
 /** Starts dragging one map item (nebula, far star) from where it is drawn now. */
@@ -51,7 +61,7 @@ const DRAG_THRESHOLD_PX = 4;
 /** A double click opens the item the click just before it picked, if it came this soon. */
 const OPEN_AFTER_PICK_MS = 600;
 
-export function OrbitScene({ snapshot, selection, onSelect: select, onOpen, view, onView, markers, now, layout, onMoveItem, rot = 0 }: Props) {
+export function OrbitScene({ snapshot, selection, onSelect: select, onOpen, view, onView, markers, now, layout, onMoveItem, rot = 0, summary }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   // the item the last click picked, so the double click that follows opens that very item
   const lastPick = useRef<{ sel: Selection; at: number } | null>(null);
@@ -210,7 +220,7 @@ export function OrbitScene({ snapshot, selection, onSelect: select, onOpen, view
         ) : (
           <Nebulae
             inbox={snapshot.inbox}
-            notice={snapshot.notice}
+            summary={summary}
             selectedTaskId={selection?.kind === "nebula" ? selection.taskId : undefined}
             onSelect={(taskId) => onSelect({ kind: "nebula", taskId })}
             layout={layout}

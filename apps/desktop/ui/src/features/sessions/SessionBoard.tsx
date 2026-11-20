@@ -1,157 +1,187 @@
+import { useState } from "react";
 import { agentLabel, vi } from "../../i18n/vi";
-import type { AgentKind, OrbitSnapshot, SessionStatus, WorkspaceSnapshot } from "../../ipc/types";
+import { archiveOutside, hideSession } from "../../ipc/client";
+import type { AgentKind, OrbitSnapshot, WorkspaceSnapshot } from "../../ipc/types";
+import { formatRelative, formatUsd } from "../../shared/format";
 import { Icon } from "../../shared/ui/Icon";
-import { StatusChip } from "../../shared/ui/StatusChip";
 import type { Go } from "../orbit/primary";
-import { StartOver } from "../task/StartOver";
-import { groupSessions, type SessionItem } from "./sessions";
+import { sessionTable, tally, type SessionRow } from "./sessions";
 
 interface Props {
   snapshot: OrbitSnapshot;
-  /** Workspace sessions: a task's card takes their state, sessions without a task get cards */
+  /** Workspace sessions (the app's and those open outside it) */
   workspace?: WorkspaceSnapshot;
-  /** "Tới phiên" and the card's title */
+  now: number;
+  /** "Tới phiên" and the row's title */
   onGo?: (go: Go) => void;
-  /** centre the task on the map */
-  onShow?: (taskId: string) => void;
-  /** "Lấy issue" for a task in "Đang làm" */
-  onIssues?: (taskId: string) => void;
-  /** show the task's brief.md (absent in the browser preview) */
-  onBrief?: (taskId: string) => void;
-  /** tasks whose issues are being read right now */
-  reading?: ReadonlySet<string>;
-  /** open the task window (brief, plan, findings, push, log) */
+  /** open the task window (the task id on a row) */
   onOpen?: (taskId: string) => void;
-  /** the OpenProject id of a task, for Làm lại từ đầu */
-  wpIdOf?: (taskId: string) => number | undefined;
-  /** a task was started over */
+  /** a session was archived: read everything again */
   onChanged?: () => void;
+  onError?: (e: unknown) => void;
 }
 
 const AVATAR: Record<AgentKind, string> = { claude: "CL", codex: "CX", shell: "SH" };
+const t = vi.sessions;
 
-const COLUMNS: { key: SessionStatus; title: string; hint: string }[] = [
-  { key: "waiting", title: vi.sessions.needsYou, hint: vi.sessions.needsYouHint },
-  { key: "running", title: vi.sessions.running, hint: vi.sessions.runningHint },
-  { key: "idle", title: vi.sessions.idle, hint: vi.sessions.idleHint },
-];
-
-function Card({ s, onShow, onIssues, onBrief, onOpen, onGo, reading, wpIdOf, onChanged }: { s: SessionItem } & Omit<Props, "snapshot" | "workspace">) {
-  const taskId = s.taskId;
-  // a task whose steps run no AI right now: issues and brief can be read again
-  const isTask = taskId !== undefined && !s.agent;
-  const wpId = taskId && s.inApp ? wpIdOf?.(taskId) : undefined;
-  const goHint = s.inApp ? (s.asks ? vi.sessions.goAskHint : vi.sessions.goHint) : vi.sessions.goOutsideHint;
+function Row({ r, now, onGo, onOpen, onArchive, archiving }: {
+  r: SessionRow;
+  now: number;
+  onGo?: (go: Go) => void;
+  onOpen?: (taskId: string) => void;
+  onArchive: (r: SessionRow) => void;
+  archiving: boolean;
+}) {
+  const goHint = r.kind === "outside" ? t.goOutsideHint : r.asks ? t.goAskHint : t.goHint;
+  const where = r.kind === "outside" ? (r.openIn ? `${t.outside} · ${r.openIn}` : t.outside) : r.kind === "task" ? t.noSession : undefined;
+  const ctx = r.contextPct;
   return (
-    <article className={`s-card s-card--${s.status}${s.agent ? ` s-card--${s.agent}` : " s-card--task"}`}>
-      <header>
-        {s.agent ? (
-          <span className={`s-avatar s-avatar--${s.agent}`}>{AVATAR[s.agent]}</span>
-        ) : (
-          <span className="s-avatar s-avatar--task" aria-hidden="true">
-            <Icon name="branch" size={14} />
-          </span>
-        )}
-        <span className="s-titles">
-          {onGo ? (
-            <button type="button" className="s-title-btn" title={goHint} onClick={() => onGo(s.to)}>
-              {s.title}
-            </button>
+    <tr className={`s-row s-row--${r.status}`}>
+      <td className="s-cell-session">
+        <span className="s-session">
+          {r.agent ? (
+            <span className={`s-avatar s-avatar--${r.agent}`} title={agentLabel[r.agent]}>
+              {AVATAR[r.agent]}
+            </span>
           ) : (
-            <b title={s.title}>{s.title}</b>
-          )}
-          <span className="faint" title={s.agent ? `${agentLabel[s.agent]} · ${s.detail}` : s.detail}>
-            {s.agent ? `${agentLabel[s.agent]} · ${s.detail}` : s.detail}
-          </span>
-          {(s.nxStatus || s.repo || s.branch) && (
-            <span className="s-meta">
-              {s.nxStatus && <StatusChip name={s.nxStatus} color={s.nxStatusColor} />}
-              {s.repo && (
-                <span className="s-repo faint" title={s.repo}>
-                  {s.repo}
-                </span>
-              )}
-              {s.branch && (
-                <span className="s-branch mono" title={s.branch}>
-                  {s.branch}
-                </span>
-              )}
+            <span className="s-avatar s-avatar--task" aria-hidden="true">
+              <Icon name="branch" size={13} />
             </span>
           )}
+          <span className="s-titles">
+            {onGo ? (
+              <button type="button" className="s-title-btn" title={`${r.title}\n${goHint}`} onClick={() => onGo(r.to)}>
+                {r.title}
+              </button>
+            ) : (
+              <b title={r.title}>{r.title}</b>
+            )}
+            {(r.taskId || where) && (
+              <span className="s-sub faint">
+                {r.taskId &&
+                  (onOpen ? (
+                    <button type="button" className="link-btn mono" title={vi.flow.openHint} onClick={() => onOpen(r.taskId ?? "")}>
+                      {r.taskId}
+                    </button>
+                  ) : (
+                    <span className="mono">{r.taskId}</span>
+                  ))}
+                {where && <span>{where}</span>}
+              </span>
+            )}
+          </span>
         </span>
-      </header>
-      {s.contextPct !== undefined && (
-        <div className="s-ctx">
-          <div className={`bar${s.agent === "codex" ? " bar--codex" : ""}${s.contextPct >= 90 ? " bar--hot" : ""}`}>
-            <span style={{ width: `${Math.min(100, s.contextPct)}%` }} />
-          </div>
-          <span className="faint">context {Math.round(s.contextPct)}%</span>
-        </div>
-      )}
-      <footer className="s-actions">
+      </td>
+      <td>
+        <span className="s-state">
+          <span className={`s-dot s-dot--${r.status}`} aria-hidden="true" />
+          {r.stateText}
+        </span>
+      </td>
+      <td className="s-cell-activity">
+        <span className="s-activity" title={r.activity}>
+          {r.activity || <span className="faint">—</span>}
+        </span>
+      </td>
+      <td className="s-cell-num faint" title={r.updatedAt}>
+        {formatRelative(r.updatedAt, now)}
+      </td>
+      <td className="s-cell-ctx">
+        {ctx !== undefined ? (
+          <span className="s-ctx" title={t.contextHint}>
+            <span className={`bar${r.agent === "codex" ? " bar--codex" : ""}${ctx >= 90 ? " bar--hot" : ""}`}>
+              <span style={{ width: `${Math.min(100, ctx)}%` }} />
+            </span>
+            <span className="faint">{Math.round(ctx)}%</span>
+          </span>
+        ) : (
+          <span className="faint">—</span>
+        )}
+      </td>
+      <td className="s-cell-num">{r.costUsd !== undefined ? formatUsd(r.costUsd) : <span className="faint">—</span>}</td>
+      <td className="s-cell-actions">
         {onGo && (
-          <button className={`btn btn--sm${s.asks ? " btn--primary" : ""}`} title={goHint} onClick={() => onGo(s.to)}>
+          <button className={`btn btn--sm${r.asks ? " btn--primary" : ""}`} title={goHint} onClick={() => onGo(r.to)}>
             <Icon name="chat" size={12} />
-            {s.asks ? vi.sessions.goAsk : vi.sessions.go}
+            {r.asks ? t.goAsk : t.go}
           </button>
         )}
-        {taskId && onShow && (
-          <button className="btn btn--sm btn--ghost" title={vi.sessions.showOnMapHint} onClick={() => onShow(taskId)}>
-            <Icon name="dot" size={12} />
-            {vi.sessions.showOnMap}
-          </button>
-        )}
-        {isTask && taskId && onIssues && (
+        {r.kind !== "task" && (
           <button
             className="btn btn--sm btn--ghost"
-            title={vi.board.issuesHint}
-            disabled={reading?.has(taskId)}
-            onClick={() => onIssues(taskId)}
+            title={r.archiveBlocked ?? (r.kind === "outside" ? t.archiveOutsideHint : t.archiveHint)}
+            disabled={archiving || r.archiveBlocked !== undefined}
+            onClick={() => onArchive(r)}
           >
-            <Icon name="refresh" size={12} className={reading?.has(taskId) ? "is-spinning" : undefined} />
-            {vi.board.issues}
+            <Icon name="archive" size={12} />
+            {t.archive}
           </button>
         )}
-        {isTask && taskId && onBrief && (
-          <button className="btn btn--sm" title={vi.board.briefHint} onClick={() => onBrief(taskId)}>
-            <Icon name="file" size={12} />
-            {vi.board.brief}
-          </button>
-        )}
-        {taskId && s.inApp && onOpen && (
-          <button className="btn btn--sm" title={vi.flow.openHint} onClick={() => onOpen(taskId)}>
-            {vi.flow.open}
-          </button>
-        )}
-        {wpId !== undefined && (
-          <StartOver wpId={wpId} small disabled={s.status === "running"} onDone={() => onChanged?.()} />
-        )}
-      </footer>
-    </article>
+      </td>
+    </tr>
   );
 }
 
-/** Session cards grouped Cần bạn / Đang chạy / Rảnh. */
-export function SessionBoard({ snapshot, workspace, ...actions }: Props) {
-  const groups = groupSessions(snapshot, workspace);
+/** "Bảng": every session in one table, grouped by repo. */
+export function SessionBoard({ snapshot, workspace, now, onGo, onOpen, onChanged, onError }: Props) {
+  const groups = sessionTable(snapshot, workspace);
+  const [archiving, setArchiving] = useState<string>();
+  const archive = async (r: SessionRow) => {
+    setArchiving(r.id);
+    try {
+      const id = r.id.slice(r.id.indexOf(":") + 1);
+      await (r.kind === "outside" ? archiveOutside(id) : hideSession(id));
+      onChanged?.();
+    } catch (e) {
+      onError?.(e);
+    } finally {
+      setArchiving(undefined);
+    }
+  };
+  if (groups.length === 0) {
+    return (
+      <div className="session-table-wrap">
+        <p className="s-table-empty dim">{t.empty}</p>
+      </div>
+    );
+  }
   return (
-    <div className="session-board">
-      {COLUMNS.map((col) => (
-        <section key={col.key} className={`s-column s-column--${col.key}`}>
-          <header className="s-column-head">
-            <h2>
-              {col.title} <span className="column-count">{groups[col.key].length}</span>
-            </h2>
-            <span className="faint">{col.hint}</span>
-          </header>
-          {groups[col.key].length === 0 && <div className="column-empty">{vi.sessions.none}</div>}
-          <div className="s-cards">
-            {groups[col.key].map((s) => (
-              <Card key={s.id} s={s} {...actions} />
-            ))}
-          </div>
-        </section>
-      ))}
+    <div className="session-table-wrap">
+      <table className="s-table">
+        <thead>
+          <tr>
+            <th scope="col">{t.colSession}</th>
+            <th scope="col">{t.colState}</th>
+            <th scope="col">{t.colActivity}</th>
+            <th scope="col" className="s-cell-num">{t.colUpdated}</th>
+            <th scope="col">{t.colContext}</th>
+            <th scope="col" className="s-cell-num">{t.colCost}</th>
+            <th scope="col">
+              <span className="sr-only">{t.colActions}</span>
+            </th>
+          </tr>
+        </thead>
+        {groups.map((g) => {
+          const n = tally(g.rows);
+          return (
+            <tbody key={g.key}>
+              <tr className="s-group-row">
+                <th colSpan={7} scope="rowgroup">
+                  <span className="s-group-head" title={g.path}>
+                    <Icon name="folder" size={13} />
+                    <span className="s-group-name">{g.name || t.noRepo}</span>
+                    <span className="faint">{t.groupTally(g.rows.length, n.waiting, n.running)}</span>
+                  </span>
+                </th>
+              </tr>
+              {g.rows.map((r) => (
+                <Row key={r.id} r={r} now={now} onGo={onGo} onOpen={onOpen} onArchive={(x) => void archive(x)}
+                  archiving={archiving !== undefined} />
+              ))}
+            </tbody>
+          );
+        })}
+      </table>
     </div>
   );
 }

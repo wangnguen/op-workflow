@@ -2,6 +2,7 @@
 // Every DEMO_FRAME_MS the active task advances one frame through the 8 steps.
 import type {
   AgentCatalog,
+  AiCli,
   AgentKind,
   AgentView,
   AppInfo,
@@ -573,8 +574,10 @@ export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
     quota: mockQuota(frameIndex, now),
     links: mockLinks(now),
     today: { tokens: 1_240_000 + frameIndex * 18_000, costUsd: 0.84 + f.cost },
-    mode: "demo",
-    tasksDirOffer: mockTasksDirOffer(),
+    mode: mockNoToken() ? "noToken" : "demo",
+    notice: mockNoToken()
+      ? "Chưa có token OpenProject nên chưa có task giao cho bạn. Workspace và Phiên vẫn dùng bình thường; muốn nhận task thì mở Cài đặt → OpenProject."
+      : undefined,
     unreadAlerts: mockUnreadAlerts(),
   };
   return board;
@@ -598,8 +601,8 @@ export function mockSettings(): SettingsView {
     ],
     configPath: "C:/Users/me/.op-workflow-dev/config.json",
     dataDir: "C:/Users/me/.op-workflow-dev",
-    browserDebug: "Chrome",
-    tasksDir: mockTasksDir ?? "C:/Users/me/.op-workflow-dev/tasks",
+    browser: mockBrowser(),
+    tasksDir: mockTasksDir ?? MOCK_DESKTOP_TASKS,
     tasksDirChosen: mockTasksDir !== undefined,
     tasksDirSuggested: MOCK_DESKTOP_TASKS,
     notify: mockNotify(),
@@ -866,11 +869,43 @@ export function mockSetTasksDir(dir?: string): TasksDirChange {
   return { path: mockTasksDir, moved: dir ? 2 : 0, warnings: [] };
 }
 
-/** `?offer` in the preview URL shows the one-time "save briefs on the Desktop" question. */
-export const mockTasksDirOffer = (): string | undefined =>
-  mockTasksDir === undefined && typeof location !== "undefined" && new URLSearchParams(location.search).has("offer")
-    ? MOCK_DESKTOP_TASKS
-    : undefined;
+const urlFlag = (name: string): string | null =>
+  typeof location === "undefined" ? null : new URLSearchParams(location.search).get(name);
+
+/** `?noToken` in the preview URL: the board without an OpenProject token. */
+export const mockNoToken = (): boolean => urlFlag("noToken") !== null;
+
+/** `?chrome=closed|notEnabled|missing` in the preview URL: Chrome in that state. */
+function mockBrowser(): SettingsView["browser"] {
+  const state = urlFlag("chrome");
+  if (state === "closed" || state === "notEnabled" || state === "missing") return { state };
+  return { state: "ready", name: "Chrome" };
+}
+
+/** Claude Code and Codex in the preview; `?noCodex` shows Codex not installed, `?codexOut`
+ *  signed out. */
+export function mockAiClis(): AiCli[] {
+  const codex: AiCli =
+    urlFlag("noCodex") !== null
+      ? { provider: "codex", installWith: "npm install -g @openai/codex" }
+      : {
+          provider: "codex",
+          path: "C:/Users/me/AppData/Roaming/npm/codex.exe",
+          version: "codex-cli 0.169.1",
+          signedIn: urlFlag("codexOut") === null,
+          installWith: "npm install -g @openai/codex",
+        };
+  return [
+    {
+      provider: "claude",
+      path: "C:/Users/me/.local/bin/claude.exe",
+      version: "2.1.329 (Claude Code)",
+      signedIn: true,
+      installWith: "PowerShell: irm https://claude.ai/install.ps1 | iex",
+    },
+    codex,
+  ];
+}
 
 const mockIssueStatus = new Map<number, IssueStatus>();
 

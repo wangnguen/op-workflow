@@ -463,7 +463,6 @@ pub fn board(tick: u64) -> BoardSnapshot {
     BoardSnapshot {
         mode: opw_domain::view::DataMode::Demo,
         notice: None,
-        tasks_dir_offer: None,
         unread_alerts: 0,
         active_task_ids: system
             .filter(|s| s.gate.is_some() || !s.agents.is_empty())

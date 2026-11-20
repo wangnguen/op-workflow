@@ -271,15 +271,12 @@ pub struct BoardSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<ProviderLink>,
     pub today: TodayStats,
-    /// `demo` until an OpenProject token is saved, then `live`.
+    /// `noToken` until an OpenProject token is saved (no task list, the rest of the app
+    /// works), then `live`; `demo` only in the browser preview.
     pub mode: DataMode,
     /// Problem to show above the board (e.g. OpenProject unreachable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
-    /// Briefs still live in the hidden data folder and the user has not chosen: offer this
-    /// folder (on the Desktop) once.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tasks_dir_offer: Option<String>,
     /// Alerts (bell) the user has not opened yet.
     #[serde(default)]
     pub unread_alerts: u32,
@@ -290,9 +287,52 @@ pub struct BoardSnapshot {
 pub enum DataMode {
     Demo,
     Live,
+    /// No OpenProject token: no tasks, Workspace and Phiên still work.
+    NoToken,
 }
 
 // ---------- settings ----------
+
+/// Chrome as "Lấy issue" sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserStatus {
+    pub state: BrowserState,
+    /// "Chrome", "Edge", … when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BrowserState {
+    /// Running with remote debugging on: "Lấy issue" connects (Chrome asks Allow).
+    Ready,
+    /// Not running: "Lấy issue" opens it first.
+    Closed,
+    /// Running, remote debugging off: chrome://inspect/#remote-debugging turns it on.
+    NotEnabled,
+    /// No Chrome on this machine.
+    Missing,
+}
+
+/// Claude Code or Codex on this machine: installed, which version, signed in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCli {
+    pub provider: Provider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// `None` when the CLI did not say (or is not installed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+    /// How "Cài" installs it here ("PowerShell: irm … | iex", "npm i -g …"); `None` = the app
+    /// only opens the install page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_with: Option<String>,
+}
 
 /// What the Settings dialog shows. Never contains the token itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -322,10 +362,8 @@ pub struct SettingsView {
     pub config_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
-    /// Browser that allows remote debugging right now ("Chrome", "Edge"); `None` = not enabled
-    /// (or the browser is closed). Needed for "Lấy issue".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub browser_debug: Option<String>,
+    /// Whether "Lấy issue" can reach the user's Chrome now.
+    pub browser: BrowserStatus,
     /// Folder of the task folders (`<task id>/brief.md`) in use now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks_dir: Option<String>,
@@ -334,6 +372,9 @@ pub struct SettingsView {
     /// The Desktop folder the app suggests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks_dir_suggested: Option<String>,
+    /// Why the briefs could not go to the Desktop folder (they stay in the data folder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tasks_dir_error: Option<String>,
     /// Which Windows notifications are on (`notify` in config).
     #[serde(default)]
     pub notify: NotifySettings,

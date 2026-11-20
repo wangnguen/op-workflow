@@ -14,7 +14,7 @@ interface Props {
 }
 
 /** A button with what it does written under it (no hover needed). */
-function Choice({
+export function Choice({
   label,
   about,
   tone,

@@ -170,7 +170,9 @@ export interface TodayStats {
   costUsd: number;
 }
 
-export type DataMode = "demo" | "live";
+/** live: tasks from OpenProject · noToken: no OpenProject token yet (no tasks; Workspace and
+ *  Phiên work) · demo: the browser preview's made-up data */
+export type DataMode = "demo" | "live" | "noToken";
 
 export interface BoardSnapshot {
   tasks: TaskCard[];
@@ -180,12 +182,9 @@ export interface BoardSnapshot {
   /** quota connections per provider; absent in demo data */
   links?: ProviderLink[];
   today: TodayStats;
-  /** "demo" until an OpenProject token is saved, then "live" */
   mode: DataMode;
   /** problem to show above the board, e.g. OpenProject unreachable */
   notice?: string;
-  /** briefs are still in the hidden data folder: offer this Desktop folder once */
-  tasksDirOffer?: string;
   /** alerts in the bell the user has not opened yet */
   unreadAlerts?: number;
 }
@@ -196,6 +195,26 @@ export interface BoardSnapshot {
 /** What closing the main window does: ask, go to the tray (the AI keeps running) or quit (every
  *  running AI step is stopped with what it started). */
 export type CloseChoice = "ask" | "tray" | "quit";
+
+/** ready: running with remote debugging on · closed: not running ("Lấy issue" opens it) ·
+ *  notEnabled: running, remote debugging off · missing: no Chrome on this machine */
+export type BrowserState = "ready" | "closed" | "notEnabled" | "missing";
+export interface BrowserStatus {
+  state: BrowserState;
+  /** "Chrome", "Edge", … when known */
+  name?: string;
+}
+
+/** Claude Code or Codex on this machine. */
+export interface AiCli {
+  provider: Provider;
+  path?: string;
+  version?: string;
+  /** absent when the CLI did not say (or is not installed) */
+  signedIn?: boolean;
+  /** how "Cài" installs it here; absent = the app opens the install page */
+  installWith?: string;
+}
 
 export interface SettingsView {
   nxBaseUrl: string;
@@ -213,14 +232,16 @@ export interface SettingsView {
   projects: ProjectMemory[];
   configPath?: string;
   dataDir?: string;
-  /** browser that allows "Lấy issue" to connect right now ("Chrome"); absent = not enabled */
-  browserDebug?: string;
+  /** whether "Lấy issue" can reach Chrome now */
+  browser: BrowserStatus;
   /** folder of the task folders (`<task id>/brief.md`) in use now */
   tasksDir?: string;
   /** false until the user picked a folder (or kept the default) once */
   tasksDirChosen: boolean;
   /** the Desktop folder the app suggests */
   tasksDirSuggested?: string;
+  /** why the briefs could not move to the Desktop folder (they stay in the data folder) */
+  tasksDirError?: string;
   /** which Windows notifications are on */
   notify?: NotifySettings;
   /** agent, model and effort of each AI step, with past cost and time */
@@ -1113,6 +1134,10 @@ export interface SessionView {
   updatedAt: string;
   /** why the last start or run failed */
   error?: string;
+  /** what it did last, one line (the sessions table) */
+  activity?: string;
+  /** a copy that has not run yet: the conversation it was copied from */
+  forkOf?: string;
 }
 
 export type TerminalKind = "claude" | "powerShell" | "gitBash";
@@ -1177,6 +1202,19 @@ export interface WorkspaceSnapshot {
   sessions: SessionView[];
   /** Claude sessions open outside the app (empty when hidden in Settings), newest first */
   outside?: OutsideSession[];
+  /** sessions taken off the list ("Đã lưu trữ"), newest first */
+  archived?: ArchivedSession[];
+}
+
+/** A session taken off the Workspace list; its conversation stays with Claude Code. */
+export interface ArchivedSession {
+  id: string;
+  title: string;
+  repo: string;
+  taskId?: string;
+  /** opened outside the app rather than run by it */
+  outside?: boolean;
+  archivedAt: string;
 }
 
 /** A Claude session opened outside the app (VS Code, a terminal); the app only shows it. */
@@ -1293,6 +1331,9 @@ export interface Commands {
   open_release_page: null;
   reconnect_quota: null;
   open_login: null;
+  ai_clis: AiCli[];
+  install_cli: null;
+  open_link: null;
   reveal_path: null;
   fetch_issues: IssueFetch;
   open_browser_debug: null;
@@ -1348,6 +1389,10 @@ export interface Commands {
   session_scripts: RepoScript[];
   session_notify_wait: null;
   outside_chat: OutsideChat;
+  outside_archive: null;
+  session_restore: null;
+  outside_adopt: SessionView;
+  outside_fork: SessionView;
   set_hide_outside_sessions: SettingsView;
 }
 
@@ -1362,6 +1407,9 @@ export interface CommandArgs {
   open_brief: { wpId: number };
   reconnect_quota: { provider?: Provider };
   open_login: { provider: Provider };
+  ai_clis: Record<string, never>;
+  install_cli: { provider: Provider };
+  open_link: { url: string };
   reveal_path: { path: string };
   fetch_issues: { wpId: number };
   set_tasks_dir: { dir?: string };
@@ -1413,5 +1461,9 @@ export interface CommandArgs {
   session_scripts: { id: string };
   session_notify_wait: { id: string };
   outside_chat: { id: string };
+  outside_archive: { id: string };
+  session_restore: { id: string };
+  outside_adopt: { id: string };
+  outside_fork: { id: string };
   set_hide_outside_sessions: { hide: boolean };
 }

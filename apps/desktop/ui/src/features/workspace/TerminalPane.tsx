@@ -8,6 +8,8 @@ import { vi } from "../../i18n/vi";
 import { controlTerminal, errorMessage, openTerminal } from "../../ipc/client";
 import type { TerminalAction, TerminalKind } from "../../ipc/types";
 import { useTheme } from "../../shared/useTheme";
+import { ModeSelect } from "../settings/ModeSelect";
+import type { Option } from "../settings/stepChoice";
 
 const tt = vi.workspace.terminal;
 /** an open of the same console waits for the one before it (React mounts twice in dev) */
@@ -72,7 +74,7 @@ function terminalTheme(el: HTMLElement) {
  *  (PLAN.md §12 B2). The process lives in the app; this view attaches to it, gets what it
  *  missed replayed, and lets go when unmounted (the process keeps running). */
 export function TerminalPane({
-  id, kind, live, command, onClose,
+  id, kind, live, command, onClose, kinds,
 }: {
   id: string;
   kind: TerminalKind;
@@ -81,6 +83,8 @@ export function TerminalPane({
   /** a line to type into the console (a script picked above it); a new `nonce` types it again */
   command?: { text: string; nonce: number };
   onClose: () => void;
+  /** a shell: the picker of its kind in the bar; another pick closes this one first */
+  kinds?: { value: string; options: Option[]; label: string; onSwitched: (kind: string) => void };
 }) {
   const host = useRef<HTMLDivElement>(null);
   const instance = useRef<Terminal | null>(null);
@@ -206,6 +210,25 @@ export function TerminalPane({
   return (
     <div className="ws-terminal">
       <div className="ws-terminal-bar">
+        {kinds && (
+          <div className="ws-terminal-kind">
+            <span className="faint">{kinds.label}</span>
+            <ModeSelect
+              value={kinds.value}
+              options={kinds.options}
+              label={kinds.label}
+              disabled={closing}
+              onChange={(next) => {
+                if (!next || next === kinds.value) return;
+                setClosing(true);
+                void close.current().then(() => kinds.onSwitched(next)).catch((e) => {
+                  setError(errorMessage(e));
+                  setClosing(false);
+                });
+              }}
+            />
+          </div>
+        )}
         <input
           type="search"
           className="input ws-terminal-search"

@@ -103,6 +103,9 @@ fn main() {
             app_api::open_release_page,
             app_api::reconnect_quota,
             app_api::open_login,
+            app_api::ai_clis,
+            app_api::install_cli,
+            app_api::open_link,
             start_api::start_options,
             start_api::repo_state,
             start_api::fetch_repo,
@@ -175,6 +178,10 @@ fn main() {
             session_api::session_scripts,
             session_api::session_notify_wait,
             session_api::outside_chat,
+            session_api::outside_archive,
+            session_api::session_restore,
+            session_api::outside_adopt,
+            session_api::outside_fork,
         ])
         .build(tauri::generate_context!())
         .expect("error while building op-workflow")

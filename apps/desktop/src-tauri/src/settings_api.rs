@@ -5,7 +5,8 @@ use opw_domain::view::{ApiError, SettingsView, StepChoiceRequest, StepModels, Ta
 use opw_orchestrator::AppService;
 use tauri::State;
 
-#[tauri::command]
+/// Looks at Chrome (a process list, a local port), so off the main thread.
+#[tauri::command(async)]
 pub fn settings_status(service: State<'_, AppService>) -> SettingsView {
     service.settings()
 }

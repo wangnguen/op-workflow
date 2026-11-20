@@ -10,7 +10,7 @@ import {
   resetMockFlows,
 } from "../../ipc/mockFlow";
 import type { FindingView, TaskDetail } from "../../ipc/types";
-import { parseBlocks } from "../../shared/Markdown";
+import { cleanHtml, parseBlocks } from "../../shared/Markdown";
 import { asTab, defaultTab, findingCounts, gateTab, sortFindings, unpicked, unpickedSevere } from "./taskTabs";
 
 const finding = (over: Partial<FindingView>): FindingView => ({
@@ -66,6 +66,14 @@ describe("task window helpers", () => {
     const blocks = parseBlocks("## Nguyên nhân\n`a.ts:1` lỗi\n\n- một\n- hai\n  tiếp\n1. x\n```\ncode\n```");
     expect(blocks.map((b) => b.kind)).toEqual(["h", "p", "ul", "ol", "code"]);
     expect(blocks[2]).toEqual({ kind: "ul", items: ["một", "hai tiếp"] });
+  });
+
+  it("cleans the HTML OpenProject leaves in a description and keeps code as written", () => {
+    expect(cleanHtml("a<br>b&nbsp;c<br/>d &amp; &lt;x&gt; &#39;q&#39;")).toBe("a\nb c\nd & <x> 'q'");
+    expect(cleanHtml("<p>đoạn</p><strong>đậm</strong>")).toBe("đoạn\n**đậm**");
+    expect(cleanHtml("`<br>` giữ\n```\n<br> &nbsp;\n```")).toBe("`<br>` giữ\n```\n<br> &nbsp;\n```");
+    // a paragraph keeps its line breaks
+    expect(parseBlocks("dòng 1\ndòng 2")).toEqual([{ kind: "p", text: "dòng 1\ndòng 2" }]);
   });
 });
 

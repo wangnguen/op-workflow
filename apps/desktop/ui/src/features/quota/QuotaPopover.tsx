@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { agentLabel, vi } from "../../i18n/vi";
-import { errorMessage, openLogin, reconnectQuota } from "../../ipc/client";
+import { errorMessage, installCli, openLogin, reconnectQuota } from "../../ipc/client";
 import type { Provider, ProviderLink, QuotaSnapshot } from "../../ipc/types";
 import { formatCountdown, formatRelative } from "../../shared/format";
 import { Icon } from "../../shared/ui/Icon";
@@ -41,6 +41,8 @@ export function LinkActions({
   const connecting = link?.status === "connecting";
   // signed in and connected: nothing to do here (the popover header has "Làm mới")
   const showLogin = link?.status === "signedOut" || link?.status === "error";
+  // the CLI is not on this machine: install it from here
+  const showInstall = link?.status === "missing";
   const showReconnect = compact || (link !== undefined && link.status !== "ok");
   return (
     <div className="qp-link">
@@ -59,8 +61,17 @@ export function LinkActions({
           {q.connecting}
         </p>
       )}
-      {(showLogin || showReconnect) && (
+      {(showLogin || showReconnect || showInstall) && (
         <span className="qp-actions">
+          {showInstall && (
+            <button
+              className="btn btn--sm btn--primary"
+              title={q.installHint(agentLabel[provider])}
+              onClick={() => run(installCli(provider))}
+            >
+              {q.install}
+            </button>
+          )}
           {showLogin && (
             <button
               className={`btn btn--sm${link?.status === "signedOut" ? " btn--primary" : ""}`}

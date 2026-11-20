@@ -4,11 +4,13 @@ import {
   OTHER_PROJECT,
   applyPatch,
   buildTree,
+  byRepo,
   pickFor,
   repoName,
   samePick,
   stepItemIndex,
   taskState,
+  urgentState,
 } from "./chatState";
 
 const view = (id: string, part: Partial<SessionView> = {}): SessionView => ({
@@ -170,5 +172,27 @@ describe("pickFor", () => {
     expect(stepItemIndex(items, "fix")).toBe(3);
     expect(stepItemIndex(items, "analyze")).toBe(0);
     expect(stepItemIndex(items, "pushSummary")).toBe(-1);
+  });
+});
+
+describe("byRepo", () => {
+  it("puts sessions of one folder together, whatever the slashes or letter case, in first-seen order", () => {
+    const items = [
+      { id: "a", repo: "C:/code/web" },
+      { id: "b", repo: "C:\\code\\api\\" },
+      { id: "c", repo: "c:\\Code\\Web" },
+    ];
+    const groups = byRepo(items, (x) => x.repo);
+    expect(groups.map((g) => [g.name, g.items.map((x) => x.id)])).toEqual([
+      ["web", ["a", "c"]],
+      ["api", ["b"]],
+    ]);
+    expect(new Set(groups.map((g) => g.key)).size).toBe(2);
+  });
+
+  it("shows the most urgent state of a repo's sessions", () => {
+    expect(urgentState(["idle", "running", "waiting"])).toBe("waiting");
+    expect(urgentState(["idle", "outside"])).toBe("outside");
+    expect(urgentState([])).toBeUndefined();
   });
 });

@@ -3,6 +3,7 @@ import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  mockAiClis,
   mockAppInfo,
   mockBoard,
   mockClearToken,
@@ -50,6 +51,10 @@ import {
   mockTaskDiff,
 } from "./mockTask";
 import {
+  mockAdoptOutside,
+  mockArchiveOutside,
+  mockForkOutside,
+  mockRestoreSession,
   mockSessionAnswer,
   mockSessionChat,
   mockSessionHide,
@@ -65,6 +70,7 @@ import {
   onMockSessionPatch,
 } from "./mockWorkspace";
 import type {
+  AiCli,
   AskAnswer,
   NewSession,
   OutsideChat,
@@ -255,6 +261,21 @@ export const reconnectQuota = (provider?: Provider): Promise<null> =>
 /** Opens `claude auth login` / `codex login` in a console; the app reconnects when it closes. */
 export const openLogin = (provider: Provider): Promise<null> =>
   call("open_login", () => mockReconnect(provider), { provider });
+/** Claude Code and Codex on this machine: version, signed in, how "Cài" installs them. */
+export const getAiClis = (): Promise<AiCli[]> => call("ai_clis", () => mockAiClis());
+/** Runs the CLI's installer in a console (Codex needs npm; without it the install page opens). */
+export const installCli = (provider: Provider): Promise<null> =>
+  call("install_cli", () => null, { provider });
+/** A link from a brief or a chat, in the default browser (https only). */
+export const openLink = (url: string): Promise<null> =>
+  call(
+    "open_link",
+    () => {
+      window.open(url, "_blank", "noopener");
+      return null;
+    },
+    { url },
+  );
 
 // ---------- start work ----------
 
@@ -480,6 +501,18 @@ export const notifySessionWait = (id: string): Promise<null> => call("session_no
 /** The conversation of a Claude session opened outside the app (read-only). */
 export const getOutsideChat = (id: string): Promise<OutsideChat> =>
   call("outside_chat", () => mockOutsideChat(id), { id });
+/** Takes a session opened outside the app off the list (it stays open where it is). */
+export const archiveOutside = (id: string): Promise<null> =>
+  call("outside_archive", () => mockArchiveOutside(id), { id });
+/** Puts an archived session back on the list. */
+export const restoreSession = (id: string): Promise<null> =>
+  call("session_restore", () => mockRestoreSession(id), { id });
+/** "Tiếp tục trong app": the session joins the app's list (typed into here once closed outside). */
+export const adoptOutside = (id: string): Promise<SessionView> =>
+  call("outside_adopt", () => mockAdoptOutside(id), { id });
+/** "Tách bản sao": a copy of the conversation, typed into here at once. */
+export const forkOutside = (id: string): Promise<SessionView> =>
+  call("outside_fork", () => mockForkOutside(id), { id });
 /** A session's notification was clicked: open that session. */
 export const onSessionClicked = (handler: (id: string) => void): (() => void) =>
   onEvent<string>("opw://open-session", handler);

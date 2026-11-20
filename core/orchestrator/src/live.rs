@@ -358,10 +358,64 @@ impl Live {
 
 fn missing_message(provider: Provider) -> String {
     match provider {
-        Provider::Claude => "Không thấy lệnh claude trên PATH. Cài Claude Code rồi bấm Kết nối lại.",
-        Provider::Codex => "Không thấy lệnh codex trên PATH. Cài Codex CLI rồi bấm Kết nối lại.",
+        Provider::Claude => "Máy này chưa cài Claude Code. Bấm Cài ở Cài đặt → Các bước AI (hoặc cài tay) rồi bấm Kết nối lại.",
+        Provider::Codex => "Máy này chưa cài Codex. Bấm Cài ở Cài đặt → Các bước AI (hoặc cài tay) rồi bấm Kết nối lại.",
     }
     .to_owned()
+}
+
+/// Claude Code's official installer for Windows (PowerShell, no Node needed).
+pub(crate) const CLAUDE_INSTALL: &str = "irm https://claude.ai/install.ps1 | iex";
+/// Codex CLI through npm (needs Node.js).
+pub(crate) const CODEX_INSTALL: &str = "npm install -g @openai/codex";
+/// Where to read how to install Codex when this machine has no npm.
+pub(crate) const CODEX_INSTALL_PAGE: &str = "https://github.com/openai/codex";
+
+impl Live {
+    /// "Cài": run the CLI's installer in a console the user watches; read the quota again
+    /// once that window closes. Codex needs npm here; without it, `Err` says so.
+    pub fn open_install(&self, provider: Provider) -> Result<(), String> {
+        let line = match provider {
+            Provider::Claude => {
+                format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{CLAUDE_INSTALL}\"")
+            }
+            Provider::Codex => {
+                if cli::find_npm().is_none() {
+                    return Err("Máy này chưa có Node.js (npm) để cài Codex. Cài Node.js rồi bấm Cài lại, hoặc làm theo trang hướng dẫn của Codex.".into());
+                }
+                CODEX_INSTALL.to_owned()
+            }
+        };
+        let mut child = install_console(&line).spawn().map_err(|e| e.to_string())?;
+        let waker = self.waker.clone();
+        spawn_named("opw-install-wait", move || {
+            let _ = child.wait();
+            waker.reconnect(Some(provider));
+        });
+        Ok(())
+    }
+}
+
+/// A visible console running one command line, kept open with `pause` so the result stays
+/// readable.
+#[cfg(windows)]
+fn install_console(line: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    let mut cmd = Command::new("cmd.exe");
+    // cmd /c strips the outer quotes and runs: <line> & echo. & pause
+    cmd.raw_arg(format!("/c \"{line} & echo. & pause\""))
+        .creation_flags(CREATE_NEW_CONSOLE);
+    strip_env(&mut cmd);
+    cmd
+}
+
+#[cfg(not(windows))]
+fn install_console(line: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", line]);
+    strip_env(&mut cmd);
+    cmd
 }
 
 fn signed_out_message(provider: Provider) -> String {
@@ -404,7 +458,7 @@ fn login_console(exe: &Path, args: &str) -> Command {
 }
 
 /// `Some(false)` when `claude auth status` says nobody is signed in; `None` when unsure.
-fn claude_signed_in(exe: &Path) -> Option<bool> {
+pub(crate) fn claude_signed_in(exe: &Path) -> Option<bool> {
     let out = hidden(
         Command::new(exe)
             .args(["auth", "status", "--json"])
@@ -418,7 +472,7 @@ fn claude_signed_in(exe: &Path) -> Option<bool> {
 }
 
 /// `Some(false)` when `codex login status` says nobody is signed in; `None` when unsure.
-fn codex_signed_in(exe: &Path) -> Option<bool> {
+pub(crate) fn codex_signed_in(exe: &Path) -> Option<bool> {
     let out = hidden(Command::new(exe).args(["login", "status"]).stdin(Stdio::null()))
         .output()
         .ok()?;
@@ -875,7 +929,8 @@ fn claude_loop(state: &Mutex<LiveState>, settings: &LiveSettings, wake: &Receive
             every.idle,
             active,
         );
-        if asked || due {
+        let full = full_until_reset(state.lock().ok().and_then(|s| s.claude.clone()).as_ref(), &now());
+        if asked || (due && !full) {
             let ok = probe_round(state, settings, every.idle);
             last_probe = Some((Instant::now(), ok));
         }
@@ -896,7 +951,8 @@ fn probe_round(state: &Mutex<LiveState>, settings: &LiveSettings, idle: Duration
     match cli::find_claude() {
         Some(exe) => match probe_claude(&exe, settings) {
             Ok(Some(snap)) => {
-                put_claude(state, snap);
+                let old = state.lock().ok().and_then(|s| s.claude.clone());
+                put_claude(state, keep_other_windows(snap, old.as_ref()));
                 set_link(state, Provider::Claude, LinkStatus::Ok, None);
                 true
             }
@@ -959,13 +1015,25 @@ fn probe_claude(exe: &Path, settings: &LiveSettings) -> Result<Option<QuotaSnaps
     let rx = line_reader(&mut child).ok_or("no stdout")?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
     let mut latest = None;
+    // what the run said when it failed ("Claude AI usage limit reached|<reset>")
+    let mut failure = String::new();
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
             Ok(line) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                    if v.get("type").and_then(Value::as_str) == Some("rate_limit_event") {
-                        latest = opw_quota::from_claude_rate_limit_event(&v, &now()).or(latest);
+                    match v.get("type").and_then(Value::as_str) {
+                        Some("rate_limit_event") => {
+                            latest = opw_quota::from_claude_rate_limit_event(&v, &now()).or(latest);
+                        }
+                        Some("result") if v["is_error"] == true => failure = result_text(&v),
+                        Some("assistant")
+                            if v["error"].is_string()
+                                || v.pointer("/message/model") == Some(&json!("<synthetic>")) =>
+                        {
+                            failure.push_str(&result_text(&v));
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -978,12 +1046,118 @@ fn probe_claude(exe: &Path, settings: &LiveSettings) -> Result<Option<QuotaSnaps
         }
     }
     let _ = child.wait();
-    Ok(latest)
+    Ok(latest.or_else(|| limit_reached(&failure, &now())))
+}
+
+/// The text of a `result` (its `result` or `errors`) or of a synthetic assistant message.
+fn result_text(v: &Value) -> String {
+    let mut out = String::new();
+    if let Some(s) = v["result"].as_str() {
+        out.push_str(s);
+    }
+    for e in v["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        out.push('\n');
+        out.push_str(e);
+    }
+    for part in v
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(s) = part["text"].as_str() {
+            out.push('\n');
+            out.push_str(s);
+        }
+    }
+    out
+}
+
+/// The probe was refused by the plan's usage limit: that window is full, until the reset time
+/// the CLI gave (when it gave one). "week" in the text means the weekly window.
+fn limit_reached(text: &str, observed_at: &str) -> Option<QuotaSnapshot> {
+    if !crate::quotagate::looks_quota_hit(text) {
+        return None;
+    }
+    let kind = if text.to_lowercase().contains("week") {
+        opw_domain::view::QuotaWindowKind::SevenDay
+    } else {
+        opw_domain::view::QuotaWindowKind::FiveHour
+    };
+    Some(QuotaSnapshot {
+        provider: Provider::Claude,
+        windows: vec![opw_domain::view::QuotaWindow {
+            kind,
+            used_pct: 100.0,
+            resets_at: crate::quotagate::reset_in_text(text),
+        }],
+        source: opw_quota::SOURCE_RATE_LIMIT_EVENT.to_owned(),
+        observed_at: observed_at.to_owned(),
+        plan: None,
+    })
+}
+
+/// A reading with one window (a refused probe) keeps the other window of the last reading.
+fn keep_other_windows(mut snap: QuotaSnapshot, old: Option<&QuotaSnapshot>) -> QuotaSnapshot {
+    for w in old.map(|o| o.windows.as_slice()).unwrap_or_default() {
+        if !snap.windows.iter().any(|n| n.kind == w.kind) {
+            snap.windows.push(w.clone());
+        }
+    }
+    snap
+}
+
+/// The Claude reading says a window is full until a time still ahead: probing before then
+/// only gets refused again.
+fn full_until_reset(snap: Option<&QuotaSnapshot>, now: &str) -> bool {
+    snap.is_some_and(|s| {
+        s.windows.iter().any(|w| {
+            w.used_pct >= 100.0
+                && w.resets_at
+                    .as_deref()
+                    .and_then(|at| opw_quota::seconds_between(now, at))
+                    .is_some_and(|ahead| ahead > 0.0)
+        })
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_probe_refused_by_the_limit_is_a_full_window_until_its_reset() {
+        let at = "2026-11-21T01:00:00Z";
+        let snap = limit_reached("Claude AI usage limit reached|1796000000", at).unwrap();
+        assert_eq!(snap.windows.len(), 1);
+        assert_eq!(snap.windows[0].used_pct, 100.0);
+        assert!(snap.windows[0].resets_at.is_some());
+        assert!(full_until_reset(Some(&snap), at));
+        assert!(!full_until_reset(Some(&snap), "2027-01-01T00:00:00Z"));
+        assert!(limit_reached("Error: something else", at).is_none());
+        let week = limit_reached("You've hit your weekly limit", at).unwrap();
+        assert_eq!(week.windows[0].kind, opw_domain::view::QuotaWindowKind::SevenDay);
+        // the other window of the last reading stays
+        let old = QuotaSnapshot {
+            windows: vec![opw_domain::view::QuotaWindow {
+                kind: opw_domain::view::QuotaWindowKind::SevenDay,
+                used_pct: 40.0,
+                resets_at: None,
+            }],
+            ..snap.clone()
+        };
+        let merged = keep_other_windows(snap, Some(&old));
+        assert_eq!(merged.windows.len(), 2);
+        let text = result_text(
+            &json!({"type":"result","is_error":true,"errors":["Claude AI usage limit reached|1794568800"]}),
+        );
+        assert!(text.contains("1794568800"));
+    }
 
     #[test]
     fn quota_error_lists_only_problems() {

@@ -1,7 +1,25 @@
-import { useId, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { agentLabel, stepHint, stepLabel, vi } from "../../i18n/vi";
-import { errorMessage, setStepChoice, setVerifyMcp, setStepLimits } from "../../ipc/client";
-import type { AgentCatalog, AgentKind, SettingsView, StepChoiceRequest, StepModels, StepSetting } from "../../ipc/types";
+import {
+  errorMessage,
+  getAiClis,
+  installCli,
+  isMockMode,
+  openLogin,
+  setStepChoice,
+  setVerifyMcp,
+  setStepLimits,
+} from "../../ipc/client";
+import type {
+  AgentCatalog,
+  AgentKind,
+  AiCli,
+  Provider,
+  SettingsView,
+  StepChoiceRequest,
+  StepModels,
+  StepSetting,
+} from "../../ipc/types";
 import { formatDateTime, formatDuration, formatHourMinute, formatUsd } from "../../shared/format";
 import { stepNumber } from "../../shared/steps";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
@@ -25,7 +43,16 @@ export function StepsPage({ view, onSaved, models, modelsBusy, onReadModels }: P
   const [error, setError] = useState<string | null>(null);
   const [savedStep, setSavedStep] = useState<string | null>(null);
   const [mcpBusy, setMcpBusy] = useState(false);
+  const [clis, setClis] = useState<AiCli[]>();
+  const [cliNote, setCliNote] = useState<string | null>(null);
   const rows = view?.steps ?? [];
+  const readClis = useCallback(() => {
+    getAiClis()
+      .then(setClis)
+      .catch((e: unknown) => setError(errorMessage(e)));
+  }, []);
+  useEffect(readClis, [readClis]);
+  const verify = view?.verifyMcp ?? true;
 
   const save = (choice: StepChoiceRequest) => {
     setError(null);
@@ -40,30 +67,75 @@ export function StepsPage({ view, onSaved, models, modelsBusy, onReadModels }: P
   return (
     <>
       <p className="set-intro">{t.intro}</p>
-      <section className="set-section set-mcp">
-        <label className="set-mcp-label">
-          <input type="checkbox" role="switch" checked={view?.verifyMcp ?? true} disabled={!view || mcpBusy}
-            onChange={(e) => {
-              setError(null);
-              setMcpBusy(true);
-              setVerifyMcp(e.target.checked).then(onSaved).catch((e: unknown) => setError(errorMessage(e))).finally(() => setMcpBusy(false));
-            }} />
-          {t.verifyMcp}
-        </label>
-        <div className="set-mcp-hints">
-          <p className="set-row-hint set-mcp-hint" aria-hidden={view?.verifyMcp === false} style={{ visibility: view?.verifyMcp === false ? "hidden" : "visible" }}>{t.mcpOn}</p>
-          <p className="set-row-hint set-mcp-hint" aria-hidden={view?.verifyMcp !== false} style={{ visibility: view?.verifyMcp !== false ? "hidden" : "visible" }}>{t.mcpOff}</p>
+      <section className="set-section">
+        <h4 className="set-section-title">{t.clis}</h4>
+        <div className="set-group">
+          {(["claude", "codex"] as const).map((p) => (
+            <CliRow
+              key={p}
+              provider={p}
+              cli={clis?.find((c) => c.provider === p)}
+              catalog={models?.[p]}
+              onStarted={(note) => {
+                setError(null);
+                setCliNote(note);
+              }}
+              onError={(e) => {
+                setCliNote(null);
+                setError(e);
+                readClis();
+              }}
+            />
+          ))}
+          <div className="set-row set-row--actions">
+            <span className="set-row-hint" aria-live="polite">{cliNote ?? "\u00a0"}</span>
+            <span className="set-actions">
+              <button
+                className="btn btn--sm"
+                disabled={modelsBusy}
+                onClick={() => {
+                  setCliNote(null);
+                  readClis();
+                  onReadModels();
+                }}
+              >
+                {modelsBusy && models ? t.rereading : t.reread}
+              </button>
+            </span>
+          </div>
         </div>
       </section>
-      <div className="set-source" aria-live="polite">
-        <span className="set-source-lines">
-          <SourceLine name="Claude Code" catalog={models?.claude} />
-          <SourceLine name="Codex" catalog={models?.codex} />
-        </span>
-        <button className="btn btn--sm" disabled={modelsBusy} onClick={onReadModels}>
-          {modelsBusy && models ? t.rereading : t.reread}
-        </button>
-      </div>
+      <section className="set-section">
+        <div className="set-group">
+          <div className="set-row" data-setting-row="verifyMcp">
+            <div className="set-row-text">
+              <span className="set-row-label">{t.verifyMcp}</span>
+              {/* both lines hold their place, so switching moves nothing */}
+              <span className="set-row-hint set-swap">
+                <span aria-hidden={!verify} className={verify ? undefined : "is-off"}>{t.mcpOn}</span>
+                <span aria-hidden={verify} className={verify ? "is-off" : undefined}>{t.mcpOff}</span>
+              </span>
+            </div>
+            <div className="set-row-control">
+              <input
+                type="checkbox"
+                className="set-check"
+                aria-label={t.verifyMcp}
+                checked={verify}
+                disabled={!view || mcpBusy}
+                onChange={(e) => {
+                  setError(null);
+                  setMcpBusy(true);
+                  setVerifyMcp(e.target.checked)
+                    .then(onSaved)
+                    .catch((x: unknown) => setError(errorMessage(x)))
+                    .finally(() => setMcpBusy(false));
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      </section>
       <p className={`set-save-status ${error ? "note note--error" : ""}`} aria-live="polite">{error ?? "\u00a0"}</p>
       {/* in a section like the other pages, so the note below sits under the box, not on its border */}
       <section className="set-section">
@@ -85,23 +157,73 @@ export function StepsPage({ view, onSaved, models, modelsBusy, onReadModels }: P
           ))}
         </div>
       </section>
-      <p className="set-note">{t.flags}</p>
     </>
   );
 }
 
-/** Where one agent's list came from. Always one line, so the page does not move when it loads. */
-function SourceLine({ name, catalog }: { name: string; catalog: AgentCatalog | undefined }) {
-  if (!catalog) return <span className="set-source-line faint">{t.reading(name)}</span>;
-  if (!catalog.fromCli) {
-    // the last list this CLI gave (saved by the core), else nothing but "Theo máy"
-    const text = catalog.readAt
-      ? t.lastList(name, catalog.error ?? "", formatDateTime(catalog.readAt))
-      : t.fallback(name, catalog.error ?? "");
-    return <span className="set-source-line set-source-line--warn">{text}</span>;
-  }
-  const time = catalog.readAt ? formatHourMinute(catalog.readAt) : undefined;
-  return <span className="set-source-line">{t.source(name, catalog.cliVersion, catalog.models.length, time)}</span>;
+/** Claude Code or Codex on this machine: installed, version, signed in, the models it lists,
+ *  with Cài / Đăng nhập right there. */
+function CliRow({ provider, cli, catalog, onStarted, onError }: {
+  provider: Provider;
+  /** `undefined` while the app looks */
+  cli: AiCli | undefined;
+  catalog: AgentCatalog | undefined;
+  onStarted: (note: string) => void;
+  onError: (e: string) => void;
+}) {
+  const name = t.cliName[provider];
+  const installed = cli?.path !== undefined;
+  const models = !catalog
+    ? t.reading(name)
+    : catalog.fromCli
+      ? t.cliModels(catalog.models.length, catalog.readAt ? formatHourMinute(catalog.readAt) : undefined)
+      : catalog.readAt
+        ? t.lastList(name, catalog.error ?? "", formatDateTime(catalog.readAt))
+        : t.fallback(name, catalog.error ?? "");
+  const hint = !cli
+    ? t.cliChecking
+    : !installed
+      ? t.cliMissing
+      : [
+          cli.version ?? name,
+          cli.signedIn === true ? t.cliSignedIn : cli.signedIn === false ? t.cliSignedOut : undefined,
+          models,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+  const warn = !!cli && (!installed || cli.signedIn === false || (catalog !== undefined && !catalog.fromCli));
+  const install = () => installCli(provider).then(() => onStarted(t.installStarted), (e: unknown) => onError(errorMessage(e)));
+  const login = () => openLogin(provider).then(() => onStarted(t.loginStarted), (e: unknown) => onError(errorMessage(e)));
+  return (
+    <div className="set-row" data-setting-row={`cli:${provider}`}>
+      <div className="set-row-text">
+        <span className="set-row-label">{name}</span>
+        <span className={`set-row-hint${warn ? " set-warn" : ""}`}>{hint}</span>
+      </div>
+      <div className="set-row-control">
+        {cli && !installed && (
+          <button
+            className="btn btn--sm btn--primary"
+            disabled={isMockMode()}
+            title={cli.installWith ? t.installHint(cli.installWith) : t.installPageHint}
+            onClick={() => void install()}
+          >
+            {cli.installWith ? t.install : t.installPage}
+          </button>
+        )}
+        {cli && installed && (
+          <button
+            className={`btn btn--sm${cli.signedIn === false ? " btn--primary" : " btn--ghost"}`}
+            disabled={isMockMode()}
+            title={t.loginHint}
+            onClick={() => void login()}
+          >
+            {cli.signedIn === false ? t.login : t.relogin}
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function StepRow({ number, row, catalog, saved, onSave, onSaveLimits }: {

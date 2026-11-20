@@ -1,7 +1,7 @@
 import { DndContext, DragOverlay, type Announcements, type UniqueIdentifier } from "@dnd-kit/core";
 import { useEffect, useRef, useState } from "react";
 import { stepLabel, vi } from "../../i18n/vi";
-import { errorMessage, flowAction, isMockMode, openBrief, openLogin, pauseTask, setTasksDir } from "../../ipc/client";
+import { errorMessage, flowAction, isMockMode, openBrief, openLogin, pauseTask } from "../../ipc/client";
 import type { BoardSnapshot, TaskCard, TaskColumn } from "../../ipc/types";
 import { ContinueDialog } from "../task/ContinueDialog";
 import { TaskPeek, type PeekTab } from "./TaskPeek";
@@ -13,7 +13,7 @@ import { Icon } from "../../shared/ui/Icon";
 import { dropRule, type DropAction } from "./dropRule";
 import { DraggableCard, DropColumn, cardCollision, makeDropAnimation, useCardSensors, type DropEnd } from "./cardDnd";
 import { TaskCardView } from "./TaskCardView";
-import { joined, useStartWork } from "./useStartWork";
+import { useStartWork } from "./useStartWork";
 import "./board.css";
 
 interface Props {
@@ -60,7 +60,6 @@ interface Toast {
  *  move between columns by drag and drop or with their buttons. */
 export function TaskBoard({ board, onSettings, onChanged, onOpenWorkspace }: Props) {
   const start = useStartWork({ tasks: board.tasks, onChanged });
-  const [offerBusy, setOfferBusy] = useState(false);
   const [opened, setOpened] = useState<{ wpId: number; tab?: TaskTab }>();
   // "Xem task" / "N comment mới" on an Inbox card
   const [peeking, setPeeking] = useState<{ card: TaskCard; tab: PeekTab }>();
@@ -154,18 +153,6 @@ export function TaskBoard({ board, onSettings, onChanged, onOpenWorkspace }: Pro
     onDragCancel: ({ active }) => b.drag.back(cardName(active.id)),
   };
 
-  const chooseTasksDir = (dir?: string) => {
-    setOfferBusy(true);
-    setTasksDir(dir)
-      .then((r) => {
-        const text = joined(vi.settings.tasksDirMoved(r.path, r.moved), ...r.warnings);
-        start.setFlash({ kind: r.warnings.length > 0 ? "warn" : "ok", text });
-        onChanged();
-      })
-      .catch((e: unknown) => start.setFlash({ kind: "warn", text: errorMessage(e) }))
-      .finally(() => setOfferBusy(false));
-  };
-
   /** Drop highlight of a column while a card is dragged. */
   const dropClass = (col: TaskColumn): string => {
     if (!dragged || col === dragged.column) return "";
@@ -185,26 +172,15 @@ export function TaskBoard({ board, onSettings, onChanged, onOpenWorkspace }: Pro
           </button>
         </div>
       )}
-      {board.notice && <div className="board-banner board-banner--warn">{board.notice}</div>}
-      {board.tasksDirOffer && (
-        <div className="board-banner board-banner--ask">
-          <span className="board-banner-text">
-            <Icon name="folder" size={14} />
-            {b.tasksDirAsk(board.tasksDirOffer)}
-          </span>
-          <span className="board-banner-actions">
-            <button className="btn btn--sm btn--ghost" disabled={offerBusy} onClick={() => chooseTasksDir(undefined)}>
-              {b.tasksDirNo}
-            </button>
-            <button
-              className="btn btn--sm btn--primary"
-              disabled={offerBusy}
-              onClick={() => chooseTasksDir(board.tasksDirOffer)}
-            >
-              {b.tasksDirYes}
-            </button>
-          </span>
+      {board.mode === "noToken" ? (
+        <div className="board-banner">
+          <span>{board.notice ?? vi.app.noToken}</span>
+          <button className="btn btn--sm btn--primary" onClick={onSettings}>
+            {vi.app.openSettings}
+          </button>
         </div>
+      ) : (
+        board.notice && <div className="board-banner board-banner--warn">{board.notice}</div>
       )}
       {start.banner}
       <DndContext

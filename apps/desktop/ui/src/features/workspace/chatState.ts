@@ -147,11 +147,38 @@ export function buildTree(snapshot: WorkspaceSnapshot): Tree {
 /** The session a task opens on: its newest one. */
 export const taskSession = (n: TaskNode): SessionView | undefined => n.sessions[0];
 
-/** The state the tree shows for a task: the most urgent of its sessions. */
-export function taskState(n: TaskNode): SessionView["state"] | undefined {
+/** The most urgent state of a few sessions (what a task or repo row shows). */
+export function urgentState(states: SessionView["state"][]): SessionView["state"] | undefined {
   const order: SessionView["state"][] = ["waiting", "running", "outside", "idle"];
-  return order.find((st) => n.sessions.some((s) => s.state === st));
+  return order.find((st) => states.includes(st));
 }
+
+/** The state the tree shows for a task: the most urgent of its sessions. */
+export const taskState = (n: TaskNode): SessionView["state"] | undefined => urgentState(n.sessions.map((s) => s.state));
 
 /** Folder name of a path (`C:/x/acme-web` → `acme-web`). */
 export const repoName = (path: string): string => path.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ?? path;
+
+/** Sessions of one project folder, under its name in the tree. */
+export interface RepoGroup<T> {
+  /** the folder, the same whatever the slashes or letter case */
+  key: string;
+  /** the folder as the first session gave it */
+  repo: string;
+  name: string;
+  items: T[];
+}
+
+/** Items grouped by their project folder (same folder whatever the slashes or letter case), in
+ *  the order the folders first appear, items in their own order. */
+export function byRepo<T>(items: T[], repoOf: (item: T) => string): RepoGroup<T>[] {
+  const groups = new Map<string, RepoGroup<T>>();
+  for (const item of items) {
+    const repo = repoOf(item);
+    const key = repo.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    const g = groups.get(key) ?? { key, repo, name: repoName(repo) || repo, items: [] };
+    g.items.push(item);
+    groups.set(key, g);
+  }
+  return [...groups.values()];
+}

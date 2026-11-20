@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 use serde_json::{Value, json};
 
+use crate::BrowserError;
 use crate::cdp::{Cdp, CdpError};
-use crate::{BrowserError, find_debug_port};
 
 /// How long the user has to click Allow in Chrome.
 const ALLOW_WAIT: Duration = Duration::from_secs(90);
@@ -264,7 +264,7 @@ fn read_in_tab(cdp: &mut Cdp, target: &str, url: &str, deadline: Instant) -> Res
 /// Read each GitHub issue through the user's running Chrome. One connection for all of them,
 /// so Chrome asks Allow once. `Err` = could not talk to Chrome at all.
 pub fn read_github_issues(urls: &[String]) -> Result<Vec<IssueRead>, BrowserError> {
-    let port = find_debug_port().ok_or(BrowserError::NotEnabled)?;
+    let port = crate::ensure_debug_port(ALLOW_WAIT)?;
     let mut cdp = Cdp::connect(port.port, &port.path, Instant::now() + ALLOW_WAIT)?;
     cdp.call("Browser.getVersion", json!({}), None, Instant::now() + ALLOW_WAIT)
         .map_err(|e| match e {

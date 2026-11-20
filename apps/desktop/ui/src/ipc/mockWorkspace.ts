@@ -2,6 +2,7 @@
 // word by word and ask for a permission, a choice or a plan approval when the message hints at
 // one ("chạy" / "npm", "hỏi", "plan"). Nothing here runs an AI.
 import type {
+  ArchivedSession,
   AskAnswer,
   ChatItem,
   NewSession,
@@ -172,7 +173,92 @@ export function mockWorkspace(): WorkspaceSnapshot {
   const list = [...sessions.values()]
     .map((s) => ({ ...s.view, state: state(s) }))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  return structuredClone({ tasks, sessions: list, outside: mockOutside() });
+  // what the sessions table shows of each: the last thing it did
+  for (const v of list) {
+    const s = sessions.get(v.id);
+    const last = s ? [...s.items].reverse().find((i) => i.kind === "text" || i.kind === "tool" || i.kind === "user") : undefined;
+    if (last && !v.activity) {
+      const line = last.text.split("\n").find((l) => l.trim()) ?? "";
+      v.activity = last.kind === "tool" ? `${last.tool ?? "Tool"}: ${line}` : last.kind === "user" ? `Bạn: ${line}` : line;
+    }
+    if (s?.asks.length) v.activity = "Đang chờ bạn trả lời";
+  }
+  return structuredClone({ tasks, sessions: list, outside: mockOutside(), archived });
+}
+
+// ---------- "Đã lưu trữ" ----------
+
+const archived: ArchivedSession[] = [
+  {
+    id: "9f1c2a40-0000-4000-8000-0000000000a1",
+    title: "Thử cấu hình ESLint mới",
+    repo: REPO_WEB,
+    archivedAt: iso(60 * 26),
+  },
+];
+const archivedSessions = new Map<string, MockSession>();
+const archivedOutside = new Map<string, (typeof OUTSIDE)[number]>();
+
+export function mockArchiveOutside(id: string): null {
+  const i = OUTSIDE.findIndex((o) => o.view.id === id);
+  const o = OUTSIDE[i];
+  if (!o) throw { code: "session.closed", message: "Phiên này không còn mở ở ngoài app" };
+  OUTSIDE.splice(i, 1);
+  archivedOutside.set(id, o);
+  archived.unshift({ id, title: o.view.title, repo: o.view.cwd, outside: true, archivedAt: new Date().toISOString() });
+  return null;
+}
+
+export function mockRestoreSession(id: string): null {
+  const i = archived.findIndex((a) => a.id === id);
+  if (i < 0) throw { code: "session.missing", message: "Không còn phiên này trong mục Đã lưu trữ" };
+  const [a] = archived.splice(i, 1);
+  const s = archivedSessions.get(id);
+  const o = archivedOutside.get(id);
+  if (s) {
+    sessions.set(id, s);
+    archivedSessions.delete(id);
+  } else if (o) {
+    OUTSIDE.push(o);
+    archivedOutside.delete(id);
+  } else if (a) {
+    add(session(id, { title: a.title, repo: a.repo, started: true, updatedAt: a.archivedAt }));
+  }
+  return null;
+}
+
+/** "Tiếp tục trong app": the outside session joins the app's list; still open in VS Code, so
+ *  the app only shows it until it is closed there. */
+export function mockAdoptOutside(id: string): SessionView {
+  const i = OUTSIDE.findIndex((o) => o.view.id === id);
+  const o = OUTSIDE[i];
+  if (!o) throw { code: "session.closed", message: "Phiên này không còn mở ở ngoài app" };
+  OUTSIDE.splice(i, 1);
+  const view = session(id, {
+    title: o.view.title,
+    repo: o.view.cwd,
+    started: true,
+    state: "outside",
+    outside: o.view.openIn,
+    updatedAt: o.view.updatedAt ?? iso(1),
+  });
+  add(view, structuredClone(o.items));
+  return structuredClone(view);
+}
+
+/** "Tách bản sao": a copy you can type into now; the original stays where it is open. */
+export function mockForkOutside(id: string): SessionView {
+  const o = OUTSIDE.find((x) => x.view.id === id);
+  if (!o) throw { code: "session.closed", message: "Phiên này không còn mở ở ngoài app" };
+  const copy = `9f1c2a40-0000-4000-8000-${String(counter++).padStart(12, "0")}`;
+  const view = session(copy, {
+    title: `${o.view.title} (bản sao)`,
+    repo: o.view.cwd,
+    forkOf: id,
+    updatedAt: new Date().toISOString(),
+  });
+  add(view, structuredClone(o.items));
+  return structuredClone(view);
 }
 
 // ---------- sessions opened outside the app (the map's far stars ext-1..3) ----------
@@ -449,6 +535,11 @@ export function mockSessionOpenVscode(id: string): null {
 }
 
 export function mockSessionHide(id: string): null {
+  const s = sessions.get(id);
   sessions.delete(id);
+  if (s) {
+    archivedSessions.set(id, s);
+    archived.unshift({ id, title: s.view.title, repo: s.view.repo, taskId: s.view.taskId, archivedAt: new Date().toISOString() });
+  }
   return null;
 }

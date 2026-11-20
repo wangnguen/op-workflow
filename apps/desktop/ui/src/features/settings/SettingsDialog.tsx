@@ -332,7 +332,12 @@ function TasksDirRow({ view, onDone, onError }: {
   };
 
   return (
-    <Row id="tasksDir" label={t.tasksDir} hint={view?.tasksDirChosen ? t.tasksDirHint : t.tasksDirNotChosen} stacked>
+    <Row
+      id="tasksDir"
+      label={t.tasksDir}
+      hint={view?.tasksDirError ?? (view?.tasksDirChosen ? t.tasksDirHint : t.tasksDirNotChosen)}
+      stacked
+    >
       {current ? <PathLink path={current} onError={onError} /> : "—"}
       <span className="set-actions set-actions--start">
         {suggested && !atSuggested && (
@@ -679,11 +684,17 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                     </Group>
                     <Group title={t.githubSection}>
                       <Row id="github" label={t.githubBrowser} hint={t.githubHint}>
-                        <span className={view?.browserDebug ? "set-ok" : "dim"}>
-                          {view?.browserDebug ? t.githubOn(view.browserDebug) : t.githubOff}
-                        </span>
+                        {view && (
+                          <span
+                            className={
+                              view.browser.state === "ready" ? "set-ok" : view.browser.state === "closed" ? "dim" : "set-warn"
+                            }
+                          >
+                            {t.browserState[view.browser.state](view.browser.name)}
+                          </span>
+                        )}
                       </Row>
-                      {!view?.browserDebug && (
+                      {view && (view.browser.state === "notEnabled" || view.browser.state === "closed") && (
                         <div className="set-row set-row--actions">
                           <span className="set-row-hint">{t.githubSteps}</span>
                           <span className="set-actions">

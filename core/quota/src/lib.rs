@@ -51,7 +51,12 @@ pub fn from_claude_rate_limit_event(event: &Value, observed_at: &str) -> Option<
             "seven_day" | "seven_day_opus" | "seven_day_sonnet" => QuotaWindowKind::SevenDay,
             _ => return None,
         };
-        let u = num(info.get("utilization"))?;
+        // a request the limit refused says "rejected", often without a utilization
+        let u = match num(info.get("utilization")) {
+            Some(u) => u,
+            None if info.get("status").and_then(Value::as_str) == Some("rejected") => 1.0,
+            None => return None,
+        };
         windows.push(window(kind, u * 100.0, num(info.get("resetsAt"))));
     }
     Some(snapshot(
@@ -290,6 +295,15 @@ mod tests {
         assert_eq!(s.windows.len(), 1);
         assert!((used(&s, QuotaWindowKind::SevenDay) - 90.0).abs() < 1e-9);
         assert!(from_claude_rate_limit_event(&json!({"type":"rate_limit_event"}), AT).is_none());
+    }
+
+    #[test]
+    fn a_refused_request_counts_as_a_full_window() {
+        let ev = json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected",
+            "resetsAt":1794568800,"rateLimitType":"five_hour"}});
+        let s = from_claude_rate_limit_event(&ev, AT).unwrap();
+        assert_eq!(used(&s, QuotaWindowKind::FiveHour), 100.0);
+        assert!(s.windows[0].resets_at.is_some());
     }
 
     #[test]

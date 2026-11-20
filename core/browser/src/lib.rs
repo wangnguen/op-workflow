@@ -11,8 +11,10 @@
 mod cdp;
 mod github;
 
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime};
 
 pub use github::{IssueComment, IssueError, IssuePage, IssueRead, read_github_issues, strip_mentions};
 
@@ -25,6 +27,8 @@ pub enum BrowserError {
     NotEnabled,
     #[error("Chrome đang tắt: mở Chrome rồi thử lại")]
     NotRunning,
+    #[error("Không tìm thấy Chrome trên máy: cài Google Chrome rồi thử lại")]
+    Missing,
     #[error("Chrome không cho kết nối: chưa bấm Allow kịp, hoặc đã bấm từ chối")]
     Denied,
     #[error("Lỗi khi nói chuyện với Chrome: {0}")]
@@ -90,6 +94,115 @@ pub fn find_debug_port() -> Option<DebugPort> {
         })
         .max_by_key(|(modified, _)| *modified)
         .map(|(_, port)| port)
+}
+
+/// Chrome as "Lấy issue" sees it right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChromeState {
+    /// Running with remote debugging on.
+    Ready(DebugPort),
+    /// Not running (its `DevToolsActivePort` file can outlive it, so the file alone says
+    /// nothing).
+    Closed,
+    /// Running, remote debugging off.
+    NotEnabled,
+    /// No Chrome installed.
+    Missing,
+}
+
+/// How long a just started Chrome gets to open its debugging port.
+const START_WAIT: Duration = Duration::from_secs(20);
+const POLL: Duration = Duration::from_millis(500);
+
+/// Something listens on `127.0.0.1:port`. A bare TCP connect, closed at once: no DevTools
+/// handshake, so Chrome asks nothing.
+fn listening(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+}
+
+/// A `chrome.exe` process runs (any profile).
+fn chrome_running() -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let mut cmd = Command::new("tasklist");
+    cmd.args(["/FI", "IMAGENAME eq chrome.exe", "/FO", "CSV", "/NH"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    no_window(&mut cmd);
+    cmd.output().is_ok_and(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .to_ascii_lowercase()
+            .contains("chrome.exe")
+    })
+}
+
+#[cfg(windows)]
+fn no_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn no_window(_: &mut Command) {}
+
+/// Where Chrome stands for "Lấy issue": the debugging port must answer, not only exist on disk.
+pub fn chrome_state() -> ChromeState {
+    let port = find_debug_port();
+    if let Some(p) = port.as_ref().filter(|p| listening(p.port)) {
+        return ChromeState::Ready(p.clone());
+    }
+    if chrome_exe().is_none() && port.is_none() {
+        return ChromeState::Missing;
+    }
+    if chrome_running() {
+        ChromeState::NotEnabled
+    } else {
+        ChromeState::Closed
+    }
+}
+
+fn wait_ready(until: Instant) -> Option<DebugPort> {
+    loop {
+        if let ChromeState::Ready(p) = chrome_state() {
+            return Some(p);
+        }
+        if Instant::now() >= until {
+            return None;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// The browser to read through, made ready when it can be: a closed Chrome is started (its
+/// usual window, tabs as the user left them); with remote debugging off the page that turns
+/// it on opens and the user gets `enable_wait` to switch it on.
+pub fn ensure_debug_port(enable_wait: Duration) -> Result<DebugPort, BrowserError> {
+    match chrome_state() {
+        ChromeState::Ready(p) => return Ok(p),
+        ChromeState::Missing => return Err(BrowserError::Missing),
+        ChromeState::Closed => {
+            let exe = chrome_exe().ok_or(BrowserError::NotRunning)?;
+            Command::new(exe)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|_| BrowserError::NotRunning)?;
+            if let Some(p) = wait_ready(Instant::now() + START_WAIT) {
+                return Ok(p);
+            }
+            if !chrome_running() {
+                return Err(BrowserError::NotRunning);
+            }
+        }
+        ChromeState::NotEnabled => {}
+    }
+    // running, remote debugging off: show the switch and wait for the user
+    open_debug_settings().map_err(|_| BrowserError::NotEnabled)?;
+    wait_ready(Instant::now() + enable_wait).ok_or(BrowserError::NotEnabled)
 }
 
 /// Chrome's own executable, for opening [`DEBUG_SETTINGS_URL`] (a `chrome://` page cannot be

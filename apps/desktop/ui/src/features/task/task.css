@@ -238,6 +238,17 @@
   padding: 0;
   background: none;
 }
+.md a.md-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.md a.md-link:hover {
+  text-decoration-color: currentColor;
+}
 
 /* ---------- findings ---------- */
 

@@ -76,6 +76,13 @@ pub struct SessionView {
     /// Why the last start or run failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What it did last, in one line (the last tool it ran or the start of its last answer),
+    /// for the sessions table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
+    /// A copy of another conversation that has not run yet: the id it was copied from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_of: Option<String>,
 }
 
 /// A task in progress, shown in the tree even before it has a session.
@@ -128,6 +135,26 @@ pub struct WorkspaceSnapshot {
     /// hid them). Newest first.
     #[serde(default)]
     pub outside: Vec<OutsideSession>,
+    /// Sessions taken off the list ("Đã lưu trữ"), newest first: the app's and those opened
+    /// outside it.
+    #[serde(default)]
+    pub archived: Vec<ArchivedSession>,
+}
+
+/// A session taken off the Workspace list. Its conversation stays with Claude Code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedSession {
+    pub id: String,
+    pub title: String,
+    /// The folder it runs in.
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Opened outside the app (VS Code, a terminal) rather than run by it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
+    pub archived_at: String,
 }
 
 /// A Claude session opened outside the app (VS Code, a terminal), read from Claude Code's

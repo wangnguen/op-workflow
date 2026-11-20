@@ -48,3 +48,21 @@ pub fn reconnect_quota(service: State<'_, AppService>, provider: Option<Provider
 pub fn open_login(service: State<'_, AppService>, provider: Provider) -> Result<(), ApiError> {
     service.open_login(provider)
 }
+
+/// Claude Code and Codex on this machine (starts both CLIs, so off the main thread).
+#[tauri::command(async)]
+pub fn ai_clis(service: State<'_, AppService>) -> Vec<opw_domain::view::AiCli> {
+    service.ai_clis()
+}
+
+/// "Cài": the CLI's installer in a console.
+#[tauri::command]
+pub fn install_cli(service: State<'_, AppService>, provider: Provider) -> Result<(), ApiError> {
+    service.install_cli(provider)
+}
+
+/// A link in a brief or a chat (https only), in the default browser.
+#[tauri::command]
+pub fn open_link(service: State<'_, AppService>, url: String) -> Result<(), ApiError> {
+    service.open_link(&url)
+}

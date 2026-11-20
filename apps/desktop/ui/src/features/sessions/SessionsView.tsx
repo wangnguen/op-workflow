@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import { vi } from "../../i18n/vi";
-import { errorMessage, isMockMode, openBrief, openTaskLink } from "../../ipc/client";
+import { errorMessage, openTaskLink } from "../../ipc/client";
 import type { BoardSnapshot, OrbitSnapshot, TaskCard, WorkspaceSnapshot } from "../../ipc/types";
 import { useDismiss } from "../../shared/hooks";
 import { Icon } from "../../shared/ui/Icon";
@@ -87,7 +87,7 @@ function StartMenu({ inbox, disabled, onPick }: { inbox: TaskCard[]; disabled: b
   );
 }
 
-/** "Phiên": watch the agents on the map (Quỹ đạo) or as cards (Bảng); start tasks from here too. */
+/** "Phiên": watch the agents on the map (Quỹ đạo) or in a table (Bảng); start tasks from here too. */
 export function SessionsView({ snapshot, board, workspace, now, onChanged, onOpenWorkspace }: Props) {
   const [mode, setMode] = useState<Mode>(loadMode);
   // the task in the centre of the map; a task started here is centred right away
@@ -107,7 +107,6 @@ export function SessionsView({ snapshot, board, workspace, now, onChanged, onOpe
   const card = (taskId: string) => tasks.find((t) => t.id === taskId);
   const inbox = tasks.filter((t) => t.column === "inbox");
   const activeCount = tasks.filter((t) => t.column === "active").length;
-  const reading = new Set(tasks.filter((t) => start.reading.has(t.wpId)).map((t) => t.id));
   const fail = (e: unknown) => start.setFlash({ kind: "warn", text: errorMessage(e) });
   const openTask = (taskId: string, tab?: TaskTab) => {
     const c = card(taskId);
@@ -118,6 +117,18 @@ export function SessionsView({ snapshot, board, workspace, now, onChanged, onOpe
     () => new Set((workspace?.sessions ?? []).filter((s) => s.state === "waiting" && s.taskId).map((s) => s.taskId ?? "")),
     [workspace],
   );
+  // the sun in the middle of the map: what runs now and today's spend
+  const summary = useMemo(() => {
+    const states = [
+      ...(workspace?.sessions ?? []).map((s) => s.state),
+      ...(workspace?.outside ?? []).map((o) => o.state),
+    ];
+    return {
+      running: states.filter((s) => s === "running").length,
+      waiting: states.filter((s) => s === "waiting").length,
+      today: board?.today,
+    };
+  }, [workspace, board]);
   /** Where the map's main button, a double click or a card's "Tới phiên" leads. */
   const go = (g: Go) => {
     switch (g.to) {
@@ -185,33 +196,18 @@ export function SessionsView({ snapshot, board, workspace, now, onChanged, onOpe
                 onOpenLink={(wpId) => openTaskLink(wpId).catch(fail)}
                 onGo={go}
                 waiting={waiting}
+                summary={summary}
               />
             </div>
             <div {...pane("board")}>
               <SessionBoard
                 snapshot={snapshot}
                 workspace={workspace}
+                now={now}
                 onGo={go}
-                onShow={(taskId) => {
-                  setFocusId(taskId);
-                  changeMode("orbit");
-                }}
-                onIssues={(taskId) => {
-                  const c = card(taskId);
-                  if (c) start.readIssues(c);
-                }}
-                onBrief={
-                  isMockMode()
-                    ? undefined
-                    : (taskId) => {
-                        const c = card(taskId);
-                        if (c) openBrief(c.wpId).catch(fail);
-                      }
-                }
-                reading={reading}
                 onOpen={openTask}
-                wpIdOf={(taskId) => card(taskId)?.wpId}
                 onChanged={onChanged}
+                onError={fail}
               />
             </div>
           </>

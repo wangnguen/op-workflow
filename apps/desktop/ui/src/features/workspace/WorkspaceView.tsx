@@ -38,12 +38,31 @@ export function WorkspaceView({ snapshot, selected, onSelect, onChanged, onOpenT
       <SidePanel side="left" storageKey="opw.workspace.side" min={200} max={560} initial={280}
         name={vi.side.workspace} className="ws-side">
         {(hide) => (
-          <SessionTree snapshot={data} selected={selected} onSelect={onSelect} onNew={() => setCreating(true)} onHide={hide} />
+          <SessionTree
+            snapshot={data}
+            selected={selected}
+            onSelect={onSelect}
+            onNew={() => setCreating(true)}
+            onHide={hide}
+            onChanged={onChanged}
+          />
         )}
       </SidePanel>
       <section className="ws-main">
         {selected?.kind === "outside" ? (
-          <OutsidePane key={selected.id} id={selected.id} known={data.outside?.find((o) => o.id === selected.id)} />
+          <OutsidePane
+            key={selected.id}
+            id={selected.id}
+            known={data.outside?.find((o) => o.id === selected.id)}
+            onOpen={(id) => {
+              onSelect({ kind: "session", id });
+              onChanged();
+            }}
+            onArchived={() => {
+              onSelect(undefined);
+              onChanged();
+            }}
+          />
         ) : sessionId || task ? (
           <ChatPane
             key={task ? `task-${task.wpId}` : sessionId}

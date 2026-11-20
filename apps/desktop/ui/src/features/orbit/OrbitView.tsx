@@ -8,7 +8,7 @@ import { SidePanel } from "../../shared/ui/SidePanel";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
 import { DetailPanel } from "./DetailPanel";
 import { Legend } from "./Legend";
-import { HOME_VIEW, OrbitScene, type ViewState } from "./OrbitScene";
+import { HOME_VIEW, type MapSummary, OrbitScene, type ViewState } from "./OrbitScene";
 import { focusSystem, systemsOf } from "./focus";
 import { primaryAction, type Go } from "./primary";
 import { VIEW, clampZoom, planetDrift, topLeftFuelLabelX } from "./geometry";
@@ -37,6 +37,8 @@ interface Props {
   onGo?: (go: Go) => void;
   /** task ids whose session waits for an answer: their gate leads to the question */
   waiting?: ReadonlySet<string>;
+  /** the sun in the centre while no task is in progress */
+  summary?: MapSummary;
 }
 
 const NONE: ReadonlySet<string> = new Set();
@@ -50,7 +52,8 @@ const STATUS_CLEAR = {
 
 function statusLine(s: OrbitSnapshot): string {
   const a = s.active;
-  if (!a) return vi.orbit.noActive;
+  // no task in progress: why the Inbox may be empty (loading, OpenProject error), else that
+  if (!a) return s.notice ?? vi.orbit.noActive;
   const live = a.steps.find((x) => x.state === "running" || x.state === "waitingUser");
   const parts = [a.taskId];
   if (live) parts.push(`${live.index}/${STEP_COUNT} ${stepLabel[live.kind]}${live.round && live.round > 1 ? ` ${vi.orbit.round(live.round)}` : ""}`);
@@ -78,6 +81,7 @@ export function OrbitView({
   paused = false,
   onGo,
   waiting = NONE,
+  summary,
 }: Props) {
   const [picked, setPicked] = useState<Selection | null>(null);
   // several tasks can be in progress; the picked one sits in the centre
@@ -117,11 +121,12 @@ export function OrbitView({
           layout={layout.overrides}
           onMoveItem={layout.move}
           rot={rot}
+          summary={summary}
         />
 
         {/* wraps before the "Claude Tuần" gauge label (map units → px in orbit.css) */}
         <div
-          className={`orbit-status${snapshot.active?.gate ? " is-waiting" : snapshot.active ? "" : " is-idle"}`}
+          className={`orbit-status${snapshot.active?.gate ? " is-waiting" : snapshot.active ? "" : snapshot.notice ? " is-idle has-notice" : " is-idle"}`}
           style={STATUS_CLEAR}
           title={snapshot.active?.title}
         >

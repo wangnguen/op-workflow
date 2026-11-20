@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { gateLabel } from "../../i18n/vi";
 import { orbitForFrame } from "../../ipc/mock";
-import type { SessionView, WorkspaceSnapshot } from "../../ipc/types";
+import type { OutsideSession, SessionView, WorkspaceSnapshot } from "../../ipc/types";
 import { STEP_COUNT } from "../../shared/steps";
-import { groupSessions } from "./sessions";
+import { sessionTable, tally } from "./sessions";
 
 const NOW = Date.parse("2026-11-13T08:00:00Z");
 
@@ -20,63 +21,83 @@ const view = (id: string, part: Partial<SessionView> = {}): SessionView => ({
   ...part,
 });
 
-const ws = (sessions: SessionView[]): WorkspaceSnapshot => ({ tasks: [], sessions });
-const all = (g: ReturnType<typeof groupSessions>) => [...g.waiting, ...g.running, ...g.idle];
+const outside = (id: string, part: Partial<OutsideSession> = {}): OutsideSession => ({
+  id,
+  cwd: "C:\\code\\Web",
+  title: id,
+  state: "running",
+  openIn: "VS Code",
+  updatedAt: "2026-11-20T09:00:00Z",
+  ...part,
+});
 
-describe("groupSessions", () => {
-  it("puts a task under Cần bạn while its gate is open", () => {
-    const snap = orbitForFrame(2, NOW);
-    const g = groupSessions(snap);
-    expect(g.waiting.find((s) => s.id === `task:${snap.active!.taskId}`)).toMatchObject({
-      to: { to: "session", taskId: snap.active!.taskId, ask: false },
-      asks: false,
-    });
-  });
+const ws = (sessions: SessionView[], out: OutsideSession[] = []): WorkspaceSnapshot => ({ tasks: [], sessions, outside: out });
+const rows = (t: ReturnType<typeof sessionTable>) => t.flatMap((g) => g.rows);
 
-  it("gives each task in progress one card, with its name, status, repo, branch and step", () => {
+describe("sessionTable", () => {
+  it("gives a task in progress without a session one row, with its step", () => {
     const snap = orbitForFrame(10, NOW);
     const tasks = [snap.active!, ...(snap.others ?? [])];
-    const cards = all(groupSessions(snap)).filter((s) => s.taskId);
-    expect(cards.map((c) => c.taskId).sort()).toEqual(tasks.map((t) => t.taskId).sort());
-    for (const c of cards) {
-      const task = tasks.find((t) => t.taskId === c.taskId)!;
-      expect(c).toMatchObject({ title: `${task.taskId} · ${task.title}`, repo: task.repo, branch: task.branch, inApp: true });
-      if (task.agents[0]) expect(c.detail).toMatch(new RegExp(`\\d/${STEP_COUNT} `));
+    const taskRows = rows(sessionTable(snap)).filter((r) => r.kind === "task");
+    expect(taskRows.map((r) => r.taskId).sort()).toEqual(tasks.map((t) => t.taskId).sort());
+    for (const r of taskRows) {
+      const task = tasks.find((t) => t.taskId === r.taskId)!;
+      expect(r).toMatchObject({ title: task.title, to: { to: "session", taskId: task.taskId } });
+      if (task.agents[0] && !task.gate) expect(r.activity).toMatch(new RegExp(`\\d/${STEP_COUNT} `));
     }
   });
 
-  it("shows a task whose steps run no AI as your turn", () => {
-    const snap = orbitForFrame(10, NOW);
-    const idle = { ...snap.active!, taskId: "WP-9", branch: "f/WP-9", agents: [], gate: undefined };
-    const item = groupSessions({ ...snap, others: [idle] }).waiting.find((s) => s.taskId === "WP-9");
-    expect(item).toMatchObject({ id: "task:WP-9", branch: "f/WP-9", inApp: true });
-    expect(item?.agent).toBeUndefined();
+  it("puts a task's gate on its main session: Chờ bạn first in its repo", () => {
+    const snap = orbitForFrame(2, NOW);
+    const a = snap.active!;
+    expect(a.gate).toBeDefined();
+    // newest first, as Workspace lists them: "main" is the task's session now, "old" the one
+    // before Làm lại từ đầu
+    const table = sessionTable({ ...snap, others: [] }, ws([
+      view("main", { kind: "main", wpId: 1, taskId: a.taskId, repo: `C:/code/${a.repo}` }),
+      view("old", { kind: "main", wpId: 1, taskId: a.taskId, repo: `C:/code/${a.repo}`, state: "running" }),
+    ]));
+    const group = table.find((g) => g.name === a.repo)!;
+    // the task has sessions, so no row of its own
+    expect(group.rows.map((r) => r.id)).toEqual(["session:main", "session:old"]);
+    expect(group.rows[0]).toMatchObject({ status: "waiting", asks: false });
+    expect(group.rows[0]?.activity).toContain(gateLabel[a.gate!.kind]);
+    expect(group.rows[1]?.status).toBe("running");
   });
 
-  it("takes the most urgent state of the task's steps and its Workspace sessions", () => {
-    const snap = orbitForFrame(10, NOW);
-    const idle = { ...snap.active!, taskId: "WP-9", agents: [], gate: undefined };
-    const orbit = { ...snap, active: idle, others: [] };
-    const mine = (state: SessionView["state"]) => ws([view("s9", { kind: "main", wpId: 9, taskId: "WP-9", state })]);
-    // the session asks something: Cần bạn, and "Tới phiên" lands on the question
-    const asking = groupSessions(orbit, mine("waiting")).waiting.find((s) => s.taskId === "WP-9");
-    expect(asking).toMatchObject({ asks: true, to: { to: "session", taskId: "WP-9", ask: true } });
-    // Claude answers in the session: running, even though no step runs
-    expect(groupSessions(orbit, mine("running")).running.some((s) => s.taskId === "WP-9")).toBe(true);
-    // nothing runs anywhere: your turn
-    expect(groupSessions(orbit, mine("idle")).waiting.some((s) => s.taskId === "WP-9")).toBe(true);
+  it("groups the app's sessions and those open outside it by repo, whatever the slashes or case", () => {
+    const snap = { ...orbitForFrame(10, NOW), active: undefined, others: [], distant: [] };
+    const table = sessionTable(snap, ws(
+      [view("free-1", { state: "waiting", costUsd: 0.42, contextPercent: 31 }), view("api-1", { repo: "C:/code/api" })],
+      [outside("ext-1")],
+    ));
+    expect(table.map((g) => g.name)).toEqual(["api", "web"]);
+    const web = table.find((g) => g.name === "web")!;
+    expect(web.rows.map((r) => r.id)).toEqual(["session:free-1", "outside:ext-1"]);
+    expect(web.rows[0]).toMatchObject({ to: { to: "chat", sessionId: "free-1", ask: true }, asks: true, costUsd: 0.42, contextPct: 31 });
+    expect(web.rows[1]).toMatchObject({ kind: "outside", openIn: "VS Code", to: { to: "outside", id: "ext-1" } });
+    expect(tally(web.rows)).toEqual({ waiting: 1, running: 1 });
   });
 
-  it("adds cards for sessions without a task and for sessions open outside the app", () => {
+  it("says why a session cannot be archived now", () => {
+    const snap = { ...orbitForFrame(10, NOW), active: undefined, others: [], distant: [] };
+    const all = rows(sessionTable(snap, ws([
+      view("busy", { state: "running" }),
+      view("vscode", { state: "outside", outside: "VS Code" }),
+      view("term", { terminal: true }),
+      view("free"),
+    ])));
+    const blocked = Object.fromEntries(all.map((r) => [r.id, r.archiveBlocked !== undefined]));
+    expect(blocked).toEqual({ "session:busy": true, "session:vscode": true, "session:term": true, "session:free": false });
+    expect(all.find((r) => r.id === "session:vscode")?.stateText).toContain("VS Code");
+  });
+
+  it("adds the map's far stars the Workspace list does not have", () => {
     const snap = orbitForFrame(10, NOW);
-    const g = groupSessions(snap, ws([view("free-1", { state: "waiting" }), view("free-2", { state: "outside", outside: "VS Code" })]));
-    expect(g.waiting.find((s) => s.id === "session:free-1")).toMatchObject({
-      to: { to: "chat", sessionId: "free-1", ask: true },
-      inApp: true,
-    });
-    expect(g.idle.find((s) => s.id === "session:free-2")?.detail).toContain("VS Code");
-    const outside = all(g).filter((s) => !s.inApp);
-    expect(outside).toHaveLength(snap.distant.length);
-    for (const o of outside) expect(o.to.to).toBe("outside");
+    const known = snap.distant[0]!;
+    const all = rows(sessionTable(snap, ws([], [outside(known.id)])));
+    const far = all.filter((r) => r.kind === "outside");
+    expect(far).toHaveLength(snap.distant.length);
+    expect(far.filter((r) => r.id === `outside:${known.id}`)).toHaveLength(1);
   });
 });

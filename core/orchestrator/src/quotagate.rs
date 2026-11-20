@@ -113,7 +113,7 @@ pub fn describe(p: Provider, w: &QuotaWindow) -> String {
 /// enough: a line number or a file count in the error text would match it.
 static QUOTA_HIT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)usage[ _-]?limit|hit your (usage )?limit|rate[ _-]?limit(ed|[ _-](error|exceeded|reached))|quota[ _-]exceeded|insufficient_quota|too many requests|\(429\)|(status|api error):? 429\b",
+        r"(?i)usage[ _-]?limit|hit your (\w+ )?limit|rate[ _-]?limit(ed|[ _-](error|exceeded|reached))|quota[ _-]exceeded|insufficient_quota|too many requests|\(429\)|(status|api error):? 429\b",
     )
     .expect("valid regex")
 });

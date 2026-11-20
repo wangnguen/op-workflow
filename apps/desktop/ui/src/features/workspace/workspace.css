@@ -99,21 +99,41 @@
   padding: 2px 4px 2px 0;
   cursor: default;
 }
+/* a row under a task or a repo: its dot sits under the parent's name */
 .ws-row--session.is-nested {
-  padding-left: 30px;
+  padding-left: 46px;
 }
-/* a task's sessions slide open and closed under it */
-.ws-task-kids {
+/* a group's, repo's or task's rows slide open and closed under it */
+.ws-fold {
   display: grid;
   grid-template-rows: 0fr;
   transition: grid-template-rows var(--dur-base) var(--ease-out);
 }
-.ws-task-kids.is-open {
+.ws-fold.is-open {
   grid-template-rows: 1fr;
 }
-.ws-task-kids > div {
+.ws-fold > div {
   min-height: 0;
   overflow: hidden;
+}
+.ws-repo-name {
+  font-weight: 600;
+}
+/* "Đã lưu trữ": nothing to open, only Khôi phục */
+.ws-row--archived {
+  align-items: center;
+  padding-left: 24px;
+  cursor: default;
+}
+.ws-row--archived:hover {
+  background: none;
+}
+.ws-restore {
+  flex: none;
+}
+.ws-tree-note {
+  margin: 4px 6px;
+  font-size: 12px;
 }
 .ws-twist {
   display: grid;
@@ -245,8 +265,7 @@
 }
 /* Chat | Terminal của phiên | Shell: one row of the same height whatever is picked */
 .ws-tabs,
-.ws-terminal-bar,
-.ws-shell-pick {
+.ws-terminal-bar {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -273,8 +292,16 @@
   border-radius: 50%;
   background: var(--st-running);
 }
-.ws-terminal-bar {
-  justify-content: space-between;
+/* shell kind and search on the left, Đóng at the end */
+.ws-terminal-bar > :last-child {
+  margin-left: auto;
+}
+.ws-terminal-kind {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
 }
 .input.ws-terminal-search {
   width: min(320px, 50%);
@@ -609,6 +636,10 @@
 .ws-composer .ws-chat-col {
   gap: 8px;
 }
+.ws-outside-lead {
+  margin: 0;
+  font-size: 12px;
+}
 .ws-outside,
 .ws-failure {
   display: flex;
@@ -753,90 +784,30 @@
 
 .ws-scripts {
   display: flex;
-  flex-direction: column;
-  padding: 4px 18px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-height: 96px;
+  padding: 6px 18px;
   border-bottom: 1px solid var(--line);
+  overflow-y: auto;
   animation: tab-in var(--dur-base) var(--ease-out);
 }
-/* the whole head line opens and closes the list */
-.ws-scripts-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 28px;
-  padding: 2px 0;
-  border: 0;
-  background: none;
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.ws-scripts-head .icon {
-  flex: none;
-  color: var(--text-dim);
-  transition: transform var(--dur-fast) var(--ease-out);
-}
-.ws-scripts-head .icon.is-open {
-  transform: rotate(90deg);
-}
-.ws-scripts-head strong {
-  font-weight: 600;
-}
-.ws-scripts-head .faint {
-  overflow: hidden;
+.ws-scripts-label {
+  margin-right: 2px;
   font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.ws-scripts-body {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows var(--dur-base) var(--ease-out);
+.btn.ws-script {
+  font-family: var(--mono);
+  font-size: 11.5px;
 }
-.ws-scripts.is-open .ws-scripts-body {
-  grid-template-rows: 1fr;
-}
-.ws-scripts-body > div {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-height: 0;
-  overflow: hidden;
-}
-.ws-scripts-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.ws-script {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  max-width: 260px;
-  padding: 5px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease-out);
-}
-.ws-script:hover {
+/* the one run last */
+.btn.ws-script.is-last {
   border-color: var(--accent);
 }
-.ws-script-name {
-  font-weight: 600;
-}
-.ws-script-cmd {
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
 .ws-scripts-about {
-  margin: 0 0 6px;
-  font-size: 12px;
+  flex-basis: 100%;
+  font-size: 11.5px;
 }
 
 /* ---------- ảnh gửi kèm, gợi ý @ và / ---------- */

@@ -14,14 +14,43 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Every message is a sentence the user can act on (what went wrong and what to do), never a
+/// bare HTTP status or a library's English error.
 #[derive(Debug, thiserror::Error)]
 pub enum TrackerError {
-    #[error("unexpected OpenProject response: {0}")]
+    #[error(
+        "OpenProject trả về dữ liệu app không đọc được ({0}). Kiểm tra URL có đúng là OpenProject không."
+    )]
     Shape(String),
-    #[error("OpenProject HTTP {status}: {message}")]
+    #[error("{}", http_problem(*.status, .message))]
     Http { status: u16, message: String },
-    #[error("cannot reach OpenProject: {0}")]
+    #[error("Không kết nối được tới OpenProject: {0}.")]
     Network(String),
+    #[error(
+        "URL này trả về một trang web chứ không phải API OpenProject. Chỉ nhập địa chỉ gốc, ví dụ https://openproject.cong-ty.vn."
+    )]
+    NotApi,
+}
+
+/// What an HTTP error status from OpenProject means for the user.
+fn http_problem(status: u16, message: &str) -> String {
+    let said = message.trim();
+    let detail = if said.is_empty() || said.starts_with('<') {
+        String::new()
+    } else {
+        format!(" OpenProject ghi: “{said}”.")
+    };
+    let what = match status {
+        401 => "OpenProject không nhận token (lỗi 401): token sai, đã hết hạn hoặc bị thu hồi. Tạo token mới ở OpenProject → My account → Access tokens rồi dán vào Cài đặt → OpenProject.".to_owned(),
+        403 => "Tài khoản của token không có quyền xem mục này trên OpenProject (lỗi 403). Nhờ quản trị cấp quyền trong project.".to_owned(),
+        404 => "OpenProject không thấy mục này (lỗi 404): URL OpenProject sai, hoặc task đã bị xoá / bạn không còn quyền xem.".to_owned(),
+        408 | 504 => format!("OpenProject trả lời quá chậm (lỗi {status}). Thử lại sau ít phút."),
+        429 => "OpenProject tạm chặn vì app hỏi quá dày (lỗi 429). App tự thử lại sau.".to_owned(),
+        300..=399 => format!("URL OpenProject đang chuyển hướng sang chỗ khác (lỗi {status}): kiểm tra lại URL, đúng https:// và đúng địa chỉ."),
+        500..=599 => format!("Máy chủ OpenProject đang lỗi (lỗi {status}). Không phải do bạn; thử lại sau ít phút."),
+        _ => format!("OpenProject từ chối yêu cầu (lỗi {status})."),
+    };
+    format!("{what}{detail}")
 }
 
 pub type TrackerResult<T> = Result<T, TrackerError>;
@@ -72,6 +101,100 @@ struct RawLink {
     title: Option<String>,
 }
 
+/// OpenProject's editor leaves bits of HTML in the markdown it stores (`<br>`, `&nbsp;`,
+/// `<p>`, `<span …>`): turn them into plain markdown so the brief, the AI and the app read
+/// clean text. Code (fenced blocks and `` `spans` ``) stays as written; tables and other tags
+/// stay too.
+pub fn clean_markdown(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut fence: Option<&str> = None;
+    for (i, line) in raw.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let start = line.trim_start();
+        let marker = ["```", "~~~"].into_iter().find(|m| start.starts_with(m));
+        match (fence, marker) {
+            (Some(open), Some(m)) if open == m => {
+                fence = None;
+                out.push_str(line);
+                continue;
+            }
+            (Some(_), _) => {
+                out.push_str(line);
+                continue;
+            }
+            (None, Some(m)) => {
+                fence = Some(m);
+                out.push_str(line);
+                continue;
+            }
+            (None, None) => {}
+        }
+        // outside `code spans` only: the even pieces between backticks
+        for (j, piece) in line.split('`').enumerate() {
+            if j > 0 {
+                out.push('`');
+            }
+            if j % 2 == 0 {
+                out.push_str(&clean_html(piece));
+            } else {
+                out.push_str(piece);
+            }
+        }
+    }
+    out
+}
+
+fn clean_html(text: &str) -> String {
+    static BREAK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)<br\s*/?>|</(p|div)\s*>").expect("valid regex"));
+    static INLINE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)</?(p|div|span|font|strong|b|em|i|u|ins|mark|figure|figcaption)(\s[^<>]*)?>")
+            .expect("valid regex")
+    });
+    static NUMERIC: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"&#(x[0-9a-fA-F]{1,6}|[0-9]{1,7});").expect("valid regex"));
+    if !text.contains(['<', '&']) {
+        return text.to_owned();
+    }
+    let text = BREAK.replace_all(text, "\n");
+    let text = INLINE.replace_all(&text, |c: &regex::Captures<'_>| {
+        // bold and italics stay bold and italics
+        let tag = c[1].to_ascii_lowercase();
+        match tag.as_str() {
+            "strong" | "b" => "**",
+            "em" | "i" => "_",
+            _ => "",
+        }
+        .to_owned()
+    });
+    let text = NUMERIC.replace_all(&text, |c: &regex::Captures<'_>| {
+        let code = &c[1];
+        let n = match code.strip_prefix(['x', 'X']) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => code.parse().ok(),
+        };
+        n.and_then(char::from_u32).filter(|ch| *ch != '\0').map_or_else(
+            || c[0].to_owned(),
+            |ch| {
+                if ch == '\u{a0}' {
+                    " ".to_owned()
+                } else {
+                    ch.to_string()
+                }
+            },
+        )
+    });
+    text.replace("&nbsp;", " ")
+        .replace('\u{a0}', " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
 pub fn parse_work_package(v: &Value) -> TrackerResult<WorkPackage> {
     let raw: RawWp = serde_json::from_value(v.clone()).map_err(|e| TrackerError::Shape(e.to_string()))?;
     Ok(WorkPackage {
@@ -80,7 +203,7 @@ pub fn parse_work_package(v: &Value) -> TrackerResult<WorkPackage> {
         lock_version: raw.lock_version,
         status: raw.links.status.title.unwrap_or_default(),
         project: raw.links.project.title.unwrap_or_default(),
-        description: raw.description.and_then(|d| d.raw).unwrap_or_default(),
+        description: clean_markdown(&raw.description.and_then(|d| d.raw).unwrap_or_default()),
         updated_at: raw.updated_at.unwrap_or_default(),
         priority: raw.links.priority.and_then(|p| p.title).unwrap_or_default(),
     })
@@ -158,7 +281,8 @@ pub fn comments_from_activities(v: &Value) -> Vec<Comment> {
         .into_iter()
         .flatten()
         .filter_map(|a| {
-            let raw = a.pointer("/comment/raw")?.as_str()?.trim();
+            let raw = clean_markdown(a.pointer("/comment/raw")?.as_str()?);
+            let raw = raw.trim();
             (!raw.is_empty()).then(|| Comment {
                 id: a.get("id").and_then(Value::as_u64).unwrap_or_default(),
                 created_at: a
@@ -334,6 +458,38 @@ pub trait TrackerApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_left_by_the_editor_becomes_plain_markdown() {
+        let raw = "以下について<br>確認&nbsp;ください。<br/>\n<p>補足:</p>\n<strong>Bổ sung</strong> &amp; &lt;x&gt; &#39;a&#39; &#x41;\n`<br>` stays\n```\n<br> &nbsp;\n```\n<table><tr><td>a</td></tr></table>";
+        let clean = clean_markdown(raw);
+        assert_eq!(
+            clean,
+            "以下について\n確認 ください。\n\n補足:\n\n**Bổ sung** & <x> 'a' A\n`<br>` stays\n```\n<br> &nbsp;\n```\n<table><tr><td>a</td></tr></table>"
+        );
+        assert_eq!(clean_markdown("plain text"), "plain text");
+        assert_eq!(clean_markdown("&amp;lt;"), "&lt;");
+    }
+
+    #[test]
+    fn http_errors_say_what_to_do() {
+        let e = TrackerError::Http {
+            status: 401,
+            message: "Unauthenticated".into(),
+        }
+        .to_string();
+        assert!(
+            e.contains("401") && e.contains("Access tokens") && e.contains("Unauthenticated"),
+            "{e}"
+        );
+        let e = TrackerError::Http {
+            status: 502,
+            message: "<html>".into(),
+        }
+        .to_string();
+        assert!(e.contains("502") && !e.contains("<html>"), "{e}");
+        assert!(TrackerError::NotApi.to_string().contains("API OpenProject"));
+    }
     use serde_json::json;
 
     #[test]

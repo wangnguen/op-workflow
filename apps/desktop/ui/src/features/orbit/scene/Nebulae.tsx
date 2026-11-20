@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { vi } from "../../../i18n/vi";
 import type { InboxItem } from "../../../ipc/types";
-import type { ItemDragStart } from "../OrbitScene";
+import { formatTokens, formatUsd } from "../../../shared/format";
+import type { ItemDragStart, MapSummary } from "../OrbitScene";
 import { nebulaLayout, type Point } from "../geometry";
 import type { LayoutOverrides } from "../useLayout";
 import { nebulaTone } from "../nebulaTone";
@@ -10,8 +11,8 @@ import { textUnits, truncate, wrapText } from "./text";
 
 interface Props {
   inbox: InboxItem[];
-  /** loading / error / missing URL; replaces the "inbox empty" text */
-  notice: string | undefined;
+  /** what the sun in the centre shows */
+  summary: MapSummary | undefined;
   selectedTaskId: string | undefined;
   onSelect: (taskId: string) => void;
   layout: LayoutOverrides;
@@ -27,7 +28,7 @@ const MIN_TEXT_SCALE = 0.85;
 const CHAR_W = 6.3;
 /** The bold card title runs a little wider. */
 const TITLE_CHAR_W = 6.8;
-const HINT_MAX_CHARS = 64;
+const sun = vi.orbit.sun;
 /** Full-title card shown on hover. */
 const CARD_LINE_CHARS = 38;
 const CARD_LINE_H = 15;
@@ -59,40 +60,36 @@ function TextCard({ at, title, lines }: { at: Point; title?: string; lines: stri
   );
 }
 
-/** The empty centre: a faint protostar where the task's star will ignite, plus one quiet hint. */
-function IdleCore({ count, notice }: { count: number; notice: string | undefined }) {
-  const [hover, setHover] = useState(false);
-  const full = notice ?? (count > 0 ? vi.orbit.noActiveHint : vi.orbit.inboxEmpty);
-  const cut = full.length > HINT_MAX_CHARS;
-  const hint = truncate(full, HINT_MAX_CHARS);
-  const w = Math.round(textUnits(hint) * CHAR_W + 24);
+/** The centre while no task is in progress: a sun with what goes on now (sessions running,
+ *  waiting for you, today's spend). */
+function IdleCore({ summary }: { summary: MapSummary | undefined }) {
+  const running = summary?.running ?? 0;
+  const waiting = summary?.waiting ?? 0;
+  const today = summary?.today;
+  const money = today ? sun.today(formatUsd(today.costUsd), formatTokens(today.tokens)) : undefined;
   return (
-    <g className={`idle-core${notice ? " has-notice" : ""}`}>
-      <circle r={44} className="idle-slot" />
-      <circle r={18} className="idle-glow" />
-      <circle r={5} className="idle-ember" />
-      <g
-        transform="translate(0 70)"
-        onPointerEnter={() => setHover(true)}
-        onPointerLeave={() => setHover(false)}
-      >
-        <rect x={-w / 2} y={-11} width={w} height={22} rx={11} className="idle-pill" />
-        <text y={4} className="idle-hint">
-          {hint}
-        </text>
-      </g>
-      {count > 1 && !notice && (
-        <text y={98} className="idle-sub">
-          {vi.orbit.dragHint}
+    <g className={`idle-core${running > 0 ? " is-busy" : ""}`}>
+      <title>{sun.title(running, waiting, today ? formatUsd(today.costUsd) : undefined, today ? formatTokens(today.tokens) : undefined)}</title>
+      <circle r={70} className="idle-slot" />
+      <circle r={60} className="idle-glow" />
+      <circle r={52} className="idle-sun" />
+      <text y={money ? -11 : -4} className="idle-line idle-line--main">
+        {sun.running(running)}
+      </text>
+      <text y={money ? 8 : 15} className={`idle-line${waiting > 0 ? " idle-line--waiting" : ""}`}>
+        {sun.waiting(waiting)}
+      </text>
+      {money && (
+        <text y={27} className="idle-line idle-line--faint">
+          {money}
         </text>
       )}
-      {hover && cut && <TextCard at={{ x: 0, y: 86 }} lines={wrapText(full, 56)} />}
     </g>
   );
 }
 
 /** No active task: inbox tasks drift as dim nebulae waiting to ignite. Drag to rearrange. */
-export function Nebulae({ inbox, notice, selectedTaskId, onSelect, layout, onDragStart }: Props) {
+export function Nebulae({ inbox, summary, selectedTaskId, onSelect, layout, onDragStart }: Props) {
   const [hovered, setHovered] = useState<string | null>(null);
   const spots = nebulaLayout(inbox.length);
   const place = (i: number, taskId: string) => {
@@ -122,7 +119,7 @@ export function Nebulae({ inbox, notice, selectedTaskId, onSelect, layout, onDra
           );
         })}
       </defs>
-      <IdleCore count={inbox.length} notice={inbox.length === 0 ? notice : undefined} />
+      <IdleCore summary={summary} />
       {inbox.map((item, i) => {
         const at = place(i, item.taskId);
         if (!at) return null;

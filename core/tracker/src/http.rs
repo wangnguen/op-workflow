@@ -74,12 +74,12 @@ impl HttpTracker {
             .header("Authorization", &self.auth_header(mode))
             .header("Accept", "application/hal+json, application/json")
             .call()
-            .map_err(|e| TrackerError::Network(e.to_string()))?;
+            .map_err(|e| TrackerError::Network(network_problem(&e)))?;
         let status = resp.status().as_u16();
         let body = resp
             .body_mut()
             .read_to_string()
-            .map_err(|e| TrackerError::Network(e.to_string()))?;
+            .map_err(|e| TrackerError::Network(network_problem(&e)))?;
         Ok((status, body))
     }
 
@@ -93,7 +93,7 @@ impl HttpTracker {
         let mode = *self
             .mode
             .lock()
-            .map_err(|e| TrackerError::Network(e.to_string()))?;
+            .map_err(|e| TrackerError::Network(format!("lỗi nội bộ của app ({e})")))?;
         let (mut status, mut body) = self.send(&url, mode)?;
         if status == 401 && mode == AuthMode::Bearer {
             let (s, b) = self.send(&url, AuthMode::ApiKeyBasic)?;
@@ -110,7 +110,13 @@ impl HttpTracker {
                 message: error_message(&body),
             });
         }
-        serde_json::from_str(&body).map_err(|e| TrackerError::Shape(e.to_string()))
+        serde_json::from_str(&body).map_err(|e| {
+            if body.trim_start().starts_with('<') {
+                TrackerError::NotApi
+            } else {
+                TrackerError::Shape(e.to_string())
+            }
+        })
     }
 
     /// Priorities (`GET /api/v3/priorities`): the admin's colours and OpenProject's order.
@@ -147,6 +153,39 @@ impl TrackerApi for HttpTracker {
 }
 
 /// OpenProject error bodies look like `{"_type":"Error","message":"..."}`.
+/// Why the request never got an answer, in words the user can act on.
+fn network_problem(e: &ureq::Error) -> String {
+    use std::io::ErrorKind;
+    match e {
+        ureq::Error::HostNotFound => "không tìm thấy máy chủ. Kiểm tra URL OpenProject, mạng hoặc VPN".into(),
+        ureq::Error::Timeout(_) => "máy chủ không trả lời kịp. Kiểm tra mạng / VPN rồi thử lại".into(),
+        ureq::Error::ConnectionFailed => "không mở được kết nối. Kiểm tra mạng / VPN".into(),
+        ureq::Error::BadUri(_) => "URL OpenProject không hợp lệ".into(),
+        ureq::Error::TooManyRedirects | ureq::Error::RedirectFailed => {
+            "URL OpenProject chuyển hướng vòng vòng. Kiểm tra lại URL".into()
+        }
+        ureq::Error::Io(io) => match io.kind() {
+            ErrorKind::ConnectionRefused => {
+                "máy chủ từ chối kết nối (sai cổng trong URL, hoặc OpenProject đang tắt)".into()
+            }
+            ErrorKind::TimedOut => "hết thời gian chờ. Kiểm tra mạng / VPN rồi thử lại".into(),
+            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::UnexpectedEof => {
+                "kết nối bị ngắt giữa chừng (mạng chập chờn, hoặc VPN / proxy chặn)".into()
+            }
+            _ => format!("lỗi mạng ({io})"),
+        },
+        other => {
+            let text = other.to_string();
+            let low = text.to_lowercase();
+            if low.contains("tls") || low.contains("certificate") || low.contains("ssl") {
+                "lỗi chứng chỉ HTTPS (proxy công ty chặn, hoặc chứng chỉ máy chủ không hợp lệ)".into()
+            } else {
+                format!("lỗi mạng ({text})")
+            }
+        }
+    }
+}
+
 fn error_message(body: &str) -> String {
     serde_json::from_str::<Value>(body)
         .ok()

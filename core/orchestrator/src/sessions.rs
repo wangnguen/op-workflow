@@ -18,10 +18,10 @@ use opw_agents::claude::{DISALLOWED_GIT, cut};
 use opw_agents::cli;
 use opw_agents::env::{Account, is_stripped};
 use opw_agents::session_log::{self, SessionLog};
-use opw_agents::transcript::claude_tool_text;
+use opw_agents::transcript::{ItemKind, claude_tool_text};
 use opw_domain::session::{
-    AskAnswer, AskKind, AskOption, AskQuestion, MODES, OutsideChat, OutsideSession, SessionAsk, SessionChat,
-    SessionKind, SessionPatch, SessionState, SessionView,
+    ArchivedSession, AskAnswer, AskKind, AskOption, AskQuestion, MODES, OutsideChat, OutsideSession,
+    SessionAsk, SessionChat, SessionKind, SessionPatch, SessionState, SessionView,
 };
 use opw_domain::view::{ApiError, QuotaSnapshot};
 use opw_storage::{SessionRow, Store};
@@ -161,6 +161,9 @@ struct Entry {
     commands: Vec<String>,
     /// Lines from the app in this chat (not sent to the AI), kept apart from the transcript.
     notes: Vec<AppNote>,
+    /// A copy of another conversation ("Tách bản sao"): its first run resumes that one with
+    /// `--fork-session`; until then the chat shows the original.
+    fork_from: Option<String>,
 }
 
 /// A line from the app in a session's chat: shown after the first `after` items of the
@@ -173,6 +176,21 @@ struct AppNote {
 
 /// kv kind of a task session's app notes (key = session id).
 const NOTES_KV: &str = "session-notes";
+/// App-wide kv (no task): the conversation a copy was made from (key = the copy's id).
+const FORK_KV: &str = "session-fork";
+/// App-wide kv (no task): sessions opened outside the app the user archived (key = id,
+/// value = [`OutsideArchived`] as JSON).
+const OUTSIDE_ARCHIVED_KV: &str = "outside-archived";
+/// `task_kv` id for values that belong to no task.
+const NO_TASK: u64 = 0;
+
+/// What the archive list keeps of a session opened outside the app.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OutsideArchived {
+    title: String,
+    cwd: String,
+    at: String,
+}
 
 /// A message waiting to be sent (until the folder trust question is answered).
 struct Queued {
@@ -218,7 +236,34 @@ impl Entry {
             mcp: None,
             commands: Vec::new(),
             notes: Vec::new(),
+            fork_from: None,
         }
+    }
+
+    /// One line on what it did last, for the sessions table.
+    fn activity(&self) -> Option<String> {
+        if !self.asks.is_empty() {
+            return Some("Đang chờ bạn trả lời".to_owned());
+        }
+        let item = self.log.items().iter().rev().find(|i| {
+            matches!(
+                i.kind,
+                ItemKind::Text | ItemKind::Tool | ItemKind::User | ItemKind::Error
+            ) && !i.text.trim().is_empty()
+        })?;
+        let first = item
+            .text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default();
+        let line = match item.kind {
+            ItemKind::Tool => format!("{}: {first}", item.tool.as_deref().unwrap_or("Tool")),
+            ItemKind::User => format!("Bạn: {first}"),
+            ItemKind::Error => format!("Lỗi: {first}"),
+            _ => first.to_owned(),
+        };
+        Some(one_line(&line, ACTIVITY_MAX))
     }
 
     fn kind(&self) -> SessionKind {
@@ -279,6 +324,8 @@ impl Entry {
             created_at: self.row.created_at.clone(),
             updated_at: self.row.updated_at.clone(),
             error: self.error.clone(),
+            activity: self.activity(),
+            fork_of: self.fork_from.clone().filter(|_| !self.started),
         }
     }
 
@@ -408,7 +455,13 @@ impl Entry {
         if self.transcript.as_ref().is_none_or(|p| !p.is_file()) {
             self.transcript = transcript_path(&self.row.repo, &self.row.id);
         }
-        let Some(path) = self.transcript.clone() else {
+        // a copy that has not run yet shows the conversation it was copied from
+        let own = self.transcript.is_some();
+        let Some(path) = self.transcript.clone().or_else(|| {
+            self.fork_from
+                .as_deref()
+                .and_then(|orig| transcript_path(&self.row.repo, orig))
+        }) else {
             return;
         };
         let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
@@ -420,10 +473,12 @@ impl Entry {
         };
         self.log = SessionLog::from_transcript(&text);
         self.read_at = modified;
-        self.started = true;
         self.seq += 1;
-        if let Some(title) = self.log.title.clone() {
-            self.row.title = title;
+        if own {
+            self.started = true;
+            if let Some(title) = self.log.title.clone() {
+                self.row.title = title;
+            }
         }
     }
 
@@ -812,7 +867,15 @@ fn trust_report(repo: &Path) -> Option<Value> {
 
 /// The arguments of a session process: the extension's flags (2.1.32x, trusted folder) and the
 /// app's git guard.
-fn session_args(id: &str, resume: bool, mode: Option<&str>, user_only: bool) -> Vec<String> {
+/// `fork` = the conversation a copy starts from (its first run): `--resume <it> --fork-session
+/// --session-id <id>`.
+fn session_args(
+    id: &str,
+    resume: bool,
+    mode: Option<&str>,
+    user_only: bool,
+    fork: Option<&str>,
+) -> Vec<String> {
     let mut args: Vec<String> = [
         "--output-format",
         "stream-json",
@@ -833,11 +896,38 @@ fn session_args(id: &str, resume: bool, mode: Option<&str>, user_only: bool) -> 
     if let Some(mode) = mode {
         args.extend(["--permission-mode".to_owned(), mode.to_owned()]);
     }
-    args.extend([
-        if resume { "--resume" } else { "--session-id" }.to_owned(),
-        id.to_owned(),
-    ]);
+    args.extend(id_args(id, resume, fork));
     args
+}
+
+/// The flags that name the conversation: resume it, start it with this id, or start it as a
+/// copy of `fork`.
+fn id_args(id: &str, resume: bool, fork: Option<&str>) -> Vec<String> {
+    match (resume, fork) {
+        (false, Some(orig)) => ["--resume", orig, "--fork-session", "--session-id", id]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+        _ => vec![
+            if resume { "--resume" } else { "--session-id" }.to_owned(),
+            id.to_owned(),
+        ],
+    }
+}
+
+/// Longest line the sessions table shows of what a session did last.
+const ACTIVITY_MAX: usize = 160;
+
+/// The first `max` characters of `text` on one line.
+fn one_line(text: &str, max: usize) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        flat
+    } else {
+        let mut cut: String = flat.chars().take(max).collect();
+        cut.push('…');
+        cut
+    }
 }
 
 /// What a permission request asks, for the chat.
@@ -1202,6 +1292,7 @@ impl Sessions {
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or_default();
         }
+        entry.fork_from = self.store().kv_get(NO_TASK, FORK_KV, &id).ok().flatten();
         if !entry.started {
             entry.started = transcript_path(&entry.row.repo, &entry.row.id).is_some();
         }
@@ -1238,14 +1329,191 @@ impl Sessions {
             .into_iter()
             .map(|r| r.id)
             .collect();
+        let archived = self.outside_archived();
         let alive = alive_pids();
         let mut records: Vec<StatusRecord> = status_records()
             .into_iter()
-            .filter(|r| r.kind == "interactive" && !known.contains(&r.id))
+            .filter(|r| r.kind == "interactive" && !known.contains(&r.id) && !archived.contains_key(&r.id))
             .filter(|r| alive.as_ref().is_none_or(|a| a.contains(&r.pid)))
             .collect();
         records.sort_by_key(|r| std::cmp::Reverse(r.updated_ms));
         records.iter().map(outside_session).collect()
+    }
+
+    /// Sessions opened outside the app the user archived, by id.
+    fn outside_archived(&self) -> HashMap<String, OutsideArchived> {
+        self.store()
+            .kv_all(NO_TASK, OUTSIDE_ARCHIVED_KV)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(id, json)| Some((id, serde_json::from_str(&json).ok()?)))
+            .collect()
+    }
+
+    /// Everything on the "Đã lưu trữ" list: the app's sessions and those opened outside it,
+    /// the most recently archived first.
+    pub fn archived(&self) -> Vec<ArchivedSession> {
+        let store = self.store();
+        let mut out: Vec<ArchivedSession> = store
+            .hidden_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(row, at)| {
+                let task_id = row
+                    .wp_id
+                    .and_then(|wp| store.task(wp).ok().flatten())
+                    .map(|t| t.display_id);
+                let title = Some(row.title.clone())
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| repo_name(&row.repo));
+                ArchivedSession {
+                    id: row.id,
+                    title,
+                    repo: row.repo,
+                    task_id,
+                    outside: false,
+                    archived_at: at,
+                }
+            })
+            .collect();
+        drop(store);
+        out.extend(
+            self.outside_archived()
+                .into_iter()
+                .map(|(id, a)| ArchivedSession {
+                    id,
+                    title: a.title,
+                    repo: a.cwd,
+                    task_id: None,
+                    outside: true,
+                    archived_at: a.at,
+                }),
+        );
+        out.sort_by(|a, b| b.archived_at.cmp(&a.archived_at));
+        out
+    }
+
+    /// Take a session opened outside the app off the list (nothing changes on its side).
+    pub fn archive_outside(&self, id: &str) -> Result<(), ApiError> {
+        let session = self
+            .outside()
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| err("session.closed", "Phiên này không còn mở ở ngoài app"))?;
+        let value = OutsideArchived {
+            title: session.title,
+            cwd: session.cwd,
+            at: now(),
+        };
+        let json = serde_json::to_string(&value).map_err(|e| err("storage", e.to_string()))?;
+        self.store()
+            .kv_set(NO_TASK, OUTSIDE_ARCHIVED_KV, id, &json, &now())
+            .map_err(|e| err("storage", e.to_string()))
+    }
+
+    /// Put an archived session back on the list. A session opened outside the app that was
+    /// closed meanwhile would not show again (that list only has open ones), so it comes back as
+    /// one of the app's sessions: its conversation goes on here.
+    pub fn restore(&self, id: &str) -> Result<(), ApiError> {
+        let (app, outside, was_outside) = {
+            let store = self.store();
+            let outside = store
+                .kv_get(NO_TASK, OUTSIDE_ARCHIVED_KV, id)
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str::<OutsideArchived>(&json).ok());
+            let app = store
+                .unhide_session(id)
+                .map_err(|e| err("storage", e.to_string()))?;
+            let was_outside = store
+                .kv_delete(NO_TASK, OUTSIDE_ARCHIVED_KV, id)
+                .map_err(|e| err("storage", e.to_string()))?;
+            (app, outside, was_outside)
+        };
+        if !app && !was_outside {
+            return Err(err("session.missing", "Không còn phiên này trong mục Đã lưu trữ"));
+        }
+        if let Some(a) = outside.filter(|_| !app) {
+            let open = self.outside().iter().any(|s| s.id == id);
+            if !open && transcript_path(&a.cwd, id).is_some() {
+                self.join(id, a.title, a.cwd)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// "Tiếp tục trong app": a session opened outside the app joins the app's list as it is
+    /// (same conversation). While VS Code or the terminal still holds it the app only shows it;
+    /// once it is closed there, the next message goes on here.
+    pub fn adopt(&self, id: &str) -> Result<SessionView, ApiError> {
+        let session = self
+            .outside()
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| err("session.closed", "Phiên này không còn mở ở ngoài app"))?;
+        self.join(&session.id, session.title, session.cwd)
+    }
+
+    /// A Claude conversation the app did not start becomes one of its sessions without a task
+    /// (same id, same conversation).
+    fn join(&self, id: &str, title: String, cwd: String) -> Result<SessionView, ApiError> {
+        let at = now();
+        let row = SessionRow {
+            id: id.to_owned(),
+            wp_id: None,
+            repo: cwd,
+            kind: "free".to_owned(),
+            title,
+            mode: None,
+            model: None,
+            cost_usd: 0.0,
+            created_at: at.clone(),
+            updated_at: at,
+        };
+        self.store()
+            .save_session(&row)
+            .map_err(|e| err("storage", e.to_string()))?;
+        let arc = self.insert(row);
+        let mut e = lock(&arc);
+        e.refresh();
+        Ok(e.view(status_files().get(id)))
+    }
+
+    /// "Tách bản sao": a new app session that starts as a copy of a session opened outside the
+    /// app (`--resume <it> --fork-session`), so you can type now while the original stays
+    /// where it is open. The two go their own ways from the first message.
+    pub fn fork(&self, id: &str) -> Result<SessionView, ApiError> {
+        let session = self
+            .outside()
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| err("session.closed", "Phiên này không còn mở ở ngoài app"))?;
+        let at = now();
+        let row = SessionRow {
+            id: new_uuid(),
+            wp_id: None,
+            repo: session.cwd,
+            kind: "free".to_owned(),
+            title: format!("{} (bản sao)", session.title),
+            mode: None,
+            model: None,
+            cost_usd: 0.0,
+            created_at: at.clone(),
+            updated_at: at.clone(),
+        };
+        {
+            let store = self.store();
+            store
+                .save_session(&row)
+                .map_err(|e| err("storage", e.to_string()))?;
+            store
+                .kv_set(NO_TASK, FORK_KV, &row.id, id, &at)
+                .map_err(|e| err("storage", e.to_string()))?;
+        }
+        let arc = self.insert(row);
+        let mut e = lock(&arc);
+        e.refresh();
+        Ok(e.view(None))
     }
 
     /// The conversation of a session opened outside the app, read from its transcript.
@@ -1432,14 +1700,13 @@ impl Sessions {
             e.clear_turn();
             e.refresh();
             let resume = e.transcript.as_ref().is_some_and(|p| p.is_file());
-            let mut args = vec![
-                if resume { "--resume" } else { "--session-id" }.into(),
-                id.to_owned(),
+            let mut args = id_args(id, resume, e.fork_from.as_deref());
+            args.extend([
                 "--setting-sources".into(),
                 "user,project,local".into(),
                 "--disallowedTools".into(),
                 DISALLOWED_GIT.into(),
-            ];
+            ]);
             if let Some(mode) = e.row.mode.as_ref() {
                 args.extend(["--permission-mode".into(), mode.clone()]);
             }
@@ -1912,7 +2179,14 @@ impl Sessions {
         }
         let resume =
             e.transcript.as_ref().is_some_and(|p| p.is_file()) || transcript_path(&e.row.repo, id).is_some();
-        let mut args = session_args(id, resume, e.row.mode.as_deref(), *trust == TrustRun::UserOnly);
+        let fork = e.fork_from.clone();
+        let mut args = session_args(
+            id,
+            resume,
+            e.row.mode.as_deref(),
+            *trust == TrustRun::UserOnly,
+            fork.as_deref(),
+        );
         let mcp = self.prepare_mcp(e, &repo, &mut args);
         let mut cmd = Command::new(exe);
         cmd.args(&args)
@@ -2768,7 +3042,7 @@ mod tests {
 
     #[test]
     fn args_names_and_status() {
-        let a = session_args("abc", false, Some("plan"), false);
+        let a = session_args("abc", false, Some("plan"), false, None);
         assert!(a.windows(2).any(|w| w == ["--session-id", "abc"]));
         assert!(a.windows(2).any(|w| w == ["--permission-mode", "plan"]));
         assert!(
@@ -2776,8 +3050,21 @@ mod tests {
                 .any(|w| w == ["--setting-sources", "user,project,local"])
         );
         assert!(a.contains(&"--permission-prompt-tool=stdio".to_owned()));
-        let r = session_args("abc", true, None, true);
+        let r = session_args("abc", true, None, true, Some("orig"));
         assert!(r.windows(2).any(|w| w == ["--resume", "abc"]));
+        assert!(
+            !r.contains(&"--fork-session".to_owned()),
+            "a copy that ran resumes itself"
+        );
+        // a copy's first run starts from the original under its own id
+        let f = session_args("abc", false, None, false, Some("orig"));
+        assert!(
+            f.windows(4)
+                .any(|w| w == ["--resume", "orig", "--fork-session", "--session-id"])
+        );
+        assert!(f.windows(2).any(|w| w == ["--session-id", "abc"]));
+        assert_eq!(one_line("  a\n  b  ", 10), "a b");
+        assert_eq!(one_line("abcdef", 3), "abc…");
         assert!(r.windows(2).any(|w| w == ["--setting-sources", "user"]));
         assert!(!r.contains(&"--permission-mode".to_owned()));
         assert_eq!(
@@ -2952,6 +3239,49 @@ items: {texts:#?}",
         );
         assert!(chat.session.cost_usd > 0.0);
         sessions.shutdown(Duration::from_secs(10));
+    }
+
+    #[test]
+    fn archived_sessions_come_back_on_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let sessions = Sessions::new(store, dir.path().join("hooks"));
+        let repo = dir.path().to_string_lossy().into_owned();
+        let id = sessions.create(None, &repo).unwrap().id;
+
+        sessions.hide(&id).unwrap();
+        assert!(sessions.list().iter().all(|s| s.id != id));
+        let archived = sessions.archived();
+        assert_eq!(archived.len(), 1);
+        assert!(!archived[0].outside && archived[0].id == id);
+        sessions.restore(&id).unwrap();
+        assert!(sessions.list().iter().any(|s| s.id == id));
+        assert!(sessions.archived().is_empty());
+
+        // a session opened outside the app, archived, then closed with no conversation left:
+        // restore takes it off the archive and nothing else
+        let kept = OutsideArchived {
+            title: "Sửa CSS".into(),
+            cwd: repo.clone(),
+            at: now(),
+        };
+        sessions
+            .store()
+            .kv_set(
+                NO_TASK,
+                OUTSIDE_ARCHIVED_KV,
+                "ext-1",
+                &serde_json::to_string(&kept).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        let archived = sessions.archived();
+        assert_eq!((archived.len(), archived[0].outside), (1, true));
+        assert_eq!(archived[0].title, "Sửa CSS");
+        sessions.restore("ext-1").unwrap();
+        assert!(sessions.archived().is_empty());
+        assert!(sessions.list().iter().all(|s| s.id != "ext-1"));
+        assert_eq!(sessions.restore("ext-1").unwrap_err().code, "session.missing");
     }
 
     #[test]
