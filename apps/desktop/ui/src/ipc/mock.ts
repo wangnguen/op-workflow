@@ -339,7 +339,7 @@ export function mockReconnect(provider?: Provider): null {
 }
 
 export function mockAppInfo(): AppInfo {
-  return { version: "0.2.0-demo", core: "mock" };
+  return { version: "0.3.0-demo", core: "mock" };
 }
 
 export function mockQuota(frameIndex: number, now: number): QuotaSnapshot[] {
@@ -1019,9 +1019,9 @@ export function mockStartTask(req: StartRequest): StartResult {
 
 export function mockUpdate(): UpdateView {
   return {
-    current: "0.2.0",
+    current: "0.3.0",
     enabled: true,
-    latest: "0.3.0",
+    latest: "0.4.0",
     available: true,
     url: "https://github.com/wangnguen/op-workflow/releases",
     publishedAt: new Date(Date.now() - 2 * 86_400_000).toISOString(),

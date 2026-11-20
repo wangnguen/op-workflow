@@ -7,6 +7,7 @@ App chạy trên máy bạn, chỉ **đọc** OpenProject và **không bao giờ
 ## Tính năng chính
 
 - Bảng task OpenProject (Inbox / Đang làm / Chờ push / Đã xong), báo comment mới bằng chuông và thông báo Windows.
+- Màn *Workspace*: mỗi task một phiên Claude Code như trong extension VS Code (chat, terminal của phiên, shell của repo); các bước của app chạy thành tin nhắn trong phiên đó.
 - Luồng 12 bước, mặc định dừng sau mỗi bước để bạn xem; bật *Tự chạy* thì app chỉ dừng ở chỗ cần bạn quyết.
 - Mỗi bước AI chọn được Claude hoặc Codex, model, effort và chế độ quyền.
 - Có công tắc xác minh kết luận AI qua MCP cục bộ trong Cài đặt → Các bước AI (mặc định bật); thiếu kết luận hoặc AI báo chưa xong thì app dừng ở bước đó.

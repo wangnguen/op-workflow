@@ -1,7 +1,7 @@
 {
   "name": "op-workflow",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Desktop app that runs Claude Code and Codex through the OpenProject task workflow",
   "packageManager": "pnpm@12.15.0",
   "scripts": {
