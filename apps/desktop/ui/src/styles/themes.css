@@ -1,36 +1,21 @@
-/* Colour themes (Cài đặt → Giao diện). A theme names only its palette; status, agent and
-   severity colours keep their meaning and change only between light and dark.
-   The default dark theme "Ngân hà" is tokens.css itself. Palettes follow the public colour
-   schemes they are named after (Dracula, Tokyo Night, Catppuccin, Nord, Gruvbox, Rosé Pine,
-   One, Solarized, Monokai). */
+/* Colour themes (Cài đặt → Giao diện). A theme sets only its palette: surfaces, accent and the
+   eight --hue-* colours. Agent, status and severity colours come from those hues in tokens.css
+   (Claude = orange, Codex = purple, chạy = orange, chờ = yellow, xong = green, lỗi = red), so
+   they keep their meaning while matching the theme.
+   The default dark theme (Catppuccin Macchiato) is tokens.css itself. Palettes follow the public
+   colour schemes they are named after (Dracula, Tokyo Night, Catppuccin, Nord, Gruvbox,
+   Rosé Pine, One, Solarized, Monokai). Hues of light themes are the scheme's own colours made
+   darker where needed so text in them reads at 4.5:1 on the theme's background. */
 
 /* ---------- shared by every light theme ---------- */
 
 :root[data-mode="light"] {
   color-scheme: light;
 
-  --claude: #c15f3c;
-  --claude-soft: rgba(193, 95, 60, 0.12);
-  --codex: #6a4fc9;
-  --codex-soft: rgba(106, 79, 201, 0.12);
-  --shell: #0f7f78;
-  --shell-soft: rgba(15, 127, 120, 0.12);
-
-  --st-running: #c25e00;
-  --st-waiting: #8f5f00;
-  --st-idle: #8e8e93;
-  --st-done: #1f7a35;
-  --st-failed: #d70015;
-  --st-running-soft: rgba(194, 94, 0, 0.12);
-  --st-waiting-soft: rgba(196, 140, 0, 0.14);
-  --st-done-soft: rgba(31, 122, 53, 0.11);
-  --st-failed-soft: rgba(215, 0, 21, 0.09);
-
-  --sev-critical: #d70015;
-  --sev-high: #c93400;
-  --sev-medium: #8f5f00;
-  --sev-low: #0060c0;
-  --sev-muted: #8e8e93;
+  --on-hue: var(--panel);
+  --soft: 12%;
+  --space-0: var(--bg);
+  --space-1: var(--panel);
 
   --fill: rgba(116, 116, 128, 0.12);
   --fill-strong: rgba(116, 116, 128, 0.2);
@@ -70,6 +55,15 @@
   --glow-b: rgba(232, 131, 93, 0.06);
   --space-0: #0b0b0d;
   --space-1: #141418;
+
+  --hue-red: #ec6a6f;
+  --hue-orange: #e8835d;
+  --hue-yellow: #e4bd62;
+  --hue-green: #86c99d;
+  --hue-teal: #5fc2b3;
+  --hue-blue: #6fa8ea;
+  --hue-purple: #a996ec;
+  --hue-pink: #df8dbb;
 }
 
 :root[data-theme="dracula"] {
@@ -96,6 +90,15 @@
   --glow-b: rgba(255, 121, 198, 0.05);
   --space-0: #11121a;
   --space-1: #1a1b28;
+
+  --hue-red: #ff5555;
+  --hue-orange: #ffb86c;
+  --hue-yellow: #f1fa8c;
+  --hue-green: #50fa7b;
+  --hue-teal: #8be9fd;
+  --hue-blue: #9aa9f0;
+  --hue-purple: #bd93f9;
+  --hue-pink: #ff79c6;
 }
 
 :root[data-theme="tokyo-night"] {
@@ -122,6 +125,15 @@
   --glow-b: rgba(187, 154, 247, 0.05);
   --space-0: #0f0f16;
   --space-1: #161826;
+
+  --hue-red: #f7768e;
+  --hue-orange: #ff9e64;
+  --hue-yellow: #e0af68;
+  --hue-green: #9ece6a;
+  --hue-teal: #73daca;
+  --hue-blue: #7aa2f7;
+  --hue-purple: #bb9af7;
+  --hue-pink: #e8a3d8;
 }
 
 :root[data-theme="catppuccin-mocha"] {
@@ -148,6 +160,15 @@
   --glow-b: rgba(250, 179, 135, 0.05);
   --space-0: #0b0b12;
   --space-1: #14141f;
+
+  --hue-red: #f38ba8;
+  --hue-orange: #fab387;
+  --hue-yellow: #f9e2af;
+  --hue-green: #a6e3a1;
+  --hue-teal: #94e2d5;
+  --hue-blue: #89b4fa;
+  --hue-purple: #cba6f7;
+  --hue-pink: #f5c2e7;
 }
 
 :root[data-theme="nord"] {
@@ -174,6 +195,15 @@
   --glow-b: rgba(180, 142, 173, 0.05);
   --space-0: #1a1e26;
   --space-1: #222834;
+
+  --hue-red: #bf616a;
+  --hue-orange: #d08770;
+  --hue-yellow: #ebcb8b;
+  --hue-green: #a3be8c;
+  --hue-teal: #8fbcbb;
+  --hue-blue: #81a1c1;
+  --hue-purple: #b48ead;
+  --hue-pink: #d39ec4;
 }
 
 :root[data-theme="gruvbox-dark"] {
@@ -200,6 +230,15 @@
   --glow-b: rgba(254, 128, 25, 0.05);
   --space-0: #141617;
   --space-1: #1c1e1f;
+
+  --hue-red: #fb4934;
+  --hue-orange: #fe8019;
+  --hue-yellow: #fabd2f;
+  --hue-green: #b8bb26;
+  --hue-teal: #8ec07c;
+  --hue-blue: #83a598;
+  --hue-purple: #d3869b;
+  --hue-pink: #e795ab;
 }
 
 :root[data-theme="rose-pine"] {
@@ -226,6 +265,15 @@
   --glow-b: rgba(235, 188, 186, 0.05);
   --space-0: #110f1a;
   --space-1: #191724;
+
+  --hue-red: #eb6f92;
+  --hue-orange: #ebbcba;
+  --hue-yellow: #f6c177;
+  --hue-green: #a3d4b3;
+  --hue-teal: #9ccfd8;
+  --hue-blue: #86a9d6;
+  --hue-purple: #c4a7e7;
+  --hue-pink: #e8a5c8;
 }
 
 :root[data-theme="one-dark"] {
@@ -252,6 +300,15 @@
   --glow-b: rgba(198, 120, 221, 0.05);
   --space-0: #14171c;
   --space-1: #1b1f27;
+
+  --hue-red: #e06c75;
+  --hue-orange: #d19a66;
+  --hue-yellow: #e5c07b;
+  --hue-green: #98c379;
+  --hue-teal: #56b6c2;
+  --hue-blue: #61afef;
+  --hue-purple: #c678dd;
+  --hue-pink: #de8fc8;
 }
 
 :root[data-theme="solarized-dark"] {
@@ -278,6 +335,15 @@
   --glow-b: rgba(181, 137, 0, 0.06);
   --space-0: #001820;
   --space-1: #00222d;
+
+  --hue-red: #dc322f;
+  --hue-orange: #cb4b16;
+  --hue-yellow: #b58900;
+  --hue-green: #859900;
+  --hue-teal: #2aa198;
+  --hue-blue: #268bd2;
+  --hue-purple: #6c71c4;
+  --hue-pink: #d33682;
 }
 
 :root[data-theme="monokai"] {
@@ -304,6 +370,15 @@
   --glow-b: rgba(249, 38, 114, 0.04);
   --space-0: #141512;
   --space-1: #1c1d19;
+
+  --hue-red: #f92672;
+  --hue-orange: #fd971f;
+  --hue-yellow: #e6db74;
+  --hue-green: #a6e22e;
+  --hue-teal: #a1efe4;
+  --hue-blue: #66d9ef;
+  --hue-purple: #ae81ff;
+  --hue-pink: #ff6ac1;
 }
 
 /* ---------- light ---------- */
@@ -328,6 +403,15 @@
   --chrome: rgba(245, 245, 247, 0.96);
   --column: rgba(255, 255, 255, 0.6);
   --overlay: rgba(255, 255, 255, 0.98);
+
+  --hue-red: #d70015;
+  --hue-orange: #c25e00;
+  --hue-yellow: #8f5f00;
+  --hue-green: #1f7a35;
+  --hue-teal: #0f7f78;
+  --hue-blue: #0060c0;
+  --hue-purple: #6a4fc9;
+  --hue-pink: #b4357a;
 }
 
 :root[data-theme="catppuccin-latte"] {
@@ -350,6 +434,15 @@
   --chrome: rgba(230, 233, 239, 0.96);
   --column: rgba(239, 241, 245, 0.7);
   --overlay: rgba(239, 241, 245, 0.98);
+
+  --hue-red: #d00a38;
+  --hue-orange: #b64401;
+  --hue-yellow: #945b05;
+  --hue-green: #1f7902;
+  --hue-teal: #05757b;
+  --hue-blue: #135cea;
+  --hue-purple: #8737ed;
+  --hue-pink: #ab3c90;
 }
 
 :root[data-theme="tokyo-day"] {
@@ -372,6 +465,15 @@
   --chrome: rgba(213, 214, 219, 0.96);
   --column: rgba(233, 233, 237, 0.7);
   --overlay: rgba(233, 233, 237, 0.98);
+
+  --hue-red: #ba0246;
+  --hue-orange: #914b04;
+  --hue-yellow: #77582a;
+  --hue-green: #496529;
+  --hue-teal: #066a57;
+  --hue-blue: #0258bc;
+  --hue-purple: #7442b8;
+  --hue-pink: #ad206e;
 }
 
 :root[data-theme="rose-pine-dawn"] {
@@ -394,6 +496,15 @@
   --chrome: rgba(250, 244, 237, 0.96);
   --column: rgba(255, 250, 243, 0.7);
   --overlay: rgba(255, 250, 243, 0.98);
+
+  --hue-red: #a05169;
+  --hue-orange: #a25250;
+  --hue-yellow: #955e03;
+  --hue-green: #3a754a;
+  --hue-teal: #33727c;
+  --hue-blue: #286983;
+  --hue-purple: #77618f;
+  --hue-pink: #a14c78;
 }
 
 :root[data-theme="gruvbox-light"] {
@@ -416,6 +527,15 @@
   --chrome: rgba(242, 229, 188, 0.96);
   --column: rgba(251, 241, 199, 0.65);
   --overlay: rgba(251, 241, 199, 0.98);
+
+  --hue-red: #9d0006;
+  --hue-orange: #af3a03;
+  --hue-yellow: #905b00;
+  --hue-green: #6d6805;
+  --hue-teal: #397250;
+  --hue-blue: #076678;
+  --hue-purple: #8f3f71;
+  --hue-pink: #9a4e71;
 }
 
 :root[data-theme="one-light"] {
@@ -438,6 +558,15 @@
   --chrome: rgba(234, 234, 235, 0.96);
   --column: rgba(250, 250, 250, 0.7);
   --overlay: rgba(250, 250, 250, 0.98);
+
+  --hue-red: #c2362c;
+  --hue-orange: #b24a08;
+  --hue-yellow: #8e6103;
+  --hue-green: #257927;
+  --hue-teal: #0070a0;
+  --hue-blue: #2c62da;
+  --hue-purple: #a626a4;
+  --hue-pink: #b83182;
 }
 
 :root[data-theme="solarized-light"] {
@@ -460,9 +589,13 @@
   --chrome: rgba(238, 232, 213, 0.96);
   --column: rgba(253, 246, 227, 0.65);
   --overlay: rgba(253, 246, 227, 0.98);
-}
 
-/* filled badges keep white text on the darker light-mode colours */
-:root[data-mode="light"] .badge {
-  color: #ffffff;
+  --hue-red: #cc1d20;
+  --hue-orange: #ba3e01;
+  --hue-yellow: #846301;
+  --hue-green: #606e01;
+  --hue-teal: #09746d;
+  --hue-blue: #006cac;
+  --hue-purple: #5b5fb0;
+  --hue-pink: #c12173;
 }

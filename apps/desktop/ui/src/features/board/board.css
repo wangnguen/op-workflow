@@ -22,8 +22,8 @@
   box-shadow: inset 0 0 0 1px var(--line);
 }
 .column--active {
-  background: linear-gradient(180deg, rgba(255, 158, 69, 0.06), var(--column) 140px);
-  box-shadow: inset 0 0 0 1px rgba(255, 158, 69, 0.22);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--st-running) 6%, transparent), var(--column) 140px);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--st-running) 22%, transparent);
 }
 .column-head {
   position: relative;
@@ -249,7 +249,7 @@ body.is-card-dragging * {
   color: var(--text-dim);
 }
 .card--waiting {
-  box-shadow: 0 0 0 1px rgba(255, 213, 79, 0.6), 0 0 22px rgba(255, 213, 79, 0.1);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--st-waiting) 60%, transparent), 0 0 22px color-mix(in srgb, var(--st-waiting) 10%, transparent);
 }
 .card--waiting .card-bar {
   background: var(--st-waiting);
@@ -276,12 +276,12 @@ body.is-card-dragging * {
   font-size: 13px;
   font-weight: 700;
 }
-.card-mono[data-tone="0"] { --tone: #d97757; }
-.card-mono[data-tone="1"] { --tone: #9d8cf8; }
-.card-mono[data-tone="2"] { --tone: #4cc2b8; }
-.card-mono[data-tone="3"] { --tone: #5ccfe6; }
-.card-mono[data-tone="4"] { --tone: #c29a6b; }
-.card-mono[data-tone="5"] { --tone: #ff7ac6; }
+.card-mono[data-tone="0"] { --tone: var(--hue-orange); }
+.card-mono[data-tone="1"] { --tone: var(--hue-purple); }
+.card-mono[data-tone="2"] { --tone: var(--hue-teal); }
+.card-mono[data-tone="3"] { --tone: var(--hue-blue); }
+.card-mono[data-tone="4"] { --tone: var(--hue-green); }
+.card-mono[data-tone="5"] { --tone: var(--hue-pink); }
 .card-heading {
   display: flex;
   flex-direction: column;

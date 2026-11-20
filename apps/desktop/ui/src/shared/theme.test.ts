@@ -21,7 +21,9 @@ describe("themes", () => {
   });
 
   it("falls back to the default of the mode for unknown or wrong-mode ids", () => {
-    expect(themeMeta("nope", "dark").id).toBe("galaxy");
+    expect(themeMeta("nope", "dark").id).toBe("catppuccin-macchiato");
+    // "galaxy" (Ngân hà) was removed: a saved choice of it falls back to the default
+    expect(themeMeta("galaxy", "dark").id).toBe("catppuccin-macchiato");
     expect(themeMeta("dracula", "light").id).toBe("paper");
   });
 });

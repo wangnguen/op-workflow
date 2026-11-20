@@ -45,24 +45,24 @@
 }
 .brand-flow {
   fill: none;
-  stroke: #b49bff;
+  stroke: color-mix(in srgb, var(--accent) 65%, var(--text));
   stroke-width: 2.2;
   stroke-linecap: round;
 }
 .brand-done {
-  fill: #8b7bff;
+  fill: var(--accent);
 }
 .brand-live {
   fill: var(--chrome);
-  stroke: #d6b8ff;
+  stroke: var(--accent-ink);
   stroke-width: 1.6;
 }
 .brand-goal {
-  fill: #ffa94d;
+  fill: var(--claude);
 }
 .brand-check {
   fill: none;
-  stroke: #ffffff;
+  stroke: var(--on-hue);
   stroke-width: 1.7;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -82,14 +82,15 @@
   color: var(--text-dim);
   font-weight: 600;
 }
+/* tints, not panel colours: the bar's own colour shows through in every theme */
 .tab:hover {
   color: var(--text);
-  background: var(--panel);
+  background: var(--fill);
 }
 .tab.is-on {
   color: var(--text);
-  background: var(--panel-2);
-  box-shadow: inset 0 -2px 0 var(--claude);
+  background: var(--fill);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 .tab-dot,
 .bell-dot {
@@ -121,8 +122,8 @@
 .kbd-hint kbd {
   padding: 2px 6px;
   border-radius: 4px;
-  border: 1px solid var(--border-strong);
-  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  background: transparent;
   color: var(--text-dim);
   font-family: var(--mono);
   font-size: 11px;

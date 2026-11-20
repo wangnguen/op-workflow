@@ -16,7 +16,7 @@
   overflow: hidden;
   border-right: 1px solid var(--border);
   background:
-    radial-gradient(ellipse 60% 70% at 50% 50%, #141a36 0%, var(--space-1) 55%, var(--space-0) 100%);
+    radial-gradient(ellipse 60% 70% at 50% 50%, color-mix(in srgb, var(--accent) 7%, var(--space-1)) 0%, var(--space-1) 55%, var(--space-0) 100%);
 }
 
 .orbit-svg {
@@ -81,7 +81,7 @@
   box-shadow: 0 0 8px var(--st-running);
 }
 .orbit-status.is-waiting {
-  border-color: rgba(255, 213, 79, 0.5);
+  border-color: color-mix(in srgb, var(--st-waiting) 50%, transparent);
 }
 .orbit-status.is-idle .orbit-status-dot {
   background: var(--st-idle);
@@ -150,7 +150,7 @@
 /* ---------- scene: background ---------- */
 
 .sf-dot {
-  fill: #cfd6ff;
+  fill: color-mix(in srgb, var(--accent) 20%, var(--text));
   opacity: 0.45;
 }
 .sf-dot--twinkle {
@@ -165,7 +165,7 @@
   stroke-width: 1;
 }
 .orbit-ring--done {
-  stroke: rgba(127, 220, 174, 0.2);
+  stroke: color-mix(in srgb, var(--st-done) 20%, transparent);
 }
 .orbit-ring--current {
   stroke: var(--orbit-line-hot);
@@ -176,7 +176,7 @@
   stroke-dasharray: 3 6;
 }
 .orbit-ring--waitingUser.orbit-ring--current {
-  stroke: rgba(255, 213, 79, 0.45);
+  stroke: color-mix(in srgb, var(--st-waiting) 45%, transparent);
 }
 
 .trail {
@@ -184,14 +184,14 @@
   stroke-linecap: round;
 }
 .trail--future {
-  stroke: rgba(160, 170, 220, 0.16);
+  stroke: color-mix(in srgb, var(--text) 16%, transparent);
   stroke-width: 1.2;
   stroke-dasharray: 2 6;
 }
 .trail--done {
-  stroke: rgba(255, 186, 120, 0.55);
+  stroke: color-mix(in srgb, var(--st-running) 55%, transparent);
   stroke-width: 2;
-  filter: drop-shadow(0 0 1.5px rgba(255, 160, 90, 0.7));
+  filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--st-running) 70%, transparent));
 }
 
 .shuttle-lane {
@@ -203,24 +203,24 @@
   animation: dash-flow 1.1s linear infinite;
 }
 .shuttle-tag {
-  fill: rgba(30, 22, 58, 0.92);
-  stroke: rgba(169, 139, 255, 0.6);
+  fill: color-mix(in srgb, var(--codex) 18%, var(--panel));
+  stroke: color-mix(in srgb, var(--codex) 60%, transparent);
 }
 .shuttle-text {
-  fill: #d9ceff;
+  fill: color-mix(in srgb, var(--codex) 45%, var(--text));
   font-size: 11px;
   font-weight: 600;
   text-anchor: middle;
 }
 
 .compaction-mark {
-  fill: #9fe7ff;
-  stroke: #e6fbff;
+  fill: var(--hue-teal);
+  stroke: color-mix(in srgb, var(--hue-teal) 45%, var(--text));
   stroke-width: 1;
-  filter: drop-shadow(0 0 4px rgba(120, 220, 255, 0.9));
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--hue-teal) 90%, transparent));
 }
 .compaction-text {
-  fill: #a9e8ff;
+  fill: color-mix(in srgb, var(--hue-teal) 45%, var(--text));
   font-size: 10px;
   text-anchor: middle;
 }
@@ -233,7 +233,7 @@
   animation: breathe 4.5s ease-in-out infinite;
 }
 .star-hot {
-  fill: #ffffff;
+  fill: var(--star-core);
   opacity: 0.85;
 }
 .star-label {
@@ -265,36 +265,36 @@
   transition: fill 0.5s, stroke 0.5s;
 }
 .planet--pending .planet-body {
-  fill: #1a1d2c;
-  stroke: #3b4160;
+  fill: var(--panel-2);
+  stroke: var(--border-strong);
 }
 .planet--done .planet-body {
   fill: var(--st-done);
-  stroke: #c8f5df;
-  filter: drop-shadow(0 0 2px rgba(127, 220, 174, 0.7));
+  stroke: color-mix(in srgb, var(--st-done) 45%, var(--text));
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--st-done) 70%, transparent));
 }
 .planet--running .planet-body {
   fill: var(--st-running);
-  stroke: #ffd2a6;
-  filter: drop-shadow(0 0 3px rgba(255, 158, 69, 0.9));
+  stroke: color-mix(in srgb, var(--st-running) 45%, var(--text));
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--st-running) 90%, transparent));
 }
 .planet--waitingUser .planet-body {
   fill: var(--st-waiting);
-  stroke: #fff2bf;
-  filter: drop-shadow(0 0 3px rgba(255, 213, 79, 0.9));
+  stroke: color-mix(in srgb, var(--st-waiting) 45%, var(--text));
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--st-waiting) 90%, transparent));
 }
 .planet--failed .planet-body {
   fill: var(--st-failed);
-  stroke: #ffc0c7;
+  stroke: color-mix(in srgb, var(--st-failed) 45%, var(--text));
 }
 .planet--skipped .planet-body {
   fill: transparent;
-  stroke: #6b7396;
+  stroke: var(--text-faint);
   stroke-dasharray: 2 2;
 }
 .planet-check {
   fill: none;
-  stroke: #0b2a1c;
+  stroke: var(--on-hue);
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -313,7 +313,7 @@
 .planet-label,
 .planet-sub {
   paint-order: stroke;
-  stroke: rgba(6, 7, 14, 0.85);
+  stroke: var(--halo);
   stroke-width: 3px;
   stroke-linejoin: round;
 }
@@ -331,7 +331,7 @@
   font-size: 10.5px;
 }
 .planet--pending .planet-sub {
-  fill: #4c5370;
+  fill: color-mix(in srgb, var(--text-faint) 70%, var(--space-1));
 }
 .planet--skipped .planet-label {
   fill: var(--text-faint);
@@ -350,7 +350,7 @@
 
 .select-ring {
   fill: none;
-  stroke: #ffffff;
+  stroke: var(--text);
   stroke-width: 1.2;
   stroke-dasharray: 3 3;
   opacity: 0.85;
@@ -362,14 +362,14 @@
 /* ---------- gate ---------- */
 
 .gate-glow {
-  fill: rgba(255, 213, 79, 0.18);
+  fill: color-mix(in srgb, var(--st-waiting) 18%, transparent);
   transform-box: fill-box;
   transform-origin: center;
   animation: breathe 1.6s ease-in-out infinite;
 }
 .gate-ring {
   fill: none;
-  stroke: rgba(255, 213, 79, 0.65);
+  stroke: color-mix(in srgb, var(--st-waiting) 65%, transparent);
   stroke-width: 1.2;
   stroke-dasharray: 4 3;
   transform-box: fill-box;
@@ -378,11 +378,11 @@
 }
 .gate-body {
   fill: var(--st-waiting);
-  stroke: #fff6cc;
+  stroke: color-mix(in srgb, var(--st-waiting) 45%, var(--text));
   stroke-width: 1.2;
 }
 .gate-mark {
-  fill: #2b2100;
+  fill: var(--on-hue);
   font-size: 11px;
   font-weight: 800;
   text-anchor: middle;
@@ -393,7 +393,7 @@
   font-size: 11.5px;
   font-weight: 700;
   paint-order: stroke;
-  stroke: rgba(6, 7, 12, 0.85);
+  stroke: var(--halo);
   stroke-width: 3px;
 }
 
@@ -409,7 +409,7 @@
 }
 .ship-handoff {
   fill: none;
-  stroke: rgba(220, 225, 255, 0.4);
+  stroke: color-mix(in srgb, var(--text) 40%, transparent);
   stroke-width: 1;
   stroke-dasharray: 3 4;
 }
@@ -424,37 +424,37 @@
 }
 .agent-claude .ship-hull {
   fill: var(--claude);
-  stroke: #ffe1cc;
+  stroke: color-mix(in srgb, var(--claude) 45%, var(--text));
 }
 .agent-codex .ship-hull {
   fill: var(--codex);
-  stroke: #ece5ff;
+  stroke: color-mix(in srgb, var(--codex) 45%, var(--text));
 }
 .agent-shell .ship-hull {
   fill: var(--shell);
-  stroke: #d6fff8;
+  stroke: color-mix(in srgb, var(--shell) 45%, var(--text));
 }
 .ship-wings {
-  stroke: rgba(255, 255, 255, 0.35);
+  stroke: color-mix(in srgb, var(--text) 35%, transparent);
   stroke-width: 0.6;
   stroke-linejoin: round;
 }
 .agent-claude .ship-wings {
-  fill: #b9643a;
+  fill: color-mix(in srgb, var(--claude) 70%, #000000);
 }
 .agent-codex .ship-wings {
-  fill: #6f55c8;
+  fill: color-mix(in srgb, var(--codex) 70%, #000000);
 }
 .agent-shell .ship-wings {
-  fill: #1f8f80;
+  fill: color-mix(in srgb, var(--shell) 70%, #000000);
 }
 .ship-engine {
-  fill: #3a3f55;
-  stroke: #8a90a8;
+  fill: var(--panel-3);
+  stroke: var(--text-faint);
   stroke-width: 0.5;
 }
 .ship-cockpit {
-  fill: #e8f4ff;
+  fill: color-mix(in srgb, var(--hue-blue) 12%, #ffffff);
   opacity: 0.92;
 }
 .ship-flame {
@@ -463,11 +463,11 @@
   animation: flicker 0.18s ease-in-out infinite alternate;
 }
 .ship-flame-outer {
-  fill: #ff9d4a;
+  fill: var(--hue-orange);
   opacity: 0.85;
 }
 .ship-flame-core {
-  fill: #fff1b8;
+  fill: var(--star-core);
 }
 .ship--idle .ship-hull,
 .ship--idle .ship-wings {
@@ -481,7 +481,7 @@
   fill: var(--text-dim);
   font-size: 11px;
   paint-order: stroke;
-  stroke: rgba(6, 7, 12, 0.8);
+  stroke: var(--halo);
   stroke-width: 3px;
 }
 
@@ -493,13 +493,13 @@
   animation-direction: reverse;
 }
 .satellite {
-  fill: #e9ecff;
+  fill: var(--text);
   stroke: var(--claude);
   stroke-width: 1;
 }
 .moon-body {
   fill: var(--codex);
-  stroke: #efe9ff;
+  stroke: color-mix(in srgb, var(--codex) 45%, var(--text));
   stroke-width: 1;
 }
 .moon--idle .moon-body {
@@ -518,12 +518,12 @@
 
 .belt-ring {
   fill: none;
-  stroke: rgba(255, 200, 69, 0.05);
+  stroke: color-mix(in srgb, var(--hue-yellow) 5%, transparent);
   stroke-width: 24;
   stroke-linecap: round;
 }
 .asteroid {
-  stroke: rgba(0, 0, 0, 0.45);
+  stroke: color-mix(in srgb, var(--space-0) 60%, transparent);
   stroke-width: 0.8;
   transform-box: fill-box;
   transform-origin: center;
@@ -550,7 +550,7 @@
 }
 .asteroid--accepted,
 .asteroid--deferred {
-  fill: #7a8099;
+  fill: var(--text-faint);
   opacity: 0.75;
   filter: none;
 }
@@ -565,15 +565,15 @@
   stroke-linecap: round;
 }
 .meteor-head {
-  fill: #ffffff;
-  filter: drop-shadow(0 0 2px #9fd0ff);
+  fill: var(--text);
+  filter: drop-shadow(0 0 2px var(--hue-blue));
 }
 .comment-badge rect {
-  fill: rgba(94, 171, 255, 0.18);
-  stroke: rgba(94, 171, 255, 0.7);
+  fill: color-mix(in srgb, var(--hue-blue) 18%, transparent);
+  stroke: color-mix(in srgb, var(--hue-blue) 70%, transparent);
 }
 .comment-badge text {
-  fill: #cfe5ff;
+  fill: color-mix(in srgb, var(--hue-blue) 45%, var(--text));
   font-size: 11px;
   font-weight: 600;
   text-anchor: middle;
@@ -583,7 +583,7 @@
 
 .fuel-track {
   fill: none;
-  stroke: rgba(255, 255, 255, 0.07);
+  stroke: var(--line);
   stroke-width: 5;
   stroke-linecap: round;
 }
@@ -596,11 +596,11 @@
 }
 .fuel-claude .fuel-fill {
   stroke: var(--claude);
-  filter: drop-shadow(0 0 1.5px rgba(243, 146, 87, 0.6));
+  filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--claude) 60%, transparent));
 }
 .fuel-codex .fuel-fill {
   stroke: var(--codex);
-  filter: drop-shadow(0 0 1.5px rgba(169, 139, 255, 0.6));
+  filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--codex) 60%, transparent));
 }
 .fuel-arc.is-low .fuel-fill {
   stroke: var(--st-failed);
@@ -623,22 +623,22 @@
 
 .idle-slot {
   fill: none;
-  stroke: rgba(255, 176, 103, 0.18);
+  stroke: color-mix(in srgb, var(--hue-orange) 18%, transparent);
   stroke-width: 1;
   stroke-dasharray: 2 6;
 }
 .idle-glow {
-  fill: rgba(255, 176, 103, 0.1);
+  fill: color-mix(in srgb, var(--hue-orange) 10%, transparent);
   transform-box: fill-box;
   transform-origin: center;
   animation: breathe 5s ease-in-out infinite;
 }
 .idle-ember {
-  fill: #ffcf9f;
+  fill: color-mix(in srgb, var(--hue-orange) 45%, var(--text));
   opacity: 0.75;
 }
 .idle-pill {
-  fill: rgba(10, 12, 22, 0.55);
+  fill: color-mix(in srgb, var(--space-0) 55%, transparent);
 }
 .idle-hint {
   fill: var(--text-faint);
@@ -661,7 +661,7 @@
 .far-label,
 .far-sub {
   paint-order: stroke;
-  stroke: rgba(7, 8, 13, 0.85);
+  stroke: var(--halo);
   stroke-width: 2.2px;
   stroke-linejoin: round;
 }
@@ -682,7 +682,7 @@
   opacity: 0.7;
 }
 .nebula-seed {
-  fill: #ffffff;
+  fill: var(--text);
   opacity: 0.8;
 }
 .nebula-id {
@@ -721,7 +721,7 @@
 }
 .far--waiting .far-body {
   fill: var(--st-waiting);
-  stroke: #fff3c4;
+  stroke: color-mix(in srgb, var(--st-waiting) 45%, var(--text));
   stroke-width: 0.8;
 }
 .far-label {
@@ -739,7 +739,7 @@
 
 .legend-ico {
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--fill);
   overflow: visible;
 }
 .legend-ico * {
@@ -752,7 +752,7 @@
 }
 .lg-line {
   fill: none;
-  stroke: rgba(200, 210, 255, 0.55);
+  stroke: color-mix(in srgb, var(--text) 55%, transparent);
 }
 .lg-planet {
   fill: var(--st-done);
@@ -766,7 +766,7 @@
   stroke-dasharray: 2.4 2;
 }
 .lg-sat {
-  fill: #e9ecff;
+  fill: var(--text);
 }
 .lg-rock {
   fill: var(--sev-high);
@@ -775,11 +775,11 @@
   fill: var(--st-waiting);
 }
 .lg-compact {
-  fill: #9fe7ff;
+  fill: var(--hue-teal);
 }
 .lg-meteor {
   fill: none;
-  stroke: #cfe5ff;
+  stroke: color-mix(in srgb, var(--hue-blue) 45%, var(--text));
 }
 .lg-fuel {
   fill: none;
@@ -787,7 +787,7 @@
   stroke-width: 2.4;
 }
 .lg-nebula {
-  fill: rgba(140, 123, 255, 0.55);
+  fill: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 .lg-far {
   fill: none;
@@ -882,7 +882,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 5px 0;
-  border-bottom: 1px dashed rgba(255, 255, 255, 0.05);
+  border-bottom: 1px dashed var(--line);
   font-size: 12.5px;
 }
 .dp-key {
@@ -943,7 +943,7 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #2b3047;
+  background: var(--panel-3);
 }
 .dp-step--done .dp-dot {
   background: var(--st-done);
@@ -1001,8 +1001,8 @@
 .dp-gate {
   padding: 12px;
   border-radius: var(--radius);
-  border: 1px solid rgba(255, 213, 79, 0.5);
-  background: rgba(255, 213, 79, 0.07);
+  border: 1px solid color-mix(in srgb, var(--st-waiting) 50%, transparent);
+  background: color-mix(in srgb, var(--st-waiting) 7%, transparent);
 }
 .dp-gate p {
   margin: 0 0 12px;
@@ -1128,7 +1128,7 @@
   pointer-events: none;
 }
 .text-card-bg {
-  fill: rgba(10, 12, 22, 0.96);
+  fill: var(--overlay);
   stroke: var(--border-strong);
   stroke-width: 1;
 }

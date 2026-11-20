@@ -1,10 +1,10 @@
 import type { PriorityView } from "../../ipc/types";
 
-/** Nebula colour when OpenProject gives the priority no colour (or the task has none). */
-export const NEBULA_DEFAULT = "#8c7bff";
+/** Nebula colour when OpenProject gives the priority no colour (or the task has none): the theme accent. */
+export const NEBULA_DEFAULT = "var(--accent)";
 
 export interface NebulaTone {
-  /** the priority's own colour on OpenProject, else the default violet */
+  /** the priority's own colour on OpenProject, else the theme accent */
   color: string;
   /** 0 (lowest priority) … 1 (highest); 0.5 when the order is unknown */
   weight: number;

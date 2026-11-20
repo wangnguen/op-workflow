@@ -81,7 +81,7 @@ export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, on
 
   return (
     <div className={`orbit-view${still ? " is-still" : ""}`}>
-      <div className="orbit-stage space-dark">
+      <div className="orbit-stage">
         <OrbitScene
           snapshot={snapshot}
           selection={selection}

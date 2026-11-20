@@ -203,8 +203,8 @@
   padding-right: 2px;
 }
 .s-column--waiting {
-  border-color: rgba(255, 213, 79, 0.35);
-  background: linear-gradient(180deg, rgba(255, 213, 79, 0.07), var(--column) 160px);
+  border-color: color-mix(in srgb, var(--st-waiting) 35%, transparent);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--st-waiting) 7%, transparent), var(--column) 160px);
 }
 .s-column-head {
   display: flex;
@@ -234,7 +234,7 @@
   background: var(--panel);
 }
 .s-card--waiting {
-  border-color: rgba(255, 213, 79, 0.65);
+  border-color: color-mix(in srgb, var(--st-waiting) 65%, transparent);
 }
 .s-card header {
   display: grid;
@@ -252,7 +252,7 @@
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.02em;
-  color: #160b03;
+  color: var(--on-hue);
 }
 .s-avatar--claude {
   background: var(--claude);
@@ -313,6 +313,3 @@
   gap: 6px;
 }
 
-:root[data-mode="light"] .s-avatar:not(.s-avatar--task) {
-  color: #ffffff;
-}

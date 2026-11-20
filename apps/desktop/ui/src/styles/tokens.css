@@ -1,58 +1,50 @@
-/* Design tokens: dark galaxy theme. Components use only these variables. In light mode the
-   space map (.space-dark) keeps these dark values: it is a night sky in every theme. */
-:root,
-:root[data-mode="light"] .space-dark {
+/* Design tokens. Components use only these variables.
+   A theme sets just its palette: surfaces, accent and eight hues (--hue-*). Every other colour —
+   agents, statuses, severities, the orbit map, the logo — is derived from that palette below, so
+   the whole window follows the theme picked in Cài đặt → Giao diện.
+   The default dark theme (Catppuccin Macchiato) lives here; the others are in themes.css. */
+:root {
   color-scheme: dark;
 
-  --bg: #06070c;
-  --bg-elev: #0b0d15;
-  --panel: #10121b;
-  --panel-2: #151826;
-  --panel-3: #1b1f30;
-  --border: #22263a;
-  --border-strong: #353b58;
-  --text: #e9ebf3;
-  --text-dim: #a0a6bd;
-  --text-faint: #666d88;
+  /* ---------- palette: Catppuccin Macchiato ---------- */
+  --bg: #181926;
+  --bg-elev: #1e2030;
+  --panel: #24273a;
+  --panel-2: #2c2f45;
+  --panel-3: #363a4f;
+  --border: #363a4f;
+  --border-strong: #494d64;
+  --text: #cad3f5;
+  --text-dim: #b8c0e0;
+  --text-faint: #939ab7;
+  --control: #31344a;
+  --accent: #c6a0f6;
+  --accent-ink: #d2b4f8;
+  --accent-soft: rgba(198, 160, 246, 0.16);
+  --on-accent: #24273a;
+  --focus: #b7bdf8;
+  --chrome: rgba(24, 25, 38, 0.95);
+  --column: rgba(36, 39, 58, 0.72);
+  --overlay: rgba(36, 39, 58, 0.97);
+  --glow-a: rgba(198, 160, 246, 0.08);
+  --glow-b: rgba(245, 169, 127, 0.05);
+  --space-0: #12131d;
+  --space-1: #1a1c2b;
 
-  /* agents */
-  --claude: #f39257;
-  --claude-soft: rgba(243, 146, 87, 0.16);
-  --codex: #a98bff;
-  --codex-soft: rgba(169, 139, 255, 0.16);
-  --shell: #34d3bf;
-  --shell-soft: rgba(52, 211, 191, 0.16);
+  --hue-red: #ed8796;
+  --hue-orange: #f5a97f;
+  --hue-yellow: #eed49f;
+  --hue-green: #a6da95;
+  --hue-teal: #8bd5ca;
+  --hue-blue: #8aadf4;
+  --hue-purple: #c6a0f6;
+  --hue-pink: #f5bde6;
 
-  /* session / step status */
-  --st-running: #ff9e45;
-  --st-waiting: #ffd54f;
-  --st-idle: #5c627a;
-  --st-done: #7fdcae;
-  --st-failed: #ff5d6e;
-
-  /* finding severity */
-  --sev-critical: #ff4f61;
-  --sev-high: #ff8b3e;
-  --sev-medium: #ffc845;
-  --sev-low: #5eabff;
-  --sev-muted: #575d74;
-
-  /* space scene */
-  --space-0: #04050a;
-  --space-1: #0a0d1c;
-  --orbit-line: rgba(160, 170, 220, 0.13);
-  --orbit-line-hot: rgba(255, 190, 120, 0.38);
-  --star-core: #fff6dc;
-  --star-mid: #ffc56b;
-  --star-wait: #ffe066;
-
-  /* control kit (layered like macOS controls: fill + hairline ring, no borders) */
-  --accent: #f2994a;
-  --accent-ink: #ffb37a;
-  --accent-soft: rgba(242, 153, 74, 0.16);
-  --on-accent: #1a0f06;
-  --focus: #ffb37a;
-  --control: #1a1d2b;
+  /* ---------- light/dark mechanics (themes.css overrides these for light themes) ---------- */
+  /* text or marks drawn on top of a hue fill (badges, avatars, the planet check) */
+  --on-hue: var(--bg);
+  /* how strong the *-soft tints are */
+  --soft: 16%;
   --fill: rgba(118, 118, 140, 0.16);
   --fill-strong: rgba(118, 118, 140, 0.28);
   --line: rgba(255, 255, 255, 0.07);
@@ -60,17 +52,46 @@
   --scrim: rgba(2, 3, 6, 0.62);
   --shadow-control: 0 0 0 0.5px rgba(255, 255, 255, 0.1), 0 1px 1.5px rgba(0, 0, 0, 0.35);
   --shadow-pop: 0 0 0 0.5px rgba(255, 255, 255, 0.12), 0 18px 48px rgba(0, 0, 0, 0.55);
-  --st-running-soft: rgba(255, 158, 69, 0.14);
-  --st-waiting-soft: rgba(255, 213, 79, 0.14);
-  --st-done-soft: rgba(127, 220, 174, 0.13);
-  --st-failed-soft: rgba(255, 93, 110, 0.14);
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
 
-  /* surfaces that sit over other content (themes override these) */
-  --chrome: rgba(8, 9, 15, 0.92);
-  --column: rgba(13, 15, 24, 0.72);
-  --overlay: rgba(12, 14, 24, 0.95);
-  --glow-a: rgba(80, 60, 160, 0.16);
-  --glow-b: rgba(240, 130, 70, 0.08);
+  /* ---------- derived from the palette: do not set these in a theme ---------- */
+  /* agents */
+  --claude: var(--hue-orange);
+  --codex: var(--hue-purple);
+  --shell: var(--hue-teal);
+  --claude-soft: color-mix(in srgb, var(--claude) var(--soft), transparent);
+  --codex-soft: color-mix(in srgb, var(--codex) var(--soft), transparent);
+  --shell-soft: color-mix(in srgb, var(--shell) var(--soft), transparent);
+
+  /* session / step status */
+  --st-running: var(--hue-orange);
+  --st-waiting: var(--hue-yellow);
+  --st-idle: color-mix(in srgb, var(--text-faint) 70%, var(--bg));
+  --st-done: var(--hue-green);
+  --st-failed: var(--hue-red);
+  --st-running-soft: color-mix(in srgb, var(--st-running) var(--soft), transparent);
+  --st-waiting-soft: color-mix(in srgb, var(--st-waiting) var(--soft), transparent);
+  --st-done-soft: color-mix(in srgb, var(--st-done) var(--soft), transparent);
+  --st-failed-soft: color-mix(in srgb, var(--st-failed) var(--soft), transparent);
+
+  /* finding severity */
+  --sev-critical: var(--hue-red);
+  --sev-high: var(--hue-orange);
+  --sev-medium: var(--hue-yellow);
+  --sev-low: var(--hue-blue);
+  --sev-muted: color-mix(in srgb, var(--text-faint) 70%, var(--bg));
+
+  /* orbit map: a sky in the theme's own colours */
+  --orbit-line: color-mix(in srgb, var(--text) 13%, transparent);
+  --orbit-line-hot: color-mix(in srgb, var(--hue-orange) 40%, transparent);
+  --star-core: color-mix(in srgb, var(--hue-yellow) 22%, #ffffff);
+  --star-mid: color-mix(in srgb, var(--hue-yellow) 55%, var(--hue-orange));
+  --star-edge: var(--hue-orange);
+  --star-wait-core: color-mix(in srgb, var(--hue-yellow) 15%, #ffffff);
+  --star-wait: var(--hue-yellow);
+  --star-wait-edge: color-mix(in srgb, var(--hue-yellow) 70%, var(--hue-orange));
+  /* map labels get a halo in the sky colour so they read over rings and clouds */
+  --halo: color-mix(in srgb, var(--space-1) 85%, transparent);
 
   /* dialogs: the same gap above and below, so a tall one uses the window evenly */
   --sheet-gap: max(16px, 3vh);
@@ -86,12 +107,7 @@
   --radius: 10px;
   --radius-sm: 6px;
   --radius-xs: 4px;
-  --shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
   /* Bundled (OFL-1.1), with Vietnamese subsets; system fonts are only a fallback. */
   --font: "Inter Variable", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
   --mono: "JetBrains Mono Variable", "Cascadia Code", Consolas, monospace;
-}
-
-.space-dark {
-  color: var(--text);
 }

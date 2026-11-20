@@ -1,4 +1,4 @@
-// Colour themes: `:root[data-theme=<id>]` in styles/themes.css ("galaxy" is tokens.css itself)
+// Colour themes: `:root[data-theme=<id>]` in styles/themes.css (the default dark theme is tokens.css itself)
 // plus `data-mode` (light/dark). Each mode remembers its own theme; "system" follows Windows.
 
 export type Mode = "light" | "dark";
@@ -14,7 +14,7 @@ export interface ThemeMeta {
 }
 
 export const THEMES: readonly ThemeMeta[] = [
-  { id: "galaxy", name: "Ngân hà", mode: "dark", description: "Mặc định: nền xanh đen, điểm nhấn cam", swatch: ["#06070c", "#10121b", "#f2994a", "#e9ebf3"] },
+  { id: "catppuccin-macchiato", name: "Catppuccin Macchiato", mode: "dark", description: "Mặc định: pastel dịu trên nền xanh than", swatch: ["#181926", "#24273a", "#c6a0f6", "#cad3f5"] },
   { id: "graphite", name: "Than chì", mode: "dark", description: "Xám trung tính, điểm nhấn cam đất", swatch: ["#131315", "#1b1b1f", "#e8835d", "#ececf1"] },
   { id: "dracula", name: "Dracula", mode: "dark", description: "Tím than, tím nhạt và hồng", swatch: ["#1e1f29", "#282a36", "#bd93f9", "#f8f8f2"] },
   { id: "tokyo-night", name: "Tokyo Night", mode: "dark", description: "Xanh đêm, chữ xanh lam nhạt", swatch: ["#16161e", "#1f2335", "#7aa2f7", "#c0caf5"] },
@@ -35,7 +35,7 @@ export const THEMES: readonly ThemeMeta[] = [
 ];
 
 const byId = new Map(THEMES.map((t) => [t.id, t]));
-export const DEFAULT_THEME: Record<Mode, string> = { dark: "galaxy", light: "paper" };
+export const DEFAULT_THEME: Record<Mode, string> = { dark: "catppuccin-macchiato", light: "paper" };
 
 export interface ThemePrefs {
   mode: ModeSetting;

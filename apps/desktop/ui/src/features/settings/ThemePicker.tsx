@@ -6,22 +6,12 @@ import { SegmentedControl } from "../../shared/ui/SegmentedControl";
 import { useTheme } from "../../shared/useTheme";
 
 const t = vi.settings;
-const STARS: [number, number][] = [
-  [8, 14],
-  [26, 70],
-  [44, 22],
-  [62, 78],
-  [80, 12],
-  [92, 58],
-];
 
 /** A tiny window in the theme's colours: top bar, side column, two cards, accent button. */
 function Preview({ theme }: { theme: ThemeMeta }) {
   const [bg, panel, accent, text] = theme.swatch;
   return (
     <span className="tp-preview" style={{ background: bg }} aria-hidden="true">
-      {theme.id === "galaxy" &&
-        STARS.map(([x, y]) => <i key={`${x}-${y}`} className="tp-star" style={{ left: `${x}%`, top: `${y}%` }} />)}
       <span className="tp-bar" style={{ background: panel }}>
         <i style={{ background: accent }} />
       </span>
