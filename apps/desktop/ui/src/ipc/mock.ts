@@ -344,7 +344,7 @@ export function mockReconnect(provider?: Provider): null {
 }
 
 export function mockAppInfo(): AppInfo {
-  return { version: "0.4.0-demo", core: "mock" };
+  return { version: "0.4.1-demo", core: "mock" };
 }
 
 export function mockQuota(frameIndex: number, now: number): QuotaSnapshot[] {
@@ -1056,7 +1056,7 @@ export function mockStartTask(req: StartRequest): StartResult {
 
 export function mockUpdate(): UpdateView {
   return {
-    current: "0.4.0",
+    current: "0.4.1",
     enabled: true,
     latest: "0.5.0",
     available: true,

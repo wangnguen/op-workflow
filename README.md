@@ -49,7 +49,7 @@ pnpm build      # bản cài NSIS trong target/release/bundle/nsis/
 
 ## Bắt đầu dùng
 
-1. Bấm biểu tượng bánh răng → **Cài đặt**: nhập URL OpenProject, dán access token (My account → Access tokens) → **Kiểm tra & lưu**. Chưa có token thì bảng hiện dữ liệu demo.
+1. Bấm biểu tượng bánh răng → **Cài đặt**: nhập URL OpenProject, dán access token (My account → Access tokens) → **Kiểm tra & lưu**. Chưa có token thì tab Task chưa có task; Workspace và Phiên vẫn dùng bình thường.
 2. Kéo một task từ *Inbox* sang *Đang làm*, chọn repo, base và tên branch → **Bắt đầu**. Working tree của repo phải sạch.
 3. **Mở task**, bấm chạy từng bước, xem kết quả ở các tab và quyết ở mỗi cổng (duyệt plan, chọn lỗi cần sửa…).
 4. Push summary xong: tự review diff, commit, push, rồi bấm *Đã push xong*.
