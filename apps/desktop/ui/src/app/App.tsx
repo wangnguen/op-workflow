@@ -8,8 +8,10 @@ import {
   getWorkspace,
   isMockMode,
   markAlertsRead,
+  notifySessionWait,
   onAlertClicked,
   onCloseAsked,
+  onSessionClicked,
   openReleasePage,
 } from "../ipc/client";
 import { OPEN_QUOTA_EVENT } from "../features/quota/quota";
@@ -81,6 +83,38 @@ export function App() {
     [refreshAll],
   );
   useEffect(() => onCloseAsked(setClosing), []);
+
+  // a session that starts waiting (permission, question, plan) while you look at another tab,
+  // another chat or another window: a Windows notification; a click opens that session
+  const waiting = useRef<Set<string>>(undefined);
+  const looking = useRef({ tab, wsPicked });
+  looking.current = { tab, wsPicked };
+  useEffect(() => {
+    const sessions = workspace.data?.sessions;
+    if (!sessions) return;
+    const now = new Set(sessions.filter((s) => s.state === "waiting").map((s) => s.id));
+    const before = waiting.current;
+    waiting.current = now;
+    // the first read only learns what already waits
+    if (!before) return;
+    const { tab: shownTab, wsPicked: picked } = looking.current;
+    const front = !document.hidden && document.hasFocus();
+    for (const s of sessions) {
+      if (!now.has(s.id) || before.has(s.id)) continue;
+      const shown = front && shownTab === "workspace" &&
+        ((picked?.kind === "session" && picked.id === s.id) || (picked?.kind === "task" && picked.wpId === s.wpId));
+      if (!shown) void notifySessionWait(s.id).catch(() => undefined);
+    }
+  }, [workspace.data]);
+  useEffect(
+    () =>
+      onSessionClicked((id) => {
+        setOpened(undefined);
+        setTab("workspace");
+        setWsPicked({ kind: "session", id });
+      }),
+    [],
+  );
 
   return (
     <div className="app">

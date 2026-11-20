@@ -4,6 +4,7 @@ import type { OrbitSnapshot } from "../../ipc/types";
 import { useDismiss } from "../../shared/hooks";
 import { STEP_COUNT } from "../../shared/steps";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
+import { SidePanel } from "../../shared/ui/SidePanel";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
 import { DetailPanel } from "./DetailPanel";
 import { Legend } from "./Legend";
@@ -165,7 +166,13 @@ ${vi.orbit.systemPick}`,
           </button>
         </div>
       </div>
-      <DetailPanel snapshot={snapshot} selection={selection} onSelect={setPicked} now={now} onStartTask={onStartTask} onOpenTask={onOpenTask} onOpenLink={onOpenLink} />
+      <SidePanel side="right" storageKey="opw.orbit.detail" min={240} max={640} initial={300}
+        name={vi.side.detail} className="orbit-side">
+        {(hide) => (
+          <DetailPanel snapshot={snapshot} selection={selection} onSelect={setPicked} now={now}
+            onStartTask={onStartTask} onOpenTask={onOpenTask} onOpenLink={onOpenLink} onHide={hide} />
+        )}
+      </SidePanel>
     </div>
   );
 }

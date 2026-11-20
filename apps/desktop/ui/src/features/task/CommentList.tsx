@@ -38,6 +38,8 @@ interface ItemProps {
   who: string;
   where: LinkWhere;
   onOpen: (url: string) => void;
+  /** "Hỏi Claude": the comment goes into the chat box (Workspace only) */
+  onAsk?: (c: CommentView, who: string, text: string) => void;
 }
 
 export function CommentItem(p: ItemProps) {
@@ -57,9 +59,21 @@ export function CommentItem(p: ItemProps) {
           </span>
         )}
         <OpenLink {...p} />
+        <AskLink {...p} text={text} />
       </div>
       <p className="comment-text">{text}</p>
     </li>
+  );
+}
+
+/** "Hỏi Claude" next to the link: puts the comment into the Workspace chat box. */
+function AskLink({ c, who, onAsk, text }: ItemProps & { text: string }) {
+  if (!onAsk) return null;
+  return (
+    <button type="button" className="link-btn comment-ask" title={t.askHint} onClick={() => onAsk(c, who, text)}>
+      <Icon name="chat" size={11} />
+      {t.ask}
+    </button>
   );
 }
 
@@ -103,9 +117,10 @@ function OwnComment(p: ItemProps & { text: string }) {
       <div className="comment-fold-body" inert={!open}>
         <div>
           <p className="comment-text">{text}</p>
-          {c.url && (
+          {(c.url || p.onAsk) && (
             <div className="comment-own-foot">
               <OpenLink {...p} />
+              <AskLink {...p} text={text} />
             </div>
           )}
         </div>

@@ -2,8 +2,10 @@
 //! ask. Names and payloads must match `apps/desktop/ui/src/ipc/types.ts` (`Commands`). Changes of
 //! a running session reach the window as the `opw://session` event (`SessionPatch`).
 
-use opw_domain::session::{AskAnswer, NewSession, SessionChat, SessionView, WorkspaceSnapshot};
-use opw_domain::view::ApiError;
+use opw_domain::session::{
+    AskAnswer, ImageIn, NewSession, RepoScript, SessionChat, SessionView, SlashCommand, WorkspaceSnapshot,
+};
+use opw_domain::view::{ApiError, DiffView};
 use opw_domain::workflow::StepKind;
 use opw_orchestrator::AppService;
 use tauri::{AppHandle, Emitter, State};
@@ -63,9 +65,99 @@ pub fn session_send(
     id: String,
     text: String,
     force: Option<bool>,
+    images: Option<Vec<ImageIn>>,
     service: State<'_, AppService>,
 ) -> Result<SessionView, ApiError> {
-    service.session_send(&id, &text, force.unwrap_or(false))
+    service.session_send(&id, &text, force.unwrap_or(false), &images.unwrap_or_default())
+}
+
+/// What the session changed (Workspace → Thay đổi).
+#[tauri::command(async)]
+pub fn session_diff(id: String, service: State<'_, AppService>) -> Result<DiffView, ApiError> {
+    service.session_diff(&id)
+}
+
+/// Open a file of the session's repo in VS Code.
+#[tauri::command(async)]
+pub fn session_open_file(
+    id: String,
+    path: String,
+    line: Option<u32>,
+    service: State<'_, AppService>,
+) -> Result<(), ApiError> {
+    service.session_open_file(&id, &path, line)
+}
+
+/// Open a file of the task's repo in VS Code (task window → Diff).
+#[tauri::command(async)]
+pub fn task_open_file(
+    wp_id: u64,
+    path: String,
+    line: Option<u32>,
+    service: State<'_, AppService>,
+) -> Result<(), ApiError> {
+    service.task_open_file(wp_id, &path, line)
+}
+
+/// A changed file next to its version at `rev` in VS Code's diff view (Workspace → Thay đổi).
+#[tauri::command(async)]
+pub fn session_compare_file(
+    id: String,
+    rev: String,
+    path: String,
+    old_path: Option<String>,
+    service: State<'_, AppService>,
+) -> Result<(), ApiError> {
+    service.session_compare_file(&id, &rev, &path, old_path.as_deref())
+}
+
+/// The same for the task window's Diff tab.
+#[tauri::command(async)]
+pub fn task_compare_file(
+    wp_id: u64,
+    rev: String,
+    path: String,
+    old_path: Option<String>,
+    service: State<'_, AppService>,
+) -> Result<(), ApiError> {
+    service.task_compare_file(wp_id, &rev, &path, old_path.as_deref())
+}
+
+/// The session's repo folder in VS Code, the session staying in the app.
+#[tauri::command(async)]
+pub fn session_open_repo(id: String, service: State<'_, AppService>) -> Result<(), ApiError> {
+    service.session_open_repo(&id)
+}
+
+/// Repo files for `@` in the chat.
+#[tauri::command(async)]
+pub fn session_files(
+    id: String,
+    query: String,
+    service: State<'_, AppService>,
+) -> Result<Vec<String>, ApiError> {
+    service.session_files(&id, &query)
+}
+
+/// Commands for `/` in the chat.
+#[tauri::command(async)]
+pub fn session_commands(id: String, service: State<'_, AppService>) -> Result<Vec<SlashCommand>, ApiError> {
+    service.session_commands(&id)
+}
+
+/// The repo's package.json scripts (Shell tab).
+#[tauri::command(async)]
+pub fn session_scripts(id: String, service: State<'_, AppService>) -> Result<Vec<RepoScript>, ApiError> {
+    service.session_scripts(&id)
+}
+
+/// A session started waiting while the user looks elsewhere: a Windows notification, when
+/// those are on. A click opens the session.
+#[tauri::command(async)]
+pub fn session_notify_wait(id: String, app: AppHandle, service: State<'_, AppService>) {
+    if let Some((title, body)) = service.session_wait_note(&id) {
+        crate::toast::show_session(&app, &title, &body, &id);
+    }
 }
 
 #[tauri::command(async)]

@@ -1,10 +1,11 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { severityLabel, vi } from "../../i18n/vi";
-import { errorMessage, getTaskDiff } from "../../ipc/client";
+import { compareTaskFile, errorMessage, getTaskDiff, openTaskFile } from "../../ipc/client";
 import type { DiffFile, DiffLine, DiffView, FindingView, TaskDetail } from "../../ipc/types";
 import { Icon } from "../../shared/ui/Icon";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
 import { COLLAPSE_OVER, fileLines, findingsByLine, outsideFindings, splitRows } from "./diff";
+import "./task.css";
 
 const t = vi.flow.diff;
 type Mode = "unified" | "split";
@@ -21,6 +22,35 @@ function savedMode(): Mode {
 /** The task's change since it left its base: file list on the left, the diff on the right,
  *  review findings right under their line. */
 export function DiffTab({ detail: d }: { detail: TaskDetail }) {
+  const load = useCallback(() => getTaskDiff(d.wpId, true), [d.wpId]);
+  const open = useCallback((path: string, line?: number) => openTaskFile(d.wpId, path, line), [d.wpId]);
+  const compare = useCallback(
+    (rev: string, path: string, oldPath?: string) => compareTaskFile(d.wpId, rev, path, oldPath),
+    [d.wpId],
+  );
+  return <DiffPanel key={d.wpId} load={load} findings={d.findings} onOpenFile={open} onCompare={compare} />;
+}
+
+/** First line of the change in the working tree (where VS Code opens the file). */
+function firstChangedLine(f: DiffFile): number | undefined {
+  for (const h of f.hunks) {
+    const line = h.lines.find((l) => l.kind !== "context" && l.new !== undefined) ?? h.lines.find((l) => l.new !== undefined);
+    if (line?.new !== undefined) return line.new;
+  }
+  return undefined;
+}
+
+/** A change read by `load`: the Diff tab of a task, the Thay đổi tab of a Workspace session.
+ *  `onOpenFile` adds "Mở trong VS Code" to every file, `onCompare` "So sánh trong VS Code" (the
+ *  file next to its version at the fork point, in VS Code's diff view). */
+export function DiffPanel({
+  load: read, findings, onOpenFile, onCompare,
+}: {
+  load: () => Promise<DiffView>;
+  findings: FindingView[];
+  onOpenFile?: (path: string, line?: number) => Promise<unknown>;
+  onCompare?: (rev: string, path: string, oldPath?: string) => Promise<unknown>;
+}) {
   const [view, setView] = useState<DiffView>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
@@ -46,11 +76,11 @@ export function DiffTab({ detail: d }: { detail: TaskDetail }) {
   const load = useCallback(() => {
     setLoading(true);
     setError(undefined);
-    getTaskDiff(d.wpId, true)
+    read()
       .then((v) => setView(remember(v)))
       .catch((e: unknown) => setError(errorMessage(e)))
       .finally(() => setLoading(false));
-  }, [d.wpId]);
+  }, [read]);
   useEffect(load, [load]);
 
   const pickMode = (m: Mode) => {
@@ -62,7 +92,7 @@ export function DiffTab({ detail: d }: { detail: TaskDetail }) {
     }
   };
 
-  const outside = useMemo(() => (view ? outsideFindings(d.findings, view) : []), [view, d.findings]);
+  const outside = useMemo(() => (view ? outsideFindings(findings, view) : []), [view, findings]);
   const isOpen = (f: DiffFile) => open[f.path] ?? fileLines(f) <= COLLAPSE_OVER;
   const jump = (path: string) => {
     setOpen((o) => ({ ...o, [path]: true }));
@@ -157,9 +187,31 @@ export function DiffTab({ detail: d }: { detail: TaskDetail }) {
                   <span className="diff-stat mono">
                     <span className="diff-plus">+{f.added}</span> <span className="diff-minus">−{f.removed}</span>
                   </span>
+                  {onOpenFile && f.change !== "deleted" && (
+                    <button
+                      className="btn btn--ghost btn--sm"
+                      title={t.openFileHint}
+                      onClick={() => void onOpenFile(f.path, firstChangedLine(f)).catch((e: unknown) => setError(errorMessage(e)))}
+                    >
+                      <Icon name="external" size={12} />
+                      {t.openFile}
+                    </button>
+                  )}
+                  {onCompare && view && f.change !== "deleted" && !f.binary && (
+                    <button
+                      className="btn btn--ghost btn--sm"
+                      title={t.compareFileHint(view.base)}
+                      onClick={() =>
+                        void onCompare(view.forkPoint, f.path, f.oldPath).catch((e: unknown) => setError(errorMessage(e)))
+                      }
+                    >
+                      <Icon name="layers" size={12} />
+                      {t.compareFile}
+                    </button>
+                  )}
                 </header>
                 {f.oldPath && <p className="faint diff-renamed">{t.renamed(f.oldPath)}</p>}
-                {isOpen(f) && <FileBody file={f} mode={mode} findings={d.findings} />}
+                {isOpen(f) && <FileBody file={f} mode={mode} findings={findings} />}
               </section>
             ))}
           </div>

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { vi } from "../../i18n/vi";
+import { SidePanel } from "../../shared/ui/SidePanel";
 import type { WorkspaceSnapshot } from "../../ipc/types";
 import { ChatPane } from "./ChatPane";
 import type { Selection } from "./chatState";
@@ -33,7 +34,12 @@ export function WorkspaceView({ snapshot, selected, onSelect, onChanged, onOpenT
 
   return (
     <div className="ws">
-      <SessionTree snapshot={data} selected={selected} onSelect={onSelect} onNew={() => setCreating(true)} />
+      <SidePanel side="left" storageKey="opw.workspace.side" min={200} max={560} initial={280}
+        name={vi.side.workspace} className="ws-side">
+        {(hide) => (
+          <SessionTree snapshot={data} selected={selected} onSelect={onSelect} onNew={() => setCreating(true)} onHide={hide} />
+        )}
+      </SidePanel>
       <section className="ws-main">
         {sessionId || task ? (
           <ChatPane

@@ -872,9 +872,14 @@
 .comment-own-foot {
   display: flex;
   justify-content: flex-end;
+  gap: 12px;
   padding-bottom: 4px;
 }
 .comment-meta .comment-open {
+  margin-left: auto;
+}
+/* "Hỏi Claude" follows the link at the right end; with no link it takes the right end itself */
+.comment-meta > .comment-ask:not(.comment-open + .comment-ask) {
   margin-left: auto;
 }
 .comment-meta {

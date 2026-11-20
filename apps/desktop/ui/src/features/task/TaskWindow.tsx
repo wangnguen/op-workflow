@@ -32,6 +32,7 @@ import { CommentsTab } from "./CommentsTab";
 import { ContinueDialog } from "./ContinueDialog";
 import { CopyPush } from "./CopyPush";
 import { DiffTab } from "./DiffTab";
+import { StartOver } from "./StartOver";
 import { FinishDialog } from "./FinishDialog";
 import { BudgetChoices, PlanChangedChoices } from "./GateChoices";
 import { TalkPanel } from "./TalkPanel";
@@ -205,6 +206,9 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
               {formatUsd(d.costUsd)}
             </span>
           )}
+          {d && d.status !== "running" && (
+            <StartOver wpId={wpId} onDone={() => { polled.refresh(); onChanged(); }} />
+          )}
           {!isMockMode() && (
             <button
               className="btn btn--ghost btn--icon"
@@ -283,7 +287,7 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
                   onAction={act}
                 />
               )}
-              {tab === "comments" && <CommentsTab detail={d} onChanged={countsChanged} />}
+              {tab === "comments" && <CommentsTab wpId={d.wpId} running={d.status === "running"} onChanged={countsChanged} />}
               {tab === "findings" && (
                 <FindingsTab detail={d} busy={busy} onDecide={decide} onPickSevere={pickSevere} onAction={act} />
               )}

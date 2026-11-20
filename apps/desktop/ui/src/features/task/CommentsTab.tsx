@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { vi } from "../../i18n/vi";
 import { errorMessage, fetchIssues, getTaskComments, openTaskLink, refreshBriefComments } from "../../ipc/client";
-import type { CommentsView, TaskDetail } from "../../ipc/types";
+import type { CommentView, CommentsView } from "../../ipc/types";
 import { formatRelative } from "../../shared/format";
 import { useNow } from "../../shared/hooks";
 import { Icon } from "../../shared/ui/Icon";
@@ -11,15 +11,19 @@ import { commentCounts, knownEmpty, readProblem } from "./comments";
 const t = vi.flow.comments;
 
 interface Props {
-  detail: TaskDetail;
+  wpId: number;
+  /** a step of the task runs now (the brief is not rewritten meanwhile) */
+  running: boolean;
   /** counts on the card and the tab changed (comments seen, brief rewritten) */
   onChanged: () => void;
+  /** Workspace: each comment gets "Hỏi Claude", which puts it into the chat box */
+  onAsk?: (c: CommentView, who: string, text: string) => void;
 }
 
 /** OpenProject comments (read when the tab opens) and the GitHub issues of the last read. Other
  *  people's new comments are marked "cần xem" while the tab is open (opening it counts them as
  *  seen); the user's own comments are folded to one line and never count as new. */
-export function CommentsTab({ detail: d, onChanged }: Props) {
+export function CommentsTab({ wpId, running, onChanged, onAsk }: Props) {
   const [view, setView] = useState<CommentsView>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<"brief" | "issue">();
@@ -35,21 +39,21 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
   const load = useCallback(() => {
     setLoading(true);
     setError(undefined);
-    getTaskComments(d.wpId, true)
+    getTaskComments(wpId, true)
       .then((v) => {
         setView(remember(v));
         changedRef.current();
       })
       .catch((e: unknown) => setError(errorMessage(e)))
       .finally(() => setLoading(false));
-  }, [d.wpId, remember]);
+  }, [wpId, remember]);
 
   useEffect(load, [load]);
 
   const updateBrief = () => {
     setBusy("brief");
     setError(undefined);
-    refreshBriefComments(d.wpId)
+    refreshBriefComments(wpId)
       .then((v) => {
         setView(remember(v));
         setNote(t.briefUpdated);
@@ -63,8 +67,8 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
     setBusy("issue");
     setError(undefined);
     setNote(undefined);
-    fetchIssues(d.wpId)
-      .then((r) => getTaskComments(d.wpId, false).then((v) => [r, v] as const))
+    fetchIssues(wpId)
+      .then((r) => getTaskComments(wpId, false).then((v) => [r, v] as const))
       .then(([r, v]) => {
         setView(remember(v));
         setNote([t.issueNewFound(r.newComments ?? 0), ...r.warnings].join(" · "));
@@ -76,9 +80,8 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
 
   const { fresh, mine } = commentCounts(view?.comments ?? []);
   const problem = readProblem(view, now);
-  const running = d.status === "running";
   const open = (url: string) => {
-    openTaskLink(d.wpId, url).catch((e: unknown) => setError(errorMessage(e)));
+    openTaskLink(wpId, url).catch((e: unknown) => setError(errorMessage(e)));
   };
 
   return (
@@ -97,7 +100,7 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
               title={`${t.openTaskHint}\n${view.taskUrl}`}
               onClick={() => open(view.taskUrl as string)}
             >
-              {t.openProject} #{d.wpId}
+              {t.openProject} #{wpId}
               <Icon name="external" size={11} />
             </button>
           )}
@@ -138,6 +141,7 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
                 who={c.mine ? t.you : (c.author ?? t.anonymous)}
                 where="openProject"
                 onOpen={open}
+                onAsk={onAsk}
               />
           ))}
         </ul>
@@ -171,7 +175,7 @@ export function CommentsTab({ detail: d, onChanged }: Props) {
             {issue.comments.length === 0 && <p className="dim">{t.issueNoComments}</p>}
             <ul className="comment-list">
               {issue.comments.map((c) => (
-                <CommentItem key={c.id} c={c} now={now} who={c.mine ? t.you : "GitHub"} where="github" onOpen={open} />
+                <CommentItem key={c.id} c={c} now={now} who={c.mine ? t.you : "GitHub"} where="github" onOpen={open} onAsk={onAsk} />
               ))}
             </ul>
             {issue.unread > 0 && <p className="faint">{t.issueUnread(issue.unread)}</p>}

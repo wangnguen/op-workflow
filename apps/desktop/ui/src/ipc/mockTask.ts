@@ -298,7 +298,7 @@ export function mockRestoreAlerts(ids: number[]): AlertView[] {
 
 // ---------- notification switches ----------
 
-let notify: NotifySettings = { comments: true, steps: true, quota: true };
+let notify: NotifySettings = { comments: true, steps: true, quota: true, sessions: true };
 export const mockNotify = (): NotifySettings => notify;
 export function mockSetNotify(kind: NotifyKind, on: boolean): NotifySettings {
   notify = { ...notify, [kind]: on };

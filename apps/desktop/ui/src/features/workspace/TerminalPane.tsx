@@ -72,18 +72,23 @@ function terminalTheme(el: HTMLElement) {
  *  (PLAN.md §12 B2). The process lives in the app; this view attaches to it, gets what it
  *  missed replayed, and lets go when unmounted (the process keeps running). */
 export function TerminalPane({
-  id, kind, live, onClose,
+  id, kind, live, command, onClose,
 }: {
   id: string;
   kind: TerminalKind;
   /** the app runs this console's process now */
   live: boolean;
+  /** a line to type into the console (a script picked above it); a new `nonce` types it again */
+  command?: { text: string; nonce: number };
   onClose: () => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const instance = useRef<Terminal | null>(null);
   const addon = useRef<SearchAddon | null>(null);
   const close = useRef<() => Promise<void>>(async () => undefined);
+  const type = useRef<(data: string) => void>(() => undefined);
+  // the nonce of the script line typed last (a view that let go types it again when it comes back)
+  const typed = useRef<number>(undefined);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string>();
   const [closing, setClosing] = useState(false);
@@ -133,10 +138,13 @@ export function TerminalPane({
     const send = (action: TerminalAction) => controlTerminal(id, kind, view, action);
     // xterm parses older output but does not answer queries from before it attached.
     let input = Promise.resolve();
-    term.onData((data) => {
-      if (replaying) return;
+    const write = (data: string) => {
       input = input.then(() => connected).then(() => send({ kind: "write", data }))
         .catch((e) => { if (alive) setError(errorMessage(e)); });
+    };
+    type.current = write;
+    term.onData((data) => {
+      if (!replaying) write(data);
     });
     const connected = (connections.get(key) ?? Promise.resolve()).then(async () => {
       if (!alive) return;
@@ -170,10 +178,23 @@ export function TerminalPane({
       alive = false;
       observer.disconnect();
       instance.current = addon.current = null;
+      typed.current = undefined;
       term.dispose();
       void connected.then(() => send({ kind: "detach" })).catch(() => undefined);
     };
   }, [id, kind]);
+
+  // a script picked above the shell: typed once, after the console is attached, then Enter.
+  // Whatever was half typed on the line goes first (Esc in PowerShell, Ctrl+E Ctrl+U in bash),
+  // so it does not run along. Enter is a carriage return, as the keyboard sends it: a line feed
+  // is "one more line" to PowerShell (it shows >> and waits), so the command would not run.
+  useEffect(() => {
+    if (!command || typed.current === command.nonce) return;
+    typed.current = command.nonce;
+    const clearLine = kind === "gitBash" ? "\x05\x15" : kind === "powerShell" ? "\x1b" : "";
+    type.current(`${clearLine}${command.text}\r`);
+    instance.current?.focus();
+  }, [command, kind]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {

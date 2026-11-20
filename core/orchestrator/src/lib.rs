@@ -32,6 +32,7 @@ mod task_repo;
 pub mod terminals;
 pub mod tray;
 pub mod updater;
+pub(crate) mod workspace_tools;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -2281,8 +2282,113 @@ impl AppService {
         flow.complete_workspace_step(&ctx, step)
     }
 
-    pub fn session_send(&self, id: &str, text: &str, force: bool) -> Result<SessionView, ApiError> {
-        self.sessions()?.send(id, text, force)
+    pub fn session_send(
+        &self,
+        id: &str,
+        text: &str,
+        force: bool,
+        images: &[opw_domain::session::ImageIn],
+    ) -> Result<SessionView, ApiError> {
+        self.sessions()?.send(id, text, force, images)
+    }
+
+    /// What the session changed: a task's change since its base (like the Diff tab, without
+    /// marking it seen), or a free session's uncommitted change.
+    pub fn session_diff(&self, id: &str) -> Result<DiffView, ApiError> {
+        let (repo, wp_id) = self.sessions()?.place(id)?;
+        if let Some(wp_id) = wp_id {
+            if let Ok((ctx, _)) = self.task_ctx(wp_id) {
+                return diffview::task_diff(
+                    self.store.as_deref(),
+                    &ctx.row,
+                    false,
+                    &opw_quota::now_rfc3339(),
+                );
+            }
+        }
+        let diff = opw_vcs::Git::new(&repo)
+            .task_diff("HEAD", None)
+            .map_err(|e| ApiError::new("diff.git", e.to_string()))?;
+        Ok(diffview::view(
+            diff,
+            "HEAD",
+            Some("Phiên riêng: thay đổi chưa commit so với commit hiện tại (HEAD).".into()),
+            None,
+        ))
+    }
+
+    /// Open one file of the session's repo in VS Code (the repo's window), at `line`.
+    pub fn session_open_file(&self, id: &str, path: &str, line: Option<u32>) -> Result<(), ApiError> {
+        let (repo, _) = self.sessions()?.place(id)?;
+        sessions::open_file_in_vscode(&repo, path, line)
+    }
+
+    /// The same for the task window's Diff tab.
+    pub fn task_open_file(&self, wp_id: u64, path: &str, line: Option<u32>) -> Result<(), ApiError> {
+        let (ctx, _) = self.task_ctx(wp_id)?;
+        let repo = ctx
+            .row
+            .repo
+            .as_deref()
+            .map(opw_config::expand_home)
+            .ok_or_else(|| ApiError::new("task.repo", "Task chưa có repo"))?;
+        sessions::open_file_in_vscode(&repo, path, line)
+    }
+
+    /// A changed file of the session's repo next to its version at `rev` in VS Code's diff view.
+    pub fn session_compare_file(
+        &self,
+        id: &str,
+        rev: &str,
+        path: &str,
+        old_path: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let (repo, _) = self.sessions()?.place(id)?;
+        sessions::compare_in_vscode(&repo, rev, path, old_path)
+    }
+
+    /// The same for the task window's Diff tab.
+    pub fn task_compare_file(
+        &self,
+        wp_id: u64,
+        rev: &str,
+        path: &str,
+        old_path: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let (ctx, _) = self.task_ctx(wp_id)?;
+        let repo = ctx
+            .row
+            .repo
+            .as_deref()
+            .map(opw_config::expand_home)
+            .ok_or_else(|| ApiError::new("task.repo", "Task chưa có repo"))?;
+        sessions::compare_in_vscode(&repo, rev, path, old_path)
+    }
+
+    /// The session's repo folder in VS Code; the session stays in the app.
+    pub fn session_open_repo(&self, id: &str) -> Result<(), ApiError> {
+        let (repo, _) = self.sessions()?.place(id)?;
+        sessions::open_repo_in_vscode(&repo)
+    }
+
+    pub fn session_files(&self, id: &str, query: &str) -> Result<Vec<String>, ApiError> {
+        self.sessions()?.files(id, query)
+    }
+
+    pub fn session_commands(&self, id: &str) -> Result<Vec<opw_domain::session::SlashCommand>, ApiError> {
+        self.sessions()?.commands(id)
+    }
+
+    pub fn session_scripts(&self, id: &str) -> Result<Vec<opw_domain::session::RepoScript>, ApiError> {
+        self.sessions()?.scripts(id)
+    }
+
+    /// A notification for a session that waits, when the user turned those on.
+    pub fn session_wait_note(&self, id: &str) -> Option<(String, String)> {
+        if !self.config().notify.sessions {
+            return None;
+        }
+        self.sessions().ok()?.wait_note(id)
     }
 
     pub fn session_answer(

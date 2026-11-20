@@ -163,6 +163,16 @@ fn main() {
             session_api::session_hide,
             session_api::terminal_open,
             session_api::terminal_control,
+            session_api::session_diff,
+            session_api::session_open_file,
+            session_api::task_open_file,
+            session_api::session_compare_file,
+            session_api::task_compare_file,
+            session_api::session_open_repo,
+            session_api::session_files,
+            session_api::session_commands,
+            session_api::session_scripts,
+            session_api::session_notify_wait,
         ])
         .build(tauri::generate_context!())
         .expect("error while building op-workflow")

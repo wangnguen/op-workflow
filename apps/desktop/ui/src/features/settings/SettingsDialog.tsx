@@ -72,6 +72,7 @@ const NOTIFY_ROWS: { kind: NotifyKind; id: string; label: string; hint: string }
   { kind: "comments", id: "notifyComments", label: vi.notify.comments, hint: vi.notify.commentsHint },
   { kind: "steps", id: "notifySteps", label: vi.notify.steps, hint: vi.notify.stepsHint },
   { kind: "quota", id: "notifyQuota", label: vi.notify.quota, hint: vi.notify.quotaHint },
+  { kind: "sessions", id: "notifySessions", label: vi.notify.sessions, hint: vi.notify.sessionsHint },
 ];
 
 /** Small stroke icons for the page list (drawn here, no icon font). */

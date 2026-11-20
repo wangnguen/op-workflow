@@ -2,6 +2,7 @@ import { agentLabel, vi } from "../../i18n/vi";
 import type { AgentKind, OrbitSnapshot, SessionStatus } from "../../ipc/types";
 import { Icon } from "../../shared/ui/Icon";
 import { StatusChip } from "../../shared/ui/StatusChip";
+import { StartOver } from "../task/StartOver";
 import { groupSessions, type SessionItem } from "./sessions";
 
 interface Props {
@@ -16,6 +17,10 @@ interface Props {
   reading?: ReadonlySet<string>;
   /** open the task window (brief, plan, findings, push, log) */
   onOpen?: (taskId: string) => void;
+  /** the OpenProject id of a task, for Làm lại từ đầu */
+  wpIdOf?: (taskId: string) => number | undefined;
+  /** a task was started over */
+  onChanged?: () => void;
 }
 
 const AVATAR: Record<AgentKind, string> = { claude: "CL", codex: "CX", shell: "SH" };
@@ -26,9 +31,10 @@ const COLUMNS: { key: SessionStatus; title: string; hint: string }[] = [
   { key: "idle", title: vi.sessions.idle, hint: vi.sessions.idleHint },
 ];
 
-function Card({ s, onShow, onIssues, onBrief, onOpen, reading }: { s: SessionItem } & Omit<Props, "snapshot">) {
+function Card({ s, onShow, onIssues, onBrief, onOpen, reading, wpIdOf, onChanged }: { s: SessionItem } & Omit<Props, "snapshot">) {
   const taskId = s.taskId;
   const isTask = !s.agent;
+  const wpId = taskId && s.inApp ? wpIdOf?.(taskId) : undefined;
   return (
     <article className={`s-card s-card--${s.status}${s.agent ? ` s-card--${s.agent}` : " s-card--task"}`}>
       <header>
@@ -97,6 +103,9 @@ function Card({ s, onShow, onIssues, onBrief, onOpen, reading }: { s: SessionIte
           <button className="btn btn--sm" title={vi.flow.openHint} onClick={() => onOpen(taskId)}>
             {vi.flow.open}
           </button>
+        )}
+        {wpId !== undefined && (
+          <StartOver wpId={wpId} small disabled={s.status === "running"} onDone={() => onChanged?.()} />
         )}
         {!s.inApp && (
           <button className="btn btn--sm" disabled title={vi.sessions.openPaneLater}>

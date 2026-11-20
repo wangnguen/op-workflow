@@ -30,6 +30,8 @@ use serde_json::{Value, json};
 
 use crate::flow_mcp::{self, ActiveStep, SessionStep};
 use crate::terminals::{Pane, TerminalKind, TerminalSink, statusline_settings};
+use crate::workspace_tools::{self, FileLists};
+use opw_domain::session::{ImageIn, RepoScript, SlashCommand};
 use opw_domain::workflow::StepKind;
 
 /// Sessions the app runs say so (`entrypoint` in the transcript and the status file). Without it
@@ -143,7 +145,7 @@ struct Entry {
     seq: u64,
     error: Option<String>,
     /// Messages typed before the folder trust question was answered.
-    held: Vec<(String, Option<String>)>,
+    held: Vec<Queued>,
     /// set_permission_mode request id → mode, to fall back from a refused `auto`.
     mode_requests: HashMap<String, String>,
     next_req: u64,
@@ -155,6 +157,15 @@ struct Entry {
     step_mode: Option<String>,
     step_model: Option<String>,
     mcp: Option<flow_mcp::Run>,
+    /// The `/` commands the running CLI announced.
+    commands: Vec<String>,
+}
+
+/// A message waiting to be sent (until the folder trust question is answered).
+struct Queued {
+    text: String,
+    uuid: Option<String>,
+    images: Vec<ImageIn>,
 }
 
 impl Entry {
@@ -192,6 +203,7 @@ impl Entry {
             step_mode: None,
             step_model: None,
             mcp: None,
+            commands: Vec::new(),
         }
     }
 
@@ -299,7 +311,7 @@ impl Entry {
         Ok(())
     }
 
-    fn say(&mut self, text: &str, uuid: Option<&str>) -> Result<(), ApiError> {
+    fn say(&mut self, text: &str, uuid: Option<&str>, images: &[ImageIn]) -> Result<(), ApiError> {
         if uuid.is_some() {
             if let Some(mode) = self.step_mode.take() {
                 self.request_mode(&mode)?;
@@ -308,9 +320,19 @@ impl Entry {
                 self.control(json!({"subtype":"set_model","model":model}))?;
             }
         }
+        let mut content = Vec::new();
+        if !text.is_empty() {
+            content.push(json!({ "type": "text", "text": text }));
+        }
+        for image in images {
+            content.push(json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": image.media_type, "data": image.data },
+            }));
+        }
         let mut payload = json!({
             "type": "user",
-            "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
+            "message": { "role": "user", "content": content },
             "parent_tool_use_id": null,
             "session_id": "",
         });
@@ -324,7 +346,7 @@ impl Entry {
         self.open_turns += 1;
         self.last_activity = Instant::now();
         self.started = true;
-        if self.row.title.is_empty() {
+        if self.row.title.is_empty() && !text.trim().is_empty() {
             self.row.title = first_line(text, TITLE_MAX);
         }
         Ok(())
@@ -404,7 +426,7 @@ fn where_open(entrypoint: &str) -> String {
     }
 }
 
-fn claude_home() -> Option<PathBuf> {
+pub(crate) fn claude_home() -> Option<PathBuf> {
     crate::browsertest::claude_projects().and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
@@ -503,7 +525,7 @@ fn first_line(text: &str, max: usize) -> String {
     }
 }
 
-fn hide_window(cmd: &mut Command) {
+pub(crate) fn hide_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -761,6 +783,9 @@ struct Inner {
     trust: Mutex<HashMap<String, bool>>,
     run_no: AtomicU64,
     create_task: Mutex<()>,
+    files: FileLists,
+    /// The `/` commands the last CLI announced (for a session not running now).
+    last_commands: Mutex<Vec<String>>,
     quitting: AtomicBool,
     quota: Mutex<Option<QuotaSink>>,
 }
@@ -811,6 +836,8 @@ impl Sessions {
                 trust: Mutex::new(HashMap::new()),
                 run_no: AtomicU64::new(0),
                 create_task: Mutex::new(()),
+                files: FileLists::default(),
+                last_commands: Mutex::new(Vec::new()),
                 quitting: AtomicBool::new(false),
                 quota: Mutex::new(None),
             }),
@@ -1244,7 +1271,13 @@ impl Sessions {
 
     /// Send a message: started (or resumed) first when nothing runs. `force` sends even though
     /// the session looks open somewhere else (a stale status file after a crash).
-    pub fn send(&self, id: &str, text: &str, force: bool) -> Result<SessionView, ApiError> {
+    pub fn send(
+        &self,
+        id: &str,
+        text: &str,
+        force: bool,
+        images: &[ImageIn],
+    ) -> Result<SessionView, ApiError> {
         let text = text.trim();
         if text.is_empty() {
             return Err(err("session.empty", "Tin nhắn trống"));
@@ -1257,7 +1290,8 @@ impl Sessions {
                 "Chờ tin nhắn của bước trả lời xong trước khi gửi tiếp",
             ));
         }
-        self.send_locked(id, &mut e, text, force, None)
+        check_images(images)?;
+        self.send_locked(id, &mut e, text, force, None, images)
     }
 
     fn send_locked(
@@ -1267,6 +1301,7 @@ impl Sessions {
         text: &str,
         force: bool,
         uuid: Option<&str>,
+        images: &[ImageIn],
     ) -> Result<SessionView, ApiError> {
         self.ensure_open()?;
         if e.terminal.is_some() {
@@ -1288,14 +1323,22 @@ impl Sessions {
                 }
             }
             if e.asks.iter().any(|a| a.view.kind == AskKind::Trust) {
-                e.held.push((text.to_owned(), uuid.map(str::to_owned)));
+                e.held.push(Queued {
+                    text: text.to_owned(),
+                    uuid: uuid.map(str::to_owned),
+                    images: images.to_vec(),
+                });
                 return Ok(e.view(None));
             }
             e.refresh();
             match self.trust_run(&e.row.repo) {
                 Some(run) => self.spawn(id, e, &run)?,
                 None => {
-                    e.held.push((text.to_owned(), uuid.map(str::to_owned)));
+                    e.held.push(Queued {
+                        text: text.to_owned(),
+                        uuid: uuid.map(str::to_owned),
+                        images: images.to_vec(),
+                    });
                     let folder = e.row.repo.clone();
                     e.asks.push(Pending {
                         view: SessionAsk {
@@ -1317,7 +1360,7 @@ impl Sessions {
                 }
             }
         }
-        e.say(text, uuid)?;
+        e.say(text, uuid, images)?;
         e.error = None;
         self.save(e);
         self.emit(id, e);
@@ -1397,7 +1440,7 @@ impl Sessions {
                         .kv_set(wp_id, "session-step-labels", id, &labels, &now());
                 }
             }
-            if let Err(error) = self.send_locked(id, &mut e, prompt, false, Some(&uuid)) {
+            if let Err(error) = self.send_locked(id, &mut e, prompt, false, Some(&uuid), &[]) {
                 lock(&e.active_step).take();
                 return Err(error);
             }
@@ -1495,6 +1538,69 @@ impl Sessions {
             .ok_or_else(|| err("step.missing", "Bước này chưa gửi vào phiên hoặc đã xong"))?;
         current.manual = true;
         Ok(())
+    }
+
+    /// The session's repo folder and task.
+    pub fn place(&self, id: &str) -> Result<(PathBuf, Option<u64>), ApiError> {
+        let arc = self.entry(id)?;
+        let e = lock(&arc);
+        Ok((opw_config::expand_home(&e.row.repo), e.row.wp_id))
+    }
+
+    /// Repo files whose path holds `query`, for `@` in the chat.
+    pub fn files(&self, id: &str, query: &str) -> Result<Vec<String>, ApiError> {
+        let (repo, _) = self.place(id)?;
+        Ok(self.inner.files.find(&repo, query, 30))
+    }
+
+    /// The `/` commands of this session.
+    pub fn commands(&self, id: &str) -> Result<Vec<SlashCommand>, ApiError> {
+        let arc = self.entry(id)?;
+        let (repo, mut known) = {
+            let e = lock(&arc);
+            (opw_config::expand_home(&e.row.repo), e.commands.clone())
+        };
+        if known.is_empty() {
+            known = lock(&self.inner.last_commands).clone();
+        }
+        Ok(workspace_tools::slash_commands(
+            &repo,
+            &known,
+            claude_home().as_deref(),
+        ))
+    }
+
+    /// The repo's package.json scripts.
+    pub fn scripts(&self, id: &str) -> Result<Vec<RepoScript>, ApiError> {
+        let (repo, _) = self.place(id)?;
+        Ok(workspace_tools::scripts(&repo))
+    }
+
+    /// Title and text of a notification for a session that waits for the user.
+    pub fn wait_note(&self, id: &str) -> Option<(String, String)> {
+        let arc = self.entry(id).ok()?;
+        let e = lock(&arc);
+        let ask = e.asks.first()?;
+        let title = if e.row.title.is_empty() {
+            "Phiên chờ bạn".to_owned()
+        } else {
+            format!("Chờ bạn · {}", e.row.title)
+        };
+        let body = match ask.view.kind {
+            AskKind::Permission => format!(
+                "Claude xin chạy {}: {}",
+                ask.view.tool,
+                first_line(&ask.view.summary, 120)
+            ),
+            AskKind::Question => ask
+                .view
+                .questions
+                .first()
+                .map_or_else(|| "Claude hỏi bạn".to_owned(), |q| first_line(&q.question, 160)),
+            AskKind::Plan => "Claude chờ bạn duyệt plan".to_owned(),
+            AskKind::Trust => "Repo chưa được tin cậy: trả lời trong chat để bắt đầu".to_owned(),
+        };
+        Some((title, body))
     }
 
     /// The trust a new process runs with, or `None` when the user has to be asked.
@@ -1637,6 +1743,16 @@ impl Sessions {
             "system" => {
                 let mut changed = v["subtype"] == "compact_boundary";
                 if v["subtype"] == "init" {
+                    let commands: Vec<String> = v["slash_commands"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c.as_str().map(str::to_owned))
+                        .collect();
+                    if !commands.is_empty() {
+                        lock(&self.inner.last_commands).clone_from(&commands);
+                        e.commands = commands;
+                    }
                     if let Some(model) = v["model"].as_str() {
                         if e.row.model.as_deref() != Some(model) {
                             e.row.model = Some(model.to_owned());
@@ -1838,8 +1954,8 @@ impl Sessions {
                 self.emit(id, &mut e);
                 return Err(error);
             }
-            for (text, uuid) in std::mem::take(&mut e.held) {
-                e.say(&text, uuid.as_deref())?;
+            for q in std::mem::take(&mut e.held) {
+                e.say(&q.text, q.uuid.as_deref(), &q.images)?;
             }
             self.save(&mut e);
             self.emit(id, &mut e);
@@ -1992,6 +2108,134 @@ impl Sessions {
 }
 
 /// `code <repo>` (the folder's window opens or comes to the front), then the session link.
+/// `\\?\`, in front of every path `std::fs::canonicalize` gives on Windows.
+const VERBATIM: &str = "\\\\?\\";
+
+/// Open `path` (relative to `repo`, which it must stay inside) in VS Code: the repo's window,
+/// at `line`.
+pub(crate) fn open_file_in_vscode(repo: &Path, path: &str, line: Option<u32>) -> Result<(), ApiError> {
+    let root = std::fs::canonicalize(repo).map_err(|_| err("file.repo", "Không còn thư mục repo"))?;
+    let file = std::fs::canonicalize(root.join(path))
+        .map_err(|_| err("file.missing", format!("Không còn file {path}")))?;
+    if !file.starts_with(&root) {
+        return Err(err("file.outside", "File nằm ngoài repo"));
+    }
+    let code = cli::find_in_path(
+        &["code.cmd", "code"],
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )
+    .ok_or_else(|| err("vscode.missing", "Không tìm thấy lệnh code (VS Code) trên PATH"))?;
+    // canonical paths on Windows start with the verbatim prefix, which VS Code does not take
+    let plain = |p: &Path| p.to_string_lossy().trim_start_matches(VERBATIM).to_owned();
+    let target = match line {
+        Some(n) => format!("{}:{n}", plain(&file)),
+        None => plain(&file),
+    };
+    let mut cmd = Command::new("cmd");
+    cmd.arg("/C").arg(code).arg(plain(&root)).arg("-g").arg(target);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    hide_window(&mut cmd);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| err("vscode.open", e.to_string()))
+}
+
+/// Characters `cmd /C` would read as its own (the file names go through it to `code`).
+fn cmd_unsafe(path: &str) -> bool {
+    path.chars()
+        .any(|c| matches!(c, '&' | '|' | '<' | '>' | '^' | '%' | '"'))
+}
+
+/// Show a changed file next to its version at `rev` (the fork point the diff was made from) in
+/// VS Code's diff view, in the repo's window. The old version is written to a scratch folder; a
+/// file the change added is compared with an empty one.
+pub(crate) fn compare_in_vscode(
+    repo: &Path,
+    rev: &str,
+    path: &str,
+    old_path: Option<&str>,
+) -> Result<(), ApiError> {
+    if !(4..=40).contains(&rev.len()) || !rev.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(err("diff.rev", "Không rõ commit gốc để so sánh"));
+    }
+    let before = old_path.unwrap_or(path);
+    let outside = |p: &str| p.split(['/', '\\']).any(|part| part == "..") || Path::new(p).is_absolute();
+    if outside(path) || outside(before) {
+        return Err(err("file.outside", "File nằm ngoài repo"));
+    }
+    if cmd_unsafe(path) || cmd_unsafe(before) {
+        return Err(err(
+            "file.name",
+            "Tên file có ký tự app không chuyển cho VS Code được. Mở file bằng nút Mở trong VS Code.",
+        ));
+    }
+    let root = std::fs::canonicalize(repo).map_err(|_| err("file.repo", "Không còn thư mục repo"))?;
+    let file = std::fs::canonicalize(root.join(path))
+        .map_err(|_| err("file.missing", format!("Không còn file {path}")))?;
+    if !file.starts_with(&root) {
+        return Err(err("file.outside", "File nằm ngoài repo"));
+    }
+    let old = opw_vcs::Git::new(&root)
+        .run(&["show", &format!("{rev}:{before}")])
+        .unwrap_or_default();
+    let left = std::env::temp_dir()
+        .join("op-workflow-compare")
+        .join(rev)
+        .join(path);
+    left.parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&left, old))
+        .map_err(|e| err("diff.write", format!("Không ghi được bản cũ của {path}: {e}")))?;
+    let code = cli::find_in_path(
+        &["code.cmd", "code"],
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )
+    .ok_or_else(|| err("vscode.missing", "Không tìm thấy lệnh code (VS Code) trên PATH"))?;
+    let plain = |p: &Path| p.to_string_lossy().trim_start_matches(VERBATIM).to_owned();
+    let mut cmd = Command::new("cmd");
+    cmd.arg("/C")
+        .arg(code)
+        .arg(plain(&root))
+        .arg("--diff")
+        .arg(plain(&left))
+        .arg(plain(&file));
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    hide_window(&mut cmd);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| err("vscode.open", e.to_string()))
+}
+
+/// Open the repo's folder in VS Code (its window if one is open), leaving the session here.
+pub(crate) fn open_repo_in_vscode(repo: &Path) -> Result<(), ApiError> {
+    let root = std::fs::canonicalize(repo).map_err(|_| err("file.repo", "Không còn thư mục repo"))?;
+    let plain = root.to_string_lossy().trim_start_matches(VERBATIM).to_owned();
+    if cmd_unsafe(&plain) {
+        return Err(err(
+            "file.name",
+            "Đường dẫn repo có ký tự app không chuyển cho VS Code được",
+        ));
+    }
+    let code = cli::find_in_path(
+        &["code.cmd", "code"],
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )
+    .ok_or_else(|| err("vscode.missing", "Không tìm thấy lệnh code (VS Code) trên PATH"))?;
+    let mut cmd = Command::new("cmd");
+    cmd.arg("/C").arg(code).arg(plain);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    hide_window(&mut cmd);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| err("vscode.open", e.to_string()))
+}
+
 fn open_in_vscode(repo: &Path, url: &str) {
     if let Some(code) = cli::find_in_path(
         &["code.cmd", "code"],
@@ -2013,6 +2257,28 @@ fn open_in_vscode(repo: &Path, url: &str) {
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut cmd = Command::new("xdg-open");
     let _ = cmd.arg(url).spawn();
+}
+
+/// What the API takes: a few images of the usual kinds, each under 5 MB.
+fn check_images(images: &[ImageIn]) -> Result<(), ApiError> {
+    const KINDS: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+    const MAX_IMAGES: usize = 8;
+    const MAX_BYTES: usize = 5 * 1024 * 1024;
+    if images.len() > MAX_IMAGES {
+        return Err(err(
+            "session.images",
+            format!("Gửi tối đa {MAX_IMAGES} ảnh mỗi tin"),
+        ));
+    }
+    for image in images {
+        if !KINDS.contains(&image.media_type.as_str()) {
+            return Err(err("session.images", "Chỉ gửi được ảnh PNG, JPEG, GIF hoặc WebP"));
+        }
+        if image.data.len() / 4 * 3 > MAX_BYTES {
+            return Err(err("session.images", "Mỗi ảnh tối đa 5 MB"));
+        }
+    }
+    Ok(())
 }
 
 fn new_uuid() -> String {
@@ -2043,6 +2309,25 @@ mod tests {
             suggestions: kind_req["permission_suggestions"].clone(),
             tool_use_id: kind_req["tool_use_id"].as_str().map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn compare_refuses_what_it_cannot_pass_on_safely() {
+        // every refusal comes before VS Code or git is touched
+        let repo = Path::new(".");
+        let code = |rev: &str, path: &str, old: Option<&str>| {
+            compare_in_vscode(repo, rev, path, old)
+                .map_err(|e| e.code)
+                .unwrap_err()
+        };
+        assert_eq!(code("main", "a.ts", None), "diff.rev");
+        assert_eq!(code("abc", "a.ts", None), "diff.rev");
+        assert_eq!(code("abc1234;", "a.ts", None), "diff.rev");
+        assert_eq!(code("abc1234", "../secret.txt", None), "file.outside");
+        assert_eq!(code("abc1234", "src/a.ts", Some("..\\x.ts")), "file.outside");
+        assert_eq!(code("abc1234", "C:/Windows/win.ini", None), "file.outside");
+        assert_eq!(code("abc1234", "a&calc.ts", None), "file.name");
+        assert_eq!(code("abc1234", "a.ts", Some("b%PATH%.ts")), "file.name");
     }
 
     #[test]
@@ -2260,6 +2545,7 @@ items: {texts:#?}",
                 &id,
                 "Reply with exactly PONG-WS and nothing else. Do not use tools.",
                 false,
+                &[],
             )
             .unwrap();
         if v.state == SessionState::Waiting {
@@ -2277,6 +2563,7 @@ items: {texts:#?}",
                 &id,
                 "Use the Bash tool to run exactly: echo opw > made.txt   If it is refused, reply with only REFUSED.",
                 false,
+                &[],
             )
             .unwrap();
         let ask = follow.until("a permission request", |_, p| {
@@ -2305,6 +2592,7 @@ items: {texts:#?}",
                 &id,
                 "What exact word did you reply with to my very first message in this conversation? Reply with only that word.",
                 false,
+                &[],
             )
             .unwrap();
         follow.until("the answer after resuming", idle_with(&["PONG-WS", "REFUSED"]));

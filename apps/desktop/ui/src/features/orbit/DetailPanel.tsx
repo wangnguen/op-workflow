@@ -15,6 +15,7 @@ import { STEP_COUNT } from "../../shared/steps";
 import { findAgent, type Selection } from "./selection";
 import { Icon } from "../../shared/ui/Icon";
 import { PriorityChip } from "../../shared/ui/PriorityChip";
+import { HideSideButton } from "../../shared/ui/SidePanel";
 import { StatusChip } from "../../shared/ui/StatusChip";
 import { gateTab, type TaskTab } from "../task/taskTabs";
 
@@ -29,6 +30,8 @@ interface Props {
   /** open a task on OpenProject in the browser */
   onOpenLink?: (wpId: number) => void;
   now: number;
+  /** hide the panel (it sits in a SidePanel) */
+  onHide?: () => void;
 }
 
 const t = vi.orbit.panel;
@@ -153,7 +156,7 @@ function AgentDetail({ task, agent, now, onSelect, onOpenTask }: AgentDetailProp
   );
 }
 
-export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, onOpenTask, onOpenLink }: Props) {
+export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, onOpenTask, onOpenLink, onHide }: Props) {
   const a = snapshot.active;
   let body: ReactNode = <p className="dp-empty">{t.noneSelected}</p>;
 
@@ -309,5 +312,14 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
     }
   }
 
-  return <aside className="detail-panel">{body}</aside>;
+  return (
+    <aside className="detail-panel">
+      {onHide && (
+        <div className="dp-bar">
+          <HideSideButton side="right" name={vi.side.detail} onHide={onHide} />
+        </div>
+      )}
+      {body}
+    </aside>
+  );
 }

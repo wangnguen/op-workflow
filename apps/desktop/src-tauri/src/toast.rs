@@ -34,6 +34,37 @@ pub fn show(app: &AppHandle, alert: &AlertView) {
     }
 }
 
+/// Event the UI listens to: a session's notification was clicked, open that session.
+pub const OPEN_SESSION_EVENT: &str = "opw://open-session";
+
+/// A Workspace session waits for the user: a click brings the app up on that session.
+#[cfg(windows)]
+pub fn show_session(app: &AppHandle, title: &str, body: &str, id: &str) {
+    use tauri::Emitter;
+    use tauri_winrt_notification::Toast;
+
+    let handle = app.clone();
+    let id = id.to_owned();
+    let shown = Toast::new(&app_id(app))
+        .title(title)
+        .text1(body)
+        .on_activated(move |_| {
+            crate::tray::show_main(&handle);
+            let _ = handle.emit(OPEN_SESSION_EVENT, &id);
+            Ok(())
+        })
+        .show();
+    if let Err(e) = shown {
+        eprintln!("notification failed: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn show_session(app: &AppHandle, title: &str, body: &str, _id: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
 /// Show one alert as a notification (no click handling outside Windows).
 #[cfg(not(windows))]
 pub fn show(app: &AppHandle, alert: &AlertView) {

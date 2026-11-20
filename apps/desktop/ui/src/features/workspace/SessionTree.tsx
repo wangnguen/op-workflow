@@ -3,6 +3,7 @@ import { vi } from "../../i18n/vi";
 import type { SessionState, SessionView, WorkspaceSnapshot } from "../../ipc/types";
 import { formatHourMinute } from "../../shared/format";
 import { Icon } from "../../shared/ui/Icon";
+import { HideSideButton } from "../../shared/ui/SidePanel";
 import { OTHER_PROJECT, type Selection, type TaskNode, buildTree, repoName, taskState } from "./chatState";
 
 const w = vi.workspace;
@@ -12,6 +13,8 @@ interface Props {
   selected: Selection | undefined;
   onSelect: (s: Selection) => void;
   onNew: () => void;
+  /** hide the panel the list sits in */
+  onHide: () => void;
 }
 
 function Dot({ state }: { state: SessionState | undefined }) {
@@ -23,7 +26,7 @@ function stateLabel(s: SessionView): string {
 }
 
 /** Project → task → sessions, then the sessions without a task. Every row opens its chat. */
-export function SessionTree({ snapshot, selected, onSelect, onNew }: Props) {
+export function SessionTree({ snapshot, selected, onSelect, onNew, onHide }: Props) {
   const tree = buildTree(snapshot);
   const [closed, setClosed] = useState<Record<string, boolean>>({});
   const toggle = (key: string) => setClosed((c) => ({ ...c, [key]: !c[key] }));
@@ -55,7 +58,12 @@ export function SessionTree({ snapshot, selected, onSelect, onNew }: Props) {
     const key = `task-${n.wpId}`;
     const open = !closed[key];
     const target: Selection = n.sessions[0] ? { kind: "session", id: n.sessions[0].id } : { kind: "task", wpId: n.wpId };
-    const on = isOn({ kind: "task", wpId: n.wpId });
+    // the task's chat is shown (the task itself or one of its sessions)
+    const shown =
+      isOn({ kind: "task", wpId: n.wpId }) || n.sessions.some((s) => isOn({ kind: "session", id: s.id }));
+    // folded with its shown session inside: the task row carries the mark
+    const on = isOn({ kind: "task", wpId: n.wpId }) || (shown && !open);
+    const folds = n.sessions.length > 0;
     return (
       <div key={key} className="ws-task">
         <div className={`ws-row ws-row--task${on ? " is-on" : ""}`}>
@@ -63,25 +71,43 @@ export function SessionTree({ snapshot, selected, onSelect, onNew }: Props) {
             className="ws-twist"
             aria-label={open ? w.collapse : w.expand}
             aria-expanded={open}
-            disabled={n.sessions.length === 0}
+            disabled={!folds}
             onClick={() => toggle(key)}
           >
-            <Icon name="chevron" size={11} className={open && n.sessions.length > 0 ? "is-open" : undefined} />
+            <Icon name="chevron" size={11} className={open && folds ? "is-open" : undefined} />
           </button>
-          <button className="ws-row-pick" onClick={() => onSelect(target)} title={n.title || n.taskId}>
+          {/* the whole row opens and closes the task like the arrow; a task not shown yet opens
+              and shows its chat */}
+          <button
+            className="ws-row-pick"
+            aria-expanded={folds ? open : undefined}
+            onClick={() => {
+              if (!shown) {
+                onSelect(target);
+                if (!open) toggle(key);
+              } else if (folds) {
+                toggle(key);
+              }
+            }}
+            title={n.title || n.taskId}
+          >
             <Dot state={taskState(n)} />
             <span className="ws-row-main">
               <span className="ws-row-title">
                 <span className="ws-task-id">{n.taskId}</span> {n.title}
               </span>
               <span className="ws-row-meta faint">
-                {n.sessions.length === 0 ? w.noSession : `${n.sessions.length} phiên`}
+                {n.sessions.length === 0 ? w.noSession : w.sessionCount(n.sessions.length)}
                 {n.repo && ` · ${repoName(n.repo)}`}
               </span>
             </span>
           </button>
         </div>
-        {open && n.sessions.map((s) => sessionRow(s, true))}
+        {folds && (
+          <div className={`ws-task-kids${open ? " is-open" : ""}`} inert={!open}>
+            <div>{n.sessions.map((s) => sessionRow(s, true))}</div>
+          </div>
+        )}
       </div>
     );
   };
@@ -96,6 +122,7 @@ export function SessionTree({ snapshot, selected, onSelect, onNew }: Props) {
           </span>
           {w.newSession}
         </button>
+        <HideSideButton side="left" name={vi.side.workspace} onHide={onHide} />
       </div>
       <div className="ws-tree-scroll">
         {empty && <p className="faint ws-tree-empty">{w.empty}</p>}

@@ -391,6 +391,7 @@ pub fn save_notify(path: &Path, kind: NotifyKind, on: bool) -> ConfigResult<()> 
         NotifyKind::Comments => "comments",
         NotifyKind::Steps => "steps",
         NotifyKind::Quota => "quota",
+        NotifyKind::Sessions => "sessions",
     };
     edit_file(path, |root| {
         object_at(root, "notify").insert(key.into(), Value::Bool(on));

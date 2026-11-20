@@ -337,6 +337,8 @@ export interface NotifySettings {
   steps: boolean;
   /** a quota window passed 80% / 95% */
   quota: boolean;
+  /** a Workspace session waits for you while you look elsewhere */
+  sessions: boolean;
 }
 
 export type NotifyKind = keyof NotifySettings;
@@ -1131,6 +1133,28 @@ export interface WorkspaceTask {
   branch?: string;
 }
 
+/** An image pasted into the chat (base64). */
+export interface ImageIn {
+  mediaType: string;
+  data: string;
+}
+
+/** A package.json script, run in the session's shell. */
+export interface RepoScript {
+  name: string;
+  command: string;
+  /** what to type: `pnpm run dev` */
+  run: string;
+}
+
+/** A command `/` offers in the chat. */
+export interface SlashCommand {
+  name: string;
+  description?: string;
+  /** claude, repo, user, skill, plugin */
+  source: string;
+}
+
 export interface WorkspaceFlow {
   /** the task's main session, where its steps go (the newest after Làm lại từ đầu) */
   session?: string;
@@ -1286,6 +1310,16 @@ export interface Commands {
   session_stop: SessionView;
   session_open_vscode: null;
   session_hide: null;
+  session_diff: DiffView;
+  session_open_file: null;
+  task_open_file: null;
+  session_compare_file: null;
+  task_compare_file: null;
+  session_open_repo: null;
+  session_files: string[];
+  session_commands: SlashCommand[];
+  session_scripts: RepoScript[];
+  session_notify_wait: null;
 }
 
 export interface CommandArgs {
@@ -1332,11 +1366,21 @@ export interface CommandArgs {
   open_task_path: { wpId: number; path: string };
   session_new: { request: NewSession };
   session_chat: { id: string };
-  session_send: { id: string; text: string; force?: boolean };
+  session_send: { id: string; text: string; force?: boolean; images?: ImageIn[] };
   session_answer: { id: string; askId: string; answer: AskAnswer };
   session_interrupt: { id: string };
   session_set_mode: { id: string; mode: string };
   session_stop: { id: string };
   session_open_vscode: { id: string };
   session_hide: { id: string };
+  session_diff: { id: string };
+  session_open_file: { id: string; path: string; line?: number };
+  task_open_file: { wpId: number; path: string; line?: number };
+  session_compare_file: { id: string; rev: string; path: string; oldPath?: string };
+  task_compare_file: { wpId: number; rev: string; path: string; oldPath?: string };
+  session_open_repo: { id: string };
+  session_files: { id: string; query: string };
+  session_commands: { id: string };
+  session_scripts: { id: string };
+  session_notify_wait: { id: string };
 }

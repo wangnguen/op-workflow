@@ -1704,7 +1704,7 @@ impl Flow {
         if let FlowAction::Talk { text } = &action {
             if let Some(sessions) = self.inner.sessions() {
                 if let Some(id) = sessions.task_session(ctx.row.wp_id) {
-                    sessions.send(&id, text, false)?;
+                    sessions.send(&id, text, false, &[])?;
                     self.inner.log(
                         ctx.row.wp_id,
                         None,
@@ -3183,9 +3183,6 @@ fn apply_action(
             if running {
                 return Err(ApiError::new("step.running", "Bước này đang chạy"));
             }
-            if !entry.saved.workspace {
-                return Err(not_now("làm lại từ đầu"));
-            }
             let old = std::mem::take(&mut entry.saved);
             let mut saved = new_saved();
             // what the user set for this task stays: the steps it runs, Tự chạy, the issue, the
@@ -3196,7 +3193,7 @@ fn apply_action(
                     let _ = saved.workflow.set_enabled(step, on);
                 }
             }
-            saved.workspace = true;
+            saved.workspace = old.workspace;
             saved.auto = old.auto;
             saved.issue = old.issue;
             saved.dev_server = old.dev_server;

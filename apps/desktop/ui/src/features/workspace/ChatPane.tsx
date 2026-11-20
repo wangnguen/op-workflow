@@ -1,26 +1,35 @@
-import { Fragment, lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { stepLabel, vi } from "../../i18n/vi";
 import {
   answerSession,
+  compareSessionFile,
   errorCode,
   errorMessage,
+  getSessionDiff,
+  getSessionScripts,
   hideSession,
   interruptSession,
   newSession,
+  openSessionFile,
   openSessionInVscode,
+  openSessionRepo,
   sendToSession,
   setSessionMode,
   stopSession,
 } from "../../ipc/client";
-import type { AskAnswer, TerminalKind, WorkspaceTask } from "../../ipc/types";
+import type { AskAnswer, CommentView, RepoScript, TerminalKind, WorkspaceTask } from "../../ipc/types";
+import { formatDateTime } from "../../shared/format";
 import { Markdown } from "../../shared/Markdown";
 import { Icon } from "../../shared/ui/Icon";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
 import { ChatItemView } from "../chat/ChatItems";
+import { CommentsTab } from "../task/CommentsTab";
+import { DiffPanel } from "../task/DiffTab";
 import { ModeSelect } from "../settings/ModeSelect";
 import type { Option } from "../settings/stepChoice";
 import { AskCard } from "./AskCard";
 import { repoName } from "./chatState";
+import { AttachmentStrip, SuggestList, useAttachments, useSuggest } from "./ComposerExtras";
 import { useSessionChat } from "./useSessionChat";
 import { WorkspaceSteps } from "./WorkspaceSteps";
 
@@ -32,7 +41,9 @@ const tt = vi.workspace.terminal;
 const SHELLS = ["powerShell", "gitBash"] as const;
 type Shell = (typeof SHELLS)[number];
 const shellOptions: Option[] = SHELLS.map((s) => ({ value: s, label: tt.shells[s], about: tt.shellAbout[s] }));
-type View = "chat" | "claude" | "shell";
+type View = "chat" | "claude" | "shell" | "changes" | "comments";
+const tc = vi.workspace.composer;
+const tsc = vi.workspace.scripts;
 const MODES = ["default", "acceptEdits", "plan", "auto"];
 /** the input grows with its text up to this height, then scrolls */
 const INPUT_MAX = 220;
@@ -61,12 +72,21 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
   const tab = view?.id === sessionId ? (view?.tab ?? "chat") : "chat";
   const [shell, setShell] = useState<Shell>("powerShell");
   const [shellRequested, setShellRequested] = useState<string>();
+  // a package script picked above the shell, typed into it once it is open
+  const [command, setCommand] = useState<{ text: string; nonce: number }>();
+  const [scripts, setScripts] = useState<RepoScript[]>();
+  // the script list above the shell: open until a script is picked, then one line
+  const [scriptsOpen, setScriptsOpen] = useState(true);
+  const [lastScript, setLastScript] = useState<string>();
+  const [caret, setCaret] = useState(0);
   const list = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const input = useRef<HTMLTextAreaElement>(null);
 
   const session = chat?.session;
   const draft = !sessionId;
+  const attach = useAttachments((message) => setFailure({ message, outside: false }));
+  const suggest = useSuggest(sessionId, text, caret);
   const outside = session?.state === "outside";
   const terminal = session?.terminal === true;
   const running = session?.state === "running";
@@ -83,6 +103,11 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
     if (shown.current !== undefined && shown.current !== sessionId) {
       setText("");
       setDraftMode("");
+      attach.clear();
+      setScripts(undefined);
+      setCommand(undefined);
+      setScriptsOpen(true);
+      setLastScript(undefined);
     }
     shown.current = sessionId;
     input.current?.focus();
@@ -116,7 +141,8 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
 
   const send = (force = false) => {
     const message = text.trim();
-    if (!message || busy || terminal) return;
+    const images = attach.images;
+    if ((!message && images.length === 0) || busy || terminal) return;
     stick.current = true;
     void act("send", async () => {
       let id = sessionId;
@@ -126,8 +152,9 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
         if (draftMode) await setSessionMode(id, draftMode);
         onCreated(id);
       }
-      const view = await sendToSession(id, message, force);
+      const view = await sendToSession(id, message, force, images);
       setText("");
+      attach.clear();
       if (sessionId) setSession(view);
     });
   };
@@ -148,8 +175,48 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
   const claudeShown = !!sessionId && (tab === "claude" || terminal);
   const shellKind: TerminalKind | undefined =
     session?.shell ?? (shellRequested !== undefined && shellRequested === sessionId ? shell : undefined);
+  useEffect(() => {
+    if (tab !== "shell" || !sessionId || scripts) return;
+    let alive = true;
+    getSessionScripts(sessionId).then((s) => alive && setScripts(s)).catch(() => alive && setScripts([]));
+    return () => {
+      alive = false;
+    };
+  }, [tab, sessionId, scripts]);
+  const runScript = (script: RepoScript) => {
+    if (!sessionId) return;
+    if (!shellKind) setShellRequested(sessionId);
+    setCommand({ text: script.run, nonce: Date.now() });
+    setLastScript(script.name);
+    setScriptsOpen(false);
+  };
+  const loadDiff = useCallback(() => getSessionDiff(sessionId ?? ""), [sessionId]);
+  const openFile = useCallback(
+    (path: string, line?: number) => openSessionFile(sessionId ?? "", path, line),
+    [sessionId],
+  );
+  const compareFile = useCallback(
+    (rev: string, path: string, oldPath?: string) => compareSessionFile(sessionId ?? "", rev, path, oldPath),
+    [sessionId],
+  );
+  // "Hỏi Claude" on a comment: it goes into the chat box, quoted, and the chat comes back
+  const askAbout = (c: CommentView, who: string, body: string) => {
+    const quoted = body.trim().split("\n").map((l) => `> ${l}`).join("\n");
+    const head = t.askAbout(who, formatDateTime(c.createdAt));
+    const next = text.trim() ? `${head}\n${quoted}\n\n${text}` : `${head}\n${quoted}\n\n`;
+    setText(next);
+    setView({ id: sessionId, tab: "chat" });
+    requestAnimationFrame(() => {
+      input.current?.focus();
+      input.current?.setSelectionRange(next.length, next.length);
+      setCaret(next.length);
+    });
+  };
   const closeTerminal = (kind: TerminalKind) => {
-    if (kind !== "claude") setShellRequested(undefined);
+    if (kind !== "claude") {
+      setShellRequested(undefined);
+      setCommand(undefined);
+    }
     setView({ id: sessionId, tab: "chat" });
     reload();
     onChanged();
@@ -167,7 +234,17 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
 
   const placeholder = outside ? t.placeholderOutside : running ? t.placeholderBusy : t.placeholder;
   // like the extension: while a turn runs and nothing is typed, the round button stops it
-  const stopping = running && session !== undefined && !text.trim();
+  const stopping = running && session !== undefined && !text.trim() && attach.images.length === 0;
+  const pickSuggestion = (i: number) => {
+    const next = suggest.apply(i);
+    if (!next) return;
+    setText(next.text);
+    setCaret(next.caret);
+    requestAnimationFrame(() => {
+      input.current?.focus();
+      input.current?.setSelectionRange(next.caret, next.caret);
+    });
+  };
 
   return (
     <div className="ws-chat">
@@ -197,7 +274,51 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
           {ws.tabShell}
           {session?.shell && <span className="ws-tab-live" aria-hidden="true" />}
         </button>
+        <button className="btn btn--sm" aria-pressed={tab === "changes"}
+          title={sessionId ? ws.tabChangesHint : ws.needsSession}
+          disabled={!sessionId} onClick={() => switchTab("changes")}>
+          {ws.tabChanges}
+        </button>
+        {task && (
+          <button className="btn btn--sm" aria-pressed={tab === "comments"} title={ws.tabCommentsHint}
+            onClick={() => setView({ id: sessionId, tab: "comments" })}>
+            {ws.tabComments}
+          </button>
+        )}
+        {sessionId && (
+          <button className="btn btn--sm btn--ghost ws-tabs-end" title={t.openRepoHint}
+            disabled={busy !== undefined} onClick={() => void act("repo", () => openSessionRepo(sessionId))}>
+            <Icon name="folder" size={12} />
+            {t.openRepo}
+          </button>
+        )}
       </div>
+      {tab === "shell" && sessionId && scripts && (
+        <div className={`ws-scripts${scriptsOpen ? " is-open" : ""}`}>
+          <button className="ws-scripts-head" aria-expanded={scriptsOpen}
+            title={scriptsOpen ? tsc.foldHint : tsc.unfoldHint} onClick={() => setScriptsOpen((o) => !o)}>
+            <Icon name="chevron" size={11} className={scriptsOpen ? "is-open" : undefined} />
+            <strong>{tsc.title}</strong>
+            <span className="faint">
+              {scripts.length === 0 ? tsc.none : lastScript ? tsc.ran(lastScript) : tsc.count(scripts.length)}
+              {!scriptsOpen && scripts.length > 0 && ` · ${tsc.pickMore}`}
+            </span>
+          </button>
+          <div className="ws-scripts-body" inert={!scriptsOpen}>
+            <div>
+              <div className="ws-scripts-list" role="group" aria-label={tsc.title}>
+                {scripts.map((sc) => (
+                  <button key={sc.name} className="ws-script" title={sc.run} onClick={() => runScript(sc)}>
+                    <span className="ws-script-name">{sc.name}</span>
+                    <span className="faint mono ws-script-cmd">{sc.command}</span>
+                  </button>
+                ))}
+              </div>
+              {scripts.length > 0 && <p className="faint ws-scripts-about">{tsc.about}</p>}
+            </div>
+          </div>
+        </div>
+      )}
       {tab === "shell" && !shellKind && (
         <div className="ws-shell-pick">
           <span className="faint">{tt.shellKind}</span>
@@ -220,8 +341,18 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
         <div className="ws-term-wrap" hidden={tab !== "shell"}>
           <Suspense fallback={<p className="dim ws-term-wait">{tt.opening}</p>}>
             <TerminalPane key={`${sessionId}:${shellKind}`} id={sessionId} kind={shellKind}
-              live={session?.shell === shellKind} onClose={() => closeTerminal(shellKind)} />
+              live={session?.shell === shellKind} command={command} onClose={() => closeTerminal(shellKind)} />
           </Suspense>
+        </div>
+      )}
+      {tab === "changes" && sessionId && (
+        <div className="ws-tool-wrap">
+          <DiffPanel key={sessionId} load={loadDiff} findings={[]} onOpenFile={openFile} onCompare={compareFile} />
+        </div>
+      )}
+      {tab === "comments" && task && (
+        <div className="ws-tool-wrap">
+          <CommentsTab key={task.wpId} wpId={task.wpId} running={running} onChanged={onChanged} onAsk={askAbout} />
         </div>
       )}
       <div className="ws-chat-body" hidden={tab !== "chat"}>
@@ -350,7 +481,12 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
             </div>
           )}
           {/* one box like the extension's: the text on top, the mode and the round button under it */}
-          {!terminal && <div className="ws-box">
+          {!terminal && <div className="ws-box" onDrop={attach.onDrop} onDragOver={(e) => e.preventDefault()}>
+            {suggest.open && (
+              <SuggestList kind={suggest.kind} items={suggest.items} active={suggest.active}
+                onHover={suggest.setActive} onPick={(i) => pickSuggestion(i)} />
+            )}
+            <AttachmentStrip images={attach.images} onRemove={attach.remove} />
             <textarea
               ref={input}
               className="ws-box-input"
@@ -358,9 +494,32 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
               value={text}
               placeholder={placeholder}
               aria-label={t.placeholder}
+              title={tc.hint}
               disabled={busy === "send"}
-              onChange={(e) => setText(e.target.value)}
+              onChange={(e) => {
+                setText(e.target.value);
+                setCaret(e.target.selectionStart);
+              }}
+              onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+              onPaste={attach.onPaste}
               onKeyDown={(e) => {
+                if (suggest.open) {
+                  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                    e.preventDefault();
+                    suggest.move(e.key === "ArrowDown" ? 1 : -1);
+                    return;
+                  }
+                  if ((e.key === "Enter" || e.key === "Tab") && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    pickSuggestion(suggest.active);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    suggest.close();
+                    return;
+                  }
+                }
                 if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   send(false);
@@ -396,7 +555,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
                   className="ws-send"
                   title={t.send}
                   aria-label={t.send}
-                  disabled={!text.trim() || busy !== undefined}
+                  disabled={(!text.trim() && attach.images.length === 0) || busy !== undefined}
                   onClick={() => send(false)}
                 >
                   <Icon name="arrowUp" size={15} />

@@ -171,6 +171,8 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
                 }
                 reading={reading}
                 onOpen={openTask}
+                wpIdOf={(taskId) => card(taskId)?.wpId}
+                onChanged={onChanged}
               />
             </div>
           </>

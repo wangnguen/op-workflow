@@ -5,6 +5,7 @@ import {
 } from "../../ipc/client";
 import type { FlowAction, SessionView, StepKind, WorkspaceFlow } from "../../ipc/types";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
+import { StartOver } from "../task/StartOver";
 
 const t = vi.workspace.steps;
 const POLL_MS = 1200;
@@ -29,7 +30,6 @@ export function WorkspaceSteps({
   // why a step that cannot run yet was not run (shown where the error goes)
   const [notice, setNotice] = useState<string>();
   const [edit, setEdit] = useState(false);
-  const [confirming, setConfirming] = useState(false);
   // read by the poll without restarting it
   const acting = useRef(false);
 
@@ -77,11 +77,11 @@ export function WorkspaceSteps({
       onChanged();
     });
   const done = (step: StepKind) => run(() => completeWorkspaceStep(wpId, step));
-  const startOver = () =>
+  // after Làm lại từ đầu the task's steps go to its new session: show that one
+  const startedOver = () =>
     run(async () => {
-      const next = await workspaceFlowAction(wpId, { type: "startOver" });
+      const next = await getWorkspaceFlow(wpId);
       setFlow(next);
-      setConfirming(false);
       if (next.session && next.session !== session?.id) onSession(next.session);
       onChanged();
     });
@@ -124,24 +124,10 @@ export function WorkspaceSteps({
             <button className="btn btn--sm btn--ghost" title={t.openAbout} onClick={() => onOpenTask(wpId, gateTab)}>
               {flow.gate ? t.openGate : t.openTask}
             </button>
-            <button className="btn btn--sm btn--ghost" aria-expanded={confirming} title={t.startOverAbout}
-              disabled={disabled} onClick={() => setConfirming(!confirming)}>
-              {t.startOver}
-            </button>
+            <StartOver wpId={wpId} small disabled={disabled} onDone={() => void startedOver()} />
           </div>
         )}
       </div>
-      {confirming && flow.enabled && (
-        <div className="note ws-flow-confirm">
-          <span>{t.startOverAbout}</span>
-          <span className="ws-flow-confirm-actions">
-            <button className="btn btn--sm btn--danger" disabled={disabled} onClick={() => void startOver()}>
-              {t.startOverConfirm}
-            </button>
-            <button className="btn btn--sm btn--ghost" onClick={() => setConfirming(false)}>{t.cancel}</button>
-          </span>
-        </div>
-      )}
       {flow.enabled && (
         <div className="ws-flow-steps">
           {flow.steps.filter((s) => edit || s.enabled).map((s) => edit ? (

@@ -519,6 +519,8 @@ pub struct NotifySettings {
     pub steps: bool,
     /// A quota window passed a warning level (`quota.warnAt`).
     pub quota: bool,
+    /// A Workspace session waits for you while you look elsewhere.
+    pub sessions: bool,
 }
 
 impl Default for NotifySettings {
@@ -527,6 +529,7 @@ impl Default for NotifySettings {
             comments: true,
             steps: true,
             quota: true,
+            sessions: true,
         }
     }
 }
@@ -537,6 +540,7 @@ pub enum NotifyKind {
     Comments,
     Steps,
     Quota,
+    Sessions,
 }
 
 /// Result of moving the briefs to another folder.

@@ -1,0 +1,99 @@
+/* A side panel with a draggable edge (shared/ui/SidePanel.tsx). The panel slides to its width;
+   the content keeps its own width meanwhile and is clipped, so text never reflows mid-slide. */
+
+.side-panel {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  transition: width var(--dur-base) var(--ease-out);
+}
+.side-panel.is-dragging {
+  transition: none;
+}
+.side-panel-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+.side-panel-in {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+.side-panel--left .side-panel-in {
+  left: 0;
+}
+.side-panel--right .side-panel-in {
+  right: 0;
+}
+.side-panel.is-hidden .side-panel-in {
+  opacity: 0;
+}
+
+/* the strip that stays when the panel is hidden: one button to bring it back */
+.side-panel-rail {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  padding-top: 10px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+.side-panel.is-hidden .side-panel-rail {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* the edge: a wide grab area over the panel's border, the line lights up while it is used */
+.side-panel-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 5;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.side-panel--left .side-panel-handle {
+  right: -4px;
+}
+.side-panel--right .side-panel-handle {
+  left: -4px;
+}
+.side-panel-handle::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  content: "";
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.side-panel-handle:hover::after,
+.side-panel.is-dragging .side-panel-handle::after,
+.side-panel-handle:focus-visible::after {
+  background: var(--accent);
+}
+.side-panel-handle:focus-visible {
+  outline: none;
+}
+/* while dragging, the whole window shows the resize cursor and text is not selected */
+body.is-col-resizing,
+body.is-col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+/* chevrons that point back (hide a left panel, show a right one) */
+.side-panel .icon.is-back,
+.side-panel-hide .icon.is-back {
+  transform: rotate(180deg);
+}
+.side-panel-hide {
+  flex: none;
+}

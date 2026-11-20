@@ -259,6 +259,37 @@ pub struct NewSession {
     pub repo: Option<String>,
 }
 
+/// An image pasted into the chat, sent with the message (base64, as the API takes it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageIn {
+    /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
+    pub media_type: String,
+    pub data: String,
+}
+
+/// A script of the repo's package.json, run in the session's shell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoScript {
+    pub name: String,
+    /// What package.json runs for it.
+    pub command: String,
+    /// What to type in the shell: `pnpm run dev`.
+    pub run: String,
+}
+
+/// A command the chat's `/` offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlashCommand {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Where it comes from: `claude`, `repo`, `user`, `skill`, `plugin`.
+    pub source: String,
+}
+
 /// Permission modes the chat offers (the CLI's names).
 pub const MODES: [&str; 4] = ["default", "acceptEdits", "plan", "auto"];
 

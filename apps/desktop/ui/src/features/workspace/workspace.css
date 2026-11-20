@@ -2,22 +2,27 @@
 
 .ws {
   display: grid;
-  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   height: 100%;
   min-height: 0;
 }
 
 /* ---------- tree ---------- */
 
-.ws-tree {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
+/* the list's panel: drag its edge, hide it (shared/ui/SidePanel) */
+.ws-side {
   border-right: 1px solid var(--line);
   background: var(--column);
 }
+.ws-tree {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
 .ws-tree-top {
   display: flex;
+  gap: 6px;
   padding: 10px 10px 6px;
 }
 .ws-new {
@@ -69,7 +74,7 @@
 }
 .ws-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   width: 100%;
   min-height: 34px;
@@ -97,6 +102,19 @@
 .ws-row--session.is-nested {
   padding-left: 30px;
 }
+/* a task's sessions slide open and closed under it */
+.ws-task-kids {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-base) var(--ease-out);
+}
+.ws-task-kids.is-open {
+  grid-template-rows: 1fr;
+}
+.ws-task-kids > div {
+  min-height: 0;
+  overflow: hidden;
+}
 .ws-twist {
   display: grid;
   place-items: center;
@@ -114,7 +132,7 @@
 .ws-row-pick {
   display: flex;
   flex: 1;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   min-width: 0;
   padding: 2px 4px;
@@ -131,11 +149,11 @@
   flex-direction: column;
   min-width: 0;
 }
+/* names wrap onto more lines: nothing is cut off, however narrow the list */
 .ws-row-title {
-  overflow: hidden;
   font-size: 12.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 .ws-task-id {
   font-family: var(--mono);
@@ -143,17 +161,18 @@
   font-weight: 600;
 }
 .ws-row-meta {
-  overflow: hidden;
   font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 /* state dots: running pulses, waiting is the "needs you" yellow */
+/* on the first line of a name that wraps */
 .ws-dot {
   flex: none;
   width: 8px;
   height: 8px;
+  margin-top: 5px;
   border-radius: 50%;
   background: var(--st-idle);
 }
@@ -237,6 +256,10 @@
 }
 .ws-tabs .btn {
   gap: 6px;
+}
+/* VS Code at the far end of the views */
+.ws-tabs .ws-tabs-end {
+  margin-left: auto;
 }
 .ws-tabs button[aria-pressed="true"] {
   background: var(--fill);
@@ -325,54 +348,41 @@
 .ws-flow-steps .btn.is-blocked:hover {
   opacity: 0.8;
 }
-.ws-flow-confirm {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 16px;
-  margin: 0;
-}
-.ws-flow-confirm > span:first-child {
-  flex: 1 1 360px;
-}
-.ws-flow-confirm-actions {
-  display: flex;
-  gap: 8px;
-}
 .ws-step-label {
   align-self: flex-start;
   margin-bottom: -4px;
 }
 /* the header sits in the same centered column as the messages and the input: titles on the
    left, the session's buttons on the right */
+/* titles left, buttons right; when the pane is narrow the buttons go under the titles */
 .ws-chat-col.ws-chat-head-in {
   flex-direction: row;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  gap: 8px 16px;
 }
 .ws-chat-titles {
-  flex: 1;
+  flex: 1 1 260px;
   min-width: 0;
 }
+/* nothing is cut off: a long title or a long branch wraps */
 .ws-chat-titles h2 {
   margin: 0 0 3px;
-  overflow: hidden;
   font-size: 15px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
-/* always one line of one height (with or without the task chip), so the header keeps its
-   height from one session to the next */
+/* at least one line of one height (with or without the task chip), so the first message of a
+   draft moves nothing; it wraps rather than cut when the pane is narrow */
 .ws-chat-titles p {
   display: flex;
-  height: 20px;
-  flex-wrap: nowrap;
+  min-height: 20px;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 2px 10px;
   margin: 0;
-  overflow: hidden;
   font-size: 11.5px;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .ws-chat-branch {
   display: inline-flex;
@@ -591,6 +601,7 @@
 /* the extension's input: one rounded box, the text on top, the mode and the round button in
    a bar inside it */
 .ws-box {
+  position: relative;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--line-strong);
@@ -704,4 +715,197 @@
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }
+}
+
+/* ---------- Thay đổi, Cổng ---------- */
+
+.ws-tool-wrap {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+  animation: tab-in var(--dur-base) var(--ease-out);
+}
+.ws-tool-wrap > .task-pane {
+  padding: 14px 18px;
+}
+/* ---------- script của repo (tab Shell) ---------- */
+
+.ws-scripts {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 18px;
+  border-bottom: 1px solid var(--line);
+  animation: tab-in var(--dur-base) var(--ease-out);
+}
+/* the whole head line opens and closes the list */
+.ws-scripts-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ws-scripts-head .icon {
+  flex: none;
+  color: var(--text-dim);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.ws-scripts-head .icon.is-open {
+  transform: rotate(90deg);
+}
+.ws-scripts-head strong {
+  font-weight: 600;
+}
+.ws-scripts-head .faint {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-scripts-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-base) var(--ease-out);
+}
+.ws-scripts.is-open .ws-scripts-body {
+  grid-template-rows: 1fr;
+}
+.ws-scripts-body > div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  overflow: hidden;
+}
+.ws-scripts-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ws-script {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-width: 260px;
+  padding: 5px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.ws-script:hover {
+  border-color: var(--accent);
+}
+.ws-script-name {
+  font-weight: 600;
+}
+.ws-script-cmd {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.ws-scripts-about {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+/* ---------- ảnh gửi kèm, gợi ý @ và / ---------- */
+
+.ws-attach {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+.ws-attach-item {
+  position: relative;
+  width: 64px;
+  height: 64px;
+}
+.ws-attach-item img {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+/* always shown (not on hover): a round × at the corner */
+.ws-attach-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ws-suggest {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow-pop);
+  animation: tab-in var(--dur-fast) var(--ease-out);
+}
+.ws-suggest-head {
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+}
+.ws-suggest ul {
+  max-height: 260px;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+}
+.ws-suggest li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.ws-suggest li.is-active {
+  background: var(--fill-strong);
+}
+.ws-suggest-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ws-suggest-cmd {
+  font-weight: 600;
+}
+.ws-suggest-about {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

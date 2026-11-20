@@ -72,6 +72,9 @@ import type {
   TerminalFrame,
   TerminalKind,
   WorkspaceSnapshot,
+  ImageIn,
+  RepoScript,
+  SlashCommand,
   WorkspaceFlow,
   StepKind,
   CloseChoice,
@@ -420,8 +423,8 @@ export const getSessionChat = (id: string): Promise<SessionChat> =>
   call("session_chat", () => mockSessionChat(id), { id });
 /** Sends a message; the session starts or resumes first when nothing runs. `force` sends even
  *  though it looks open elsewhere (left behind by a crash). */
-export const sendToSession = (id: string, text: string, force = false): Promise<SessionView> =>
-  call("session_send", () => mockSessionSend(id, text), { id, text, force });
+export const sendToSession = (id: string, text: string, force = false, images: ImageIn[] = []): Promise<SessionView> =>
+  call("session_send", () => mockSessionSend(id, text), { id, text, force, images });
 /** Answers a permission, a question, a plan or folder trust. */
 export const answerSession = (id: string, askId: string, answer: AskAnswer): Promise<SessionView> =>
   call("session_answer", () => mockSessionAnswer(id, askId, answer), { id, askId, answer });
@@ -439,6 +442,59 @@ export const openSessionInVscode = (id: string): Promise<null> =>
   call("session_open_vscode", () => mockSessionOpenVscode(id), { id });
 /** Takes the session off the Workspace list (its transcript stays). */
 export const hideSession = (id: string): Promise<null> => call("session_hide", () => mockSessionHide(id), { id });
+/** What the session changed (a task's change since its base; a free session's uncommitted one). */
+export const getSessionDiff = (id: string): Promise<DiffView> =>
+  call("session_diff", () => mockTaskDiff(0, false), { id });
+/** Opens a file of the session's repo in VS Code, at `line`. */
+export const openSessionFile = (id: string, path: string, line?: number): Promise<null> =>
+  call("session_open_file", () => null, { id, path, line });
+/** Opens a file of the task's repo in VS Code (task window → Diff). */
+export const openTaskFile = (wpId: number, path: string, line?: number): Promise<null> =>
+  call("task_open_file", () => null, { wpId, path, line });
+/** Shows a changed file next to its version at `rev` (the diff's fork point) in VS Code's diff view. */
+export const compareSessionFile = (id: string, rev: string, path: string, oldPath?: string): Promise<null> =>
+  call("session_compare_file", () => null, { id, rev, path, oldPath });
+/** The same for the task window's Diff tab. */
+export const compareTaskFile = (wpId: number, rev: string, path: string, oldPath?: string): Promise<null> =>
+  call("task_compare_file", () => null, { wpId, rev, path, oldPath });
+/** Opens the session's repo folder in VS Code; the session stays in the app. */
+export const openSessionRepo = (id: string): Promise<null> => call("session_open_repo", () => null, { id });
+/** Repo files for `@` in the chat. */
+export const findSessionFiles = (id: string, query: string): Promise<string[]> =>
+  call("session_files", () => mockFiles(query), { id, query });
+/** Commands for `/` in the chat. */
+export const getSessionCommands = (id: string): Promise<SlashCommand[]> =>
+  call("session_commands", () => MOCK_COMMANDS, { id });
+/** The repo's package.json scripts. */
+export const getSessionScripts = (id: string): Promise<RepoScript[]> =>
+  call("session_scripts", () => MOCK_SCRIPTS, { id });
+/** A Windows notification for a session that started waiting (when those are on). */
+export const notifySessionWait = (id: string): Promise<null> => call("session_notify_wait", () => null, { id });
+/** A session's notification was clicked: open that session. */
+export const onSessionClicked = (handler: (id: string) => void): (() => void) =>
+  onEvent<string>("opw://open-session", handler);
+
+// ---------- preview data for the Workspace tools ----------
+
+const MOCK_FILES = [
+  "src/orders/order.repository.ts", "src/orders/order.service.ts", "src/orders/order.controller.ts",
+  "src/users/user.entity.ts", "src/app.module.ts", "test/orders.e2e-spec.ts", "package.json", "README.md",
+];
+function mockFiles(query: string): string[] {
+  const q = query.toLowerCase();
+  return MOCK_FILES.filter((f) => f.toLowerCase().includes(q)).slice(0, 30);
+}
+const MOCK_COMMANDS: SlashCommand[] = [
+  { name: "compact", description: "Tóm tắt hội thoại để có lại chỗ trong context", source: "claude" },
+  { name: "context", description: "Xem context của phiên đang dùng bao nhiêu", source: "claude" },
+  { name: "review-local", description: "Review the local change against the task", source: "repo" },
+  { name: "init", description: "Viết CLAUDE.md cho repo", source: "claude" },
+];
+const MOCK_SCRIPTS: RepoScript[] = [
+  { name: "dev", command: "nest start --watch", run: "pnpm run dev" },
+  { name: "test", command: "jest", run: "pnpm run test" },
+  { name: "lint", command: "eslint .", run: "pnpm run lint" },
+];
 /** Changes of sessions the app runs, as they happen. Returns the unsubscribe function. */
 export function onSessionPatch(handler: (patch: SessionPatch) => void): () => void {
   if (!isTauri()) return onMockSessionPatch(handler);
