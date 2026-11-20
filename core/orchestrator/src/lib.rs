@@ -25,6 +25,7 @@ pub mod pushcheck;
 pub mod quotagate;
 pub mod selftest;
 pub mod session_probe;
+pub mod sessions;
 pub mod start;
 pub mod steps;
 mod task_repo;
@@ -37,6 +38,9 @@ use std::time::Duration;
 
 use opw_config::{Config, secrets};
 use opw_context::BriefComment;
+use opw_domain::session::{
+    AskAnswer, NewSession, SessionChat, SessionView, WorkspaceSnapshot, WorkspaceTask,
+};
 use opw_domain::task::display_id;
 use opw_domain::view::{
     AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CloseChoice, CommentsView, DataMode,
@@ -53,6 +57,7 @@ use opw_tracker::{Comment, HttpTracker, TrackerApi, WorkPackage};
 use crate::alerts::{Alerts, NewAlert};
 use crate::flow::{CliLauncher, Flow, TaskCtx};
 use crate::live::{ClaudeProbe, CommentsSink, Live, LiveSettings, LiveState};
+use crate::sessions::Sessions;
 use crate::updater::Updater;
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -163,6 +168,8 @@ pub struct AppService {
     alerts: Arc<Alerts>,
     /// Models and effort levels of the CLIs on this machine (Settings → Các bước AI).
     models: models::Catalogs,
+    /// The Workspace: Claude Code sessions the app runs (PLAN.md §12 B).
+    sessions: Option<Sessions>,
 }
 
 impl AppService {
@@ -256,6 +263,11 @@ impl AppService {
             });
             Some(flow)
         });
+        let sessions = store.as_ref().zip(data_dir.as_ref()).map(|(store, dir)| {
+            let sessions = Sessions::new(store.clone(), dir.join("guard-hooks"));
+            sessions.start_janitor();
+            sessions
+        });
         let updater = Updater::start(config.update.clone(), CORE_VERSION);
         Self {
             config: Mutex::new(config),
@@ -269,6 +281,7 @@ impl AppService {
             flow,
             alerts,
             models: models::Catalogs::default(),
+            sessions,
         }
     }
 
@@ -1696,19 +1709,24 @@ impl AppService {
     /// AI steps running right now (the close dialog says how many).
     pub fn running_steps(&self) -> usize {
         self.flow.as_ref().map_or(0, Flow::running_count)
+            + self.sessions.as_ref().map_or(0, Sessions::running)
     }
 
     /// "Thoát hẳn": stop every running AI step (each process with what it started) and wait up
     /// to `wait` for them to end, so nothing keeps running after the app is gone. Returns how
     /// many were running.
     pub fn quit_flow(&self, wait: Duration) -> usize {
-        let Some(flow) = &self.flow else { return 0 };
+        let sessions = self.sessions.as_ref().map_or(0, Sessions::running);
+        if let Some(s) = &self.sessions {
+            s.shutdown(wait);
+        }
+        let Some(flow) = &self.flow else { return sessions };
         let stopped = flow.stop_all();
         let deadline = std::time::Instant::now() + wait;
         while flow.running_count() > 0 && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
-        stopped
+        stopped + sessions
     }
 
     /// Open `chrome://inspect/#remote-debugging`, where the user allows "Lấy issue" to connect.
@@ -2135,6 +2153,135 @@ impl AppService {
         if let Some(live) = &self.live {
             live.refresh();
         }
+    }
+}
+
+/// The Workspace (PLAN.md §12 B): sessions, their chat, what they ask.
+impl AppService {
+    fn sessions(&self) -> Result<&Sessions, ApiError> {
+        self.sessions.as_ref().ok_or_else(|| {
+            ApiError::new(
+                "storage",
+                self.store_error
+                    .clone()
+                    .unwrap_or_else(|| "Chưa mở được dữ liệu cục bộ".into()),
+            )
+        })
+    }
+
+    /// Where session changes go as they happen (the shell emits them to the window).
+    pub fn set_session_sink(&self, sink: sessions::PatchSink) {
+        if let Some(s) = &self.sessions {
+            s.set_sink(sink);
+        }
+    }
+
+    /// The tree: tasks in progress (with or without a session) and every session.
+    pub fn workspace_snapshot(&self) -> WorkspaceSnapshot {
+        let tasks = self
+            .active_rows()
+            .into_iter()
+            .map(|r| WorkspaceTask {
+                wp_id: r.wp_id,
+                task_id: r.display_id,
+                title: r.title,
+                project: r.project,
+                repo: r.repo,
+                branch: r.branch,
+            })
+            .collect();
+        WorkspaceSnapshot {
+            tasks,
+            sessions: self.sessions.as_ref().map(Sessions::list).unwrap_or_default(),
+        }
+    }
+
+    /// Repos "+ Phiên mới" offers: those of tasks in progress, those the config knows and the
+    /// git repos in the workspace folders.
+    pub fn workspace_repos(&self) -> Vec<String> {
+        let config = self.config();
+        let mut repos: Vec<String> = Vec::new();
+        let mut add = |r: String| {
+            if !r.trim().is_empty() && !repos.iter().any(|k| opw_config::same_path(k, &r)) {
+                repos.push(r);
+            }
+        };
+        for r in self.active_rows().into_iter().filter_map(|r| r.repo) {
+            add(r);
+        }
+        for r in known_repos(&config) {
+            add(r);
+        }
+        let roots: Vec<PathBuf> = config
+            .workspaces
+            .iter()
+            .map(|w| opw_config::expand_home(w))
+            .collect();
+        for p in opw_vcs::discover_repos(&roots, start::WORKSPACE_DEPTH) {
+            add(p.to_string_lossy().into_owned());
+        }
+        repos
+    }
+
+    /// A new session: the task's (`wpId`) in its repo, or one in `repo` without a task.
+    pub fn session_new(&self, req: &NewSession) -> Result<SessionView, ApiError> {
+        let sessions = self.sessions()?;
+        if let Some(wp_id) = req.wp_id {
+            let row = self
+                .store
+                .as_ref()
+                .and_then(|s| s.lock().ok()?.task(wp_id).ok().flatten())
+                .ok_or_else(task_not_found)?;
+            let repo = row.repo.ok_or_else(|| {
+                ApiError::new("session.repo", "Task chưa có repo: bấm Bắt đầu làm việc trước")
+            })?;
+            return sessions.create(Some(wp_id), &repo);
+        }
+        let repo = req.repo.as_deref().map(str::trim).unwrap_or_default();
+        if repo.is_empty() || !opw_config::expand_home(repo).is_dir() {
+            return Err(ApiError::new(
+                "session.repo",
+                format!("Không thấy thư mục {repo}"),
+            ));
+        }
+        sessions.create(None, repo)
+    }
+
+    pub fn session_chat(&self, id: &str) -> Result<SessionChat, ApiError> {
+        self.sessions()?.chat(id)
+    }
+
+    pub fn session_send(&self, id: &str, text: &str, force: bool) -> Result<SessionView, ApiError> {
+        self.sessions()?.send(id, text, force)
+    }
+
+    pub fn session_answer(
+        &self,
+        id: &str,
+        ask_id: &str,
+        answer: &AskAnswer,
+    ) -> Result<SessionView, ApiError> {
+        self.sessions()?.answer(id, ask_id, answer)
+    }
+
+    pub fn session_interrupt(&self, id: &str) -> Result<(), ApiError> {
+        self.sessions()?.interrupt(id)
+    }
+
+    pub fn session_set_mode(&self, id: &str, mode: &str) -> Result<SessionView, ApiError> {
+        self.sessions()?.set_mode(id, mode)
+    }
+
+    pub fn session_stop(&self, id: &str) -> Result<SessionView, ApiError> {
+        self.sessions()?.stop(id)
+    }
+
+    pub fn session_open_vscode(&self, id: &str) -> Result<(), ApiError> {
+        self.sessions()?.open_vscode(id)
+    }
+
+    pub fn session_hide(&self, id: &str) -> Result<(), ApiError> {
+        self.sessions()?.hide(id)
     }
 }
 

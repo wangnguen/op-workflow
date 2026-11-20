@@ -14,6 +14,8 @@ interface Props {
   now: number;
   demo: boolean;
   needsYou: boolean;
+  /** a Workspace session waits for an answer */
+  workspaceNeedsYou: boolean;
   /** unread alerts in the bell */
   unreadAlerts: number;
   onOpenTask: (wpId: number, tab: string | undefined) => void;
@@ -51,6 +53,7 @@ export function TopBar({
   now,
   demo,
   needsYou,
+  workspaceNeedsYou,
   unreadAlerts,
   onOpenTask,
   update,
@@ -83,6 +86,9 @@ export function TopBar({
           >
             {t.label}
             {t.key === "sessions" && needsYou && <span className="tab-dot" aria-label={vi.sessions.needsYou} />}
+            {t.key === "workspace" && workspaceNeedsYou && (
+              <span className="tab-dot" aria-label={vi.sessions.needsYou} />
+            )}
           </button>
         ))}
       </nav>

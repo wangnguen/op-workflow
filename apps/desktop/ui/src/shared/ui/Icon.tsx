@@ -23,6 +23,8 @@ const PATHS = {
   external: <path d="M13.5 4.5h6v6M19.5 4.5l-8 8M17.5 14v5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h5" />,
   pause: <path d="M9 6.5v11M15 6.5v11" />,
   play: <path d="M8.5 6v12l9.5-6z" />,
+  arrowUp: <path d="M12 19V5.5M6 11.5l6-6 6 6" />,
+  stop: <rect x={7} y={7} width={10} height={10} rx={1.5} />,
   dot: <circle cx={12} cy={12} r={3} />,
   alert: <path d="M12 4.5l8.5 15h-17zM12 10v4M12 16.8v.2" />,
   info: (

@@ -7,6 +7,7 @@ pub mod codex;
 pub mod env;
 pub mod procs;
 pub mod run;
+pub mod session_log;
 pub mod text;
 pub mod transcript;
 

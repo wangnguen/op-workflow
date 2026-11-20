@@ -2263,11 +2263,12 @@ fn run_summary(
     })
 }
 
-fn chat_item(i: transcript::Item) -> ChatItem {
+pub(crate) fn chat_item(i: transcript::Item) -> ChatItem {
     use transcript::ItemKind as K;
     ChatItem {
         kind: match i.kind {
             K::Prompt => ChatKind::Prompt,
+            K::User => ChatKind::User,
             K::Text => ChatKind::Text,
             K::Thinking => ChatKind::Thinking,
             K::Tool => ChatKind::Tool,

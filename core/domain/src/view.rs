@@ -1370,6 +1370,8 @@ pub struct RuleOption {
 pub enum ChatKind {
     /// What the app sent.
     Prompt,
+    /// What the user typed in a session (Workspace).
+    User,
     /// A message the AI wrote (markdown).
     Text,
     Thinking,

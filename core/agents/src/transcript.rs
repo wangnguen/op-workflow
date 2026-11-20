@@ -33,6 +33,8 @@ pub fn prompt_line(text: &str) -> String {
 pub enum ItemKind {
     /// What the app sent (stdin, or the slash command and its added instructions).
     Prompt,
+    /// A message the user typed in a session (Workspace chat).
+    User,
     /// A message the AI wrote (markdown).
     Text,
     /// Reasoning the CLI showed; Claude often hides it (empty text), then nothing is kept.
@@ -60,7 +62,7 @@ pub struct Item {
 }
 
 impl Item {
-    fn new(kind: ItemKind, text: String) -> Self {
+    pub(crate) fn new(kind: ItemKind, text: String) -> Self {
         Self {
             kind,
             text,
@@ -72,14 +74,14 @@ impl Item {
         }
     }
 
-    fn tool(name: &str, text: String) -> Self {
+    pub(crate) fn tool(name: &str, text: String) -> Self {
         Self {
             tool: Some(name.to_owned()),
             ..Self::new(ItemKind::Tool, text)
         }
     }
 
-    fn set_output(&mut self, text: &str) {
+    pub(crate) fn set_output(&mut self, text: &str) {
         let text = text.trim_end();
         let total = text.chars().count();
         if total > OUTPUT_MAX {
@@ -136,7 +138,7 @@ impl Builder {
     }
 }
 
-fn str_at<'a>(v: &'a Value, pointer: &str) -> &'a str {
+pub(crate) fn str_at<'a>(v: &'a Value, pointer: &str) -> &'a str {
     v.pointer(pointer).and_then(Value::as_str).unwrap_or_default()
 }
 
@@ -246,7 +248,7 @@ fn claude_line(b: &mut Builder, v: &Value) {
 }
 
 /// What a tool call works on, whole: the command, the path, `pattern in path`, the todo list.
-fn claude_tool_text(name: &str, input: &Value) -> String {
+pub fn claude_tool_text(name: &str, input: &Value) -> String {
     match name {
         "Grep" => {
             let pattern = str_at(input, "/pattern");
@@ -294,7 +296,7 @@ fn claude_tool_text(name: &str, input: &Value) -> String {
 }
 
 /// `content` of a tool_result: a string, or blocks whose `text` parts are joined.
-fn result_text(content: &Value) -> String {
+pub(crate) fn result_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
         Value::Array(blocks) => blocks

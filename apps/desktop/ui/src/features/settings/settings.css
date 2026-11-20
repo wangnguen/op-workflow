@@ -563,11 +563,16 @@
   min-width: 88px;
 }
 
-.set-step-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 10px;
+/* one step: two columns (Agent | Model, Effort | Quyền, Trần chi phí | Thời gian), each control
+   full width with its hint under it */
+.set-step-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+}
+/* the limits form's two cells take their places in the grid */
+.set-step-limits {
+  display: contents;
 }
 .set-step-field {
   display: flex;
@@ -576,35 +581,58 @@
   min-width: 0;
   font-size: 11.5px;
 }
-.set-step-field--grow {
-  flex: 1;
-  min-width: 200px;
-}
-.set-step-field select {
+.set-step-field select,
+.set-step-field .input {
+  width: 100%;
   height: 32px;
-  min-width: 140px;
+}
+.set-step-field .seg {
+  align-self: flex-start;
 }
 .set-step-field .chip {
   align-self: flex-start;
   margin: 7px 0;
 }
-/* the model's line and the agent's notes: two lines kept, so switching Claude ↔ Codex (which
-   adds or drops a note) moves nothing below */
-.set-step-about {
-  min-height: 35px;
+/* two lines kept under every control, so a longer note (another mode, a model's line, an
+   effort reset) moves nothing below */
+.set-step-hint {
+  min-height: 2lh;
 }
-/* Quyền: a fixed width in every step, what the mode does beside it */
-.set-step-mode {
-  flex-wrap: nowrap;
+/* a mode's note (Codex's sandbox modes) or a model's line with the hint runs to three lines */
+.set-step-hint--long {
+  min-height: 3lh;
+}
+.set-step-inline {
+  display: flex;
+  gap: 8px;
+}
+.set-step-inline .input {
+  flex: 1;
+  min-width: 0;
+}
+.set-step-inline .btn {
+  flex: none;
+  height: 32px;
+}
+/* the agent's notes (what Codex cannot do here…): kept whenever switching the agent can bring one */
+.set-step-notes {
+  min-height: 2lh;
+}
+@media (max-width: 640px) {
+  .set-step-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 /* the Quyền picker: a select look, every mode with what it does under its name */
 .mode-select {
   position: relative;
 }
-.mode-select-btn {
+/* .input (kit.css, loaded last) sets the background, padding and height, so these need both
+   classes; the width comes from where it sits */
+.input.mode-select-btn {
   display: flex;
   align-items: center;
-  width: 240px;
+  width: 100%;
   height: 32px;
   padding-right: 28px;
   text-align: left;
@@ -686,27 +714,13 @@
     animation: none;
   }
 }
-.set-step-mode-hint {
-  flex: 1;
-  min-width: 0;
-  /* two lines: every mode's note fits, so picking another one moves nothing below */
-  min-height: 35px;
-  display: flex;
-  align-items: center;
-}
-
 .set-mcp { padding: 12px 16px; }
 .set-mcp-label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-.set-mcp-hint { margin: 6px 0 0; min-height: 3lh; }
+/* on and off notes share one cell, so switching moves nothing */
+.set-mcp-hint { margin: 6px 0 0; }
 .set-mcp-hints { display: grid; }
 .set-mcp-hints > p { grid-area: 1 / 1; }
-.set-save-status { min-height: 3lh; margin: 6px 0; }
-.set-choice-hint { min-height: 3lh; max-width: 250px; white-space: normal; }
-.set-step-limits { align-items: flex-start; }
-.set-step-limits .input { width: 100%; }
-.set-step-limits > .set-step-field { flex: 1; min-width: 160px; }
-.set-step-limits > button { margin-top: 20px; }
-.set-reset-note { min-height: 2lh; }
+.set-save-status { min-height: 1lh; margin: 0 0 8px; }
 
 /* Repo & nhánh → Thư viện harness: the folder, changed in place */
 .set-harness {

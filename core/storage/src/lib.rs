@@ -104,6 +104,22 @@ const MIGRATIONS: &[&str] = &[
                      WHERE c.wp_id = step_run.wp_id
                        AND c.step = 'crossReview'
                        AND c.started_at < step_run.started_at);",
+    // 7: Workspace sessions (PLAN.md §12 B): the Claude Code sessions the app runs. What was said
+    // lives in the CLI's own transcript; this only knows which session belongs where.
+    "CREATE TABLE session (
+        id          TEXT PRIMARY KEY,
+        wp_id       INTEGER,
+        repo        TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        title       TEXT NOT NULL DEFAULT '',
+        mode        TEXT,
+        model       TEXT,
+        cost_usd    REAL NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        hidden_at   TEXT
+     );
+     CREATE INDEX session_wp ON session(wp_id);",
 ];
 
 /// Schema version this build understands.
@@ -137,6 +153,39 @@ fn task_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         base: r.get(6)?,
         column: r.get(7)?,
         updated_at: r.get(8)?,
+    })
+}
+
+/// One Workspace session (PLAN.md §12 B). `kind`: `main` (a task's) or `free`; `mode`: the
+/// permission mode chosen for its next start (NULL = the CLI's default).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionRow {
+    pub id: String,
+    pub wp_id: Option<u64>,
+    pub repo: String,
+    pub kind: String,
+    pub title: String,
+    pub mode: Option<String>,
+    pub model: Option<String>,
+    pub cost_usd: f64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+const SESSION_COLUMNS: &str = "id, wp_id, repo, kind, title, mode, model, cost_usd, created_at, updated_at";
+
+fn session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
+    Ok(SessionRow {
+        id: r.get(0)?,
+        wp_id: r.get::<_, Option<i64>>(1)?.and_then(|n| u64::try_from(n).ok()),
+        repo: r.get(2)?,
+        kind: r.get(3)?,
+        title: r.get(4)?,
+        mode: r.get(5)?,
+        model: r.get(6)?,
+        cost_usd: r.get(7)?,
+        created_at: r.get(8)?,
+        updated_at: r.get(9)?,
     })
 }
 
@@ -662,6 +711,61 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Insert a session, or update everything but its creation time.
+    pub fn save_session(&self, s: &SessionRow) -> StorageResult<()> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO session ({SESSION_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(id) DO UPDATE SET
+                   wp_id = excluded.wp_id, repo = excluded.repo, kind = excluded.kind,
+                   title = excluded.title, mode = excluded.mode, model = excluded.model,
+                   cost_usd = excluded.cost_usd, updated_at = excluded.updated_at"
+            ),
+            params![
+                s.id,
+                opt_u64(s.wp_id),
+                s.repo,
+                s.kind,
+                s.title,
+                s.mode,
+                s.model,
+                s.cost_usd,
+                s.created_at,
+                s.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Sessions not hidden, the most recently used first.
+    pub fn sessions(&self) -> StorageResult<Vec<SessionRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM session WHERE hidden_at IS NULL
+             ORDER BY updated_at DESC, created_at DESC"
+        ))?;
+        let rows = stmt.query_map([], session_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn session(&self, id: &str) -> StorageResult<Option<SessionRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {SESSION_COLUMNS} FROM session WHERE id = ?1"),
+                [id],
+                session_row,
+            )
+            .optional()?)
+    }
+
+    /// Take a session off the Workspace list (its transcript stays with the CLI).
+    pub fn hide_session(&self, id: &str, at: &str) -> StorageResult<bool> {
+        let n = self
+            .conn
+            .execute("UPDATE session SET hidden_at = ?2 WHERE id = ?1", params![id, at])?;
+        Ok(n > 0)
+    }
+
     pub fn upsert_finding(&self, f: &FindingRow) -> StorageResult<()> {
         self.conn.execute(
             &format!(
@@ -712,6 +816,47 @@ mod tests {
             column: column.into(),
             updated_at: "2026-11-13T08:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn sessions_save_update_list_and_hide() {
+        let store = Store::open_in_memory().unwrap();
+        let mut s = SessionRow {
+            id: "a1".into(),
+            wp_id: Some(187716),
+            repo: "C:/code/web".into(),
+            kind: "main".into(),
+            title: String::new(),
+            mode: None,
+            model: None,
+            cost_usd: 0.0,
+            created_at: "2026-11-20T08:00:00Z".into(),
+            updated_at: "2026-11-20T08:00:00Z".into(),
+        };
+        store.save_session(&s).unwrap();
+        let free = SessionRow {
+            id: "b2".into(),
+            wp_id: None,
+            kind: "free".into(),
+            updated_at: "2026-11-20T09:00:00Z".into(),
+            ..s.clone()
+        };
+        store.save_session(&free).unwrap();
+        s.title = "Sửa lỗi".into();
+        s.mode = Some("plan".into());
+        s.cost_usd = 0.25;
+        s.updated_at = "2026-11-20T10:00:00Z".into();
+        store.save_session(&s).unwrap();
+        let list = store.sessions().unwrap();
+        assert_eq!(
+            list.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["a1", "b2"]
+        );
+        assert_eq!(list[0], s);
+        assert_eq!(list[1].wp_id, None);
+        assert!(store.hide_session("a1", "2026-11-20T11:00:00Z").unwrap());
+        assert_eq!(store.sessions().unwrap().len(), 1);
+        assert_eq!(store.session("a1").unwrap().unwrap().title, "Sửa lỗi");
     }
 
     #[test]

@@ -840,7 +840,7 @@ export interface RuleOption {
   allowed: boolean;
 }
 
-export type ChatKind = "prompt" | "text" | "thinking" | "tool" | "end" | "error";
+export type ChatKind = "prompt" | "user" | "text" | "thinking" | "tool" | "end" | "error";
 
 /** One item of the Chat tab. */
 export interface ChatItem {
@@ -1067,6 +1067,124 @@ export interface FindingDecision {
   reason?: string;
 }
 
+// ---------- Workspace sessions (PLAN.md §12 B) ----------
+
+/** main = a task's session (the newest is the task's current one); free = in a repo, no task. */
+export type SessionKind = "main" | "free";
+/** idle: nothing runs (the next message starts or resumes it) · running: a turn runs ·
+ *  waiting: it waits for you · outside: open in VS Code or a terminal, the app only shows it */
+export type SessionState = "idle" | "running" | "waiting" | "outside";
+
+export interface SessionView {
+  /** Claude Code session id */
+  id: string;
+  kind: SessionKind;
+  wpId?: number;
+  taskId?: string;
+  title: string;
+  repo: string;
+  branch?: string;
+  state: SessionState;
+  /** the app runs a process for it now */
+  live: boolean;
+  /** where it is open while the app only shows it ("VS Code", "terminal") */
+  outside?: string;
+  /** permission mode in effect, else the one chosen for the next start */
+  mode?: string;
+  model?: string;
+  costUsd: number;
+  /** it has a transcript (a message was sent at least once) */
+  started: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** why the last start or run failed */
+  error?: string;
+}
+
+/** A task in progress, in the tree even before it has a session. */
+export interface WorkspaceTask {
+  wpId: number;
+  taskId: string;
+  title: string;
+  project: string;
+  repo?: string;
+  branch?: string;
+}
+
+export interface WorkspaceSnapshot {
+  tasks: WorkspaceTask[];
+  /** newest first */
+  sessions: SessionView[];
+}
+
+/** permission: a tool call needs approval · question: AskUserQuestion · plan: ExitPlanMode ·
+ *  trust: Claude Code has no trust record for the folder yet */
+export type AskKind = "permission" | "question" | "plan" | "trust";
+
+export interface AskOption {
+  label: string;
+  description?: string;
+}
+
+export interface AskQuestion {
+  question: string;
+  header?: string;
+  options: AskOption[];
+  multiSelect: boolean;
+}
+
+/** Something the session waits for you to answer. */
+export interface SessionAsk {
+  id: string;
+  kind: AskKind;
+  /** tool name; empty for trust */
+  tool: string;
+  /** the command, path or folder */
+  summary: string;
+  detail?: string;
+  /** the rule "always allow" would add, in words; absent = not offered */
+  always?: string;
+  questions?: AskQuestion[];
+  /** the plan to approve (markdown) */
+  plan?: string;
+}
+
+export type AskAnswer =
+  | { kind: "allow"; always?: boolean }
+  | { kind: "deny"; message?: string }
+  | { kind: "answers"; answers: Record<string, string> }
+  | { kind: "approvePlan"; mode?: string }
+  | { kind: "rejectPlan"; feedback?: string }
+  | { kind: "trust"; trust: boolean };
+
+export interface SessionChat {
+  session: SessionView;
+  items: ChatItem[];
+  dropped: number;
+  /** text the AI is writing right now */
+  partial?: string;
+  asks?: SessionAsk[];
+  /** grows with every change */
+  seq: number;
+}
+
+/** A change pushed while a session runs: `items` replace the chat's items from `from` on. */
+export interface SessionPatch {
+  id: string;
+  seq: number;
+  from: number;
+  items: ChatItem[];
+  dropped: number;
+  partial?: string;
+  asks?: SessionAsk[];
+  session: SessionView;
+}
+
+export interface NewSession {
+  wpId?: number;
+  repo?: string;
+}
+
 // ---------- commands ----------
 
 /** Tauri command names → result type. Arguments are listed in `CommandArgs`. */
@@ -1124,6 +1242,17 @@ export interface Commands {
   set_repo_checks: SettingsView;
   forget_repo_pair: SettingsView;
   open_task_path: null;
+  workspace_snapshot: WorkspaceSnapshot;
+  workspace_repos: string[];
+  session_new: SessionView;
+  session_chat: SessionChat;
+  session_send: SessionView;
+  session_answer: SessionView;
+  session_interrupt: null;
+  session_set_mode: SessionView;
+  session_stop: SessionView;
+  session_open_vscode: null;
+  session_hide: null;
 }
 
 export interface CommandArgs {
@@ -1168,4 +1297,13 @@ export interface CommandArgs {
   set_repo_checks: { repo: string; commands: string[] };
   forget_repo_pair: { pair: RepoPair };
   open_task_path: { wpId: number; path: string };
+  session_new: { request: NewSession };
+  session_chat: { id: string };
+  session_send: { id: string; text: string; force?: boolean };
+  session_answer: { id: string; askId: string; answer: AskAnswer };
+  session_interrupt: { id: string };
+  session_set_mode: { id: string; mode: string };
+  session_stop: { id: string };
+  session_open_vscode: { id: string };
+  session_hide: { id: string };
 }

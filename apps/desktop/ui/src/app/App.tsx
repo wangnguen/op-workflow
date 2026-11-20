@@ -5,6 +5,7 @@ import {
   getBoard,
   getOrbit,
   getUpdateStatus,
+  getWorkspace,
   isMockMode,
   markAlertsRead,
   onAlertClicked,
@@ -16,7 +17,8 @@ import { CommentsPeek } from "../features/board/CommentsPeek";
 import { TaskBoard } from "../features/board/TaskBoard";
 import { SessionsView } from "../features/sessions/SessionsView";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
-import { WorkspacePlaceholder } from "../features/workspace/WorkspacePlaceholder";
+import type { Selection } from "../features/workspace/chatState";
+import { WorkspaceView } from "../features/workspace/WorkspaceView";
 import { TaskWindow } from "../features/task/TaskWindow";
 import { asTab, type TaskTab } from "../features/task/taskTabs";
 import { useNow, usePolling } from "../shared/hooks";
@@ -38,17 +40,22 @@ export function App() {
   const [peeking, setPeeking] = useState<{ wpId: number; taskId: string; title: string }>();
   // the window's X asked what to do (`onClose` = ask): AI steps running at that moment
   const [closing, setClosing] = useState<number>();
+  // the chat picked in Workspace, kept while other tabs are shown
+  const [wsPicked, setWsPicked] = useState<Selection>();
   const board = usePolling(getBoard, POLL_MS);
+  const workspace = usePolling(getWorkspace, POLL_MS);
   const orbit = usePolling(getOrbit, POLL_MS);
   const info = usePolling(getAppInfo, INFO_POLL_MS);
   const update = usePolling(getUpdateStatus, UPDATE_POLL_MS);
   const now = useNow(1000);
   const { refresh: refreshBoard } = board;
   const { refresh: refreshOrbit } = orbit;
+  const { refresh: refreshWorkspace } = workspace;
   const refreshAll = useCallback(() => {
     refreshBoard();
     refreshOrbit();
-  }, [refreshBoard, refreshOrbit]);
+    refreshWorkspace();
+  }, [refreshBoard, refreshOrbit, refreshWorkspace]);
   const openRelease = useCallback(() => void openReleasePage().catch(() => setSettingsOpen(true)), []);
   /** A task from the bell or a clicked notification: its window, or its comments while it is
    *  still in the Inbox (no task window yet). */
@@ -85,6 +92,7 @@ export function App() {
         now={now}
         demo={isMockMode() || board.data?.mode === "demo"}
         needsYou={[orbit.data?.active, ...(orbit.data?.others ?? [])].some((s) => s?.gate !== undefined)}
+        workspaceNeedsYou={workspace.data?.sessions.some((s) => s.state === "waiting") ?? false}
         unreadAlerts={board.data?.unreadAlerts ?? 0}
         onOpenTask={openTask}
         update={update.data}
@@ -98,7 +106,14 @@ export function App() {
           {tab === "task" && board.data && (
             <TaskBoard board={board.data} onSettings={() => setSettingsOpen(true)} onChanged={refreshAll} />
           )}
-          {tab === "workspace" && <WorkspacePlaceholder />}
+          {tab === "workspace" && (
+            <WorkspaceView
+              snapshot={workspace.data}
+              selected={wsPicked}
+              onSelect={setWsPicked}
+              onChanged={refreshAll}
+            />
+          )}
           {tab === "sessions" && (
             <SessionsView snapshot={orbit.data} board={board.data} now={now} onChanged={refreshAll} />
           )}

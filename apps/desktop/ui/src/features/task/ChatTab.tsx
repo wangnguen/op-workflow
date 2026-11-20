@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef } from "react";
 import { agentLabel, stepLabel, vi } from "../../i18n/vi";
 import { POLL_MS, getStepChat } from "../../ipc/client";
-import type { ChatItem, RunSummary, TaskDetail } from "../../ipc/types";
+import type { RunSummary, TaskDetail } from "../../ipc/types";
 import { formatHourMinute } from "../../shared/format";
 import { usePolling } from "../../shared/hooks";
-import { Markdown } from "../../shared/Markdown";
 import { modelText } from "../../shared/models";
 import { Icon } from "../../shared/ui/Icon";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
-import { chatRun, outputHead } from "./runs";
+import { ChatItemView } from "../chat/ChatItems";
+import { chatRun } from "./runs";
 
 const t = vi.flow.chat;
 const tp = vi.flow.progress;
@@ -99,72 +99,9 @@ function ChatBody({ detail: d, run, busy, onPick, onResume }: { detail: TaskDeta
         {!data && !polled.error && <p className="dim">{t.loading}</p>}
         {data?.missing && <p className="dim">{t.missing}</p>}
         {data && data.dropped > 0 && <p className="faint">{t.dropped(data.dropped)}</p>}
-        {data?.items.map((item, i) => <Item key={i} item={item} />)}
+        {data?.items.map((item, i) => <ChatItemView key={i} item={item} />)}
         {live && !stale && <p className="faint chat-waiting">{t.waiting}</p>}
       </div>
-    </div>
-  );
-}
-
-function Item({ item }: { item: ChatItem }) {
-  switch (item.kind) {
-    case "prompt":
-      return (
-        <details className="chat-item chat-prompt">
-          <summary>{t.prompt}</summary>
-          <pre className="task-text">{item.text}</pre>
-        </details>
-      );
-    case "text":
-      return (
-        <div className="chat-item chat-text">
-          <Markdown text={item.text} className="task-md" />
-        </div>
-      );
-    case "thinking":
-      return (
-        <details className="chat-item chat-thinking">
-          <summary>{t.thinking}</summary>
-          <p>{item.text}</p>
-        </details>
-      );
-    case "tool":
-      return <ToolItem item={item} />;
-    case "end":
-      return (
-        <div className={`chat-end${item.failed ? " is-failed" : ""}`}>
-          {(item.tool && t.end[item.tool]) ?? (item.tool ? t.endOther(item.tool) : t.end.success)}
-          {item.text && <p>{item.text}</p>}
-        </div>
-      );
-    case "error":
-      return <p className="note note--error chat-item">{item.text}</p>;
-  }
-}
-
-function ToolItem({ item }: { item: ChatItem }) {
-  const peek = item.output ? outputHead(item, 1).head : "";
-  return (
-    <div className={`chat-tool${item.failed ? " is-failed" : ""}${item.denied ? " is-denied" : ""}`}>
-      <div className="chat-tool-head">
-        <span className="chat-tool-name">{item.tool}</span>
-        {item.text && <span className="mono chat-tool-input">{item.text}</span>}
-        {item.denied && <span className="chip chip--warn">{t.denied}</span>}
-        {item.failed && !item.denied && <span className="chip chip--failed">{t.failed}</span>}
-      </div>
-      {item.denied && <p className="chat-tool-why">{item.denied}</p>}
-      {item.output !== undefined && item.output !== "" && (
-        <details className="chat-tool-out">
-          <summary>
-            {t.output}
-            {peek && <span className="mono faint chat-tool-peek">{peek}</span>}
-          </summary>
-          <pre className="chat-tool-pre">
-            {item.output}
-            {item.outputCut ? `\n${t.more(item.outputCut)}` : ""}
-          </pre>
-        </details>
-      )}
     </div>
   );
 }

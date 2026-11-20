@@ -8,6 +8,7 @@
 mod alerts_api;
 mod app_api;
 mod flow_api;
+mod session_api;
 mod settings_api;
 mod start_api;
 mod toast;
@@ -68,6 +69,7 @@ fn main() {
             // opens the database (it would mark the running app's step as interrupted and its
             // run as failed) or starts its own Codex app-server and Claude probes.
             app.manage(opw_orchestrator::AppService::start());
+            session_api::install(app.handle(), &app.state::<opw_orchestrator::AppService>());
             // no tray (e.g. a shell without one) must not keep the app from opening
             if let Err(e) = tray::install(app) {
                 eprintln!("tray icon unavailable: {e}");
@@ -142,6 +144,17 @@ fn main() {
             alerts_api::set_notify,
             window_api::close_window,
             window_api::set_on_close,
+            session_api::workspace_snapshot,
+            session_api::workspace_repos,
+            session_api::session_new,
+            session_api::session_chat,
+            session_api::session_send,
+            session_api::session_answer,
+            session_api::session_interrupt,
+            session_api::session_set_mode,
+            session_api::session_stop,
+            session_api::session_open_vscode,
+            session_api::session_hide,
         ])
         .build(tauri::generate_context!())
         .expect("error while building op-workflow")

@@ -47,7 +47,27 @@ import {
   mockTaskComments,
   mockTaskDiff,
 } from "./mockTask";
+import {
+  mockSessionAnswer,
+  mockSessionChat,
+  mockSessionHide,
+  mockSessionInterrupt,
+  mockSessionNew,
+  mockSessionOpenVscode,
+  mockSessionSend,
+  mockSessionSetMode,
+  mockSessionStop,
+  mockWorkspace,
+  mockWorkspaceRepos,
+  onMockSessionPatch,
+} from "./mockWorkspace";
 import type {
+  AskAnswer,
+  NewSession,
+  SessionChat,
+  SessionPatch,
+  SessionView,
+  WorkspaceSnapshot,
   CloseChoice,
   AlertView,
   ApiError,
@@ -287,6 +307,45 @@ export const onOpenQuota = (handler: () => void): (() => void) => onEvent("opw:/
  *  Returns the unsubscribe function. */
 export const onAlertClicked = (handler: (alert: AlertView) => void): (() => void) =>
   onEvent<AlertView>("opw://open-alert", handler);
+
+// ---------- Workspace sessions (PLAN.md §12 B) ----------
+
+/** The tree: tasks in progress and every session with its state. */
+export const getWorkspace = (): Promise<WorkspaceSnapshot> => call("workspace_snapshot", mockWorkspace);
+/** Repos "+ Phiên mới" offers (scans the workspace folders). */
+export const getWorkspaceRepos = (): Promise<string[]> => call("workspace_repos", mockWorkspaceRepos);
+/** A task's new session, or one in a repo without a task. */
+export const newSession = (request: NewSession): Promise<SessionView> =>
+  call("session_new", () => mockSessionNew(request), { request });
+/** Everything the chat pane shows. */
+export const getSessionChat = (id: string): Promise<SessionChat> =>
+  call("session_chat", () => mockSessionChat(id), { id });
+/** Sends a message; the session starts or resumes first when nothing runs. `force` sends even
+ *  though it looks open elsewhere (left behind by a crash). */
+export const sendToSession = (id: string, text: string, force = false): Promise<SessionView> =>
+  call("session_send", () => mockSessionSend(id, text), { id, text, force });
+/** Answers a permission, a question, a plan or folder trust. */
+export const answerSession = (id: string, askId: string, answer: AskAnswer): Promise<SessionView> =>
+  call("session_answer", () => mockSessionAnswer(id, askId, answer), { id, askId, answer });
+/** Stops the running turn (the session stays open). */
+export const interruptSession = (id: string): Promise<null> =>
+  call("session_interrupt", () => mockSessionInterrupt(id), { id });
+/** Permission mode now (if it runs) and for every later start. */
+export const setSessionMode = (id: string, mode: string): Promise<SessionView> =>
+  call("session_set_mode", () => mockSessionSetMode(id, mode), { id, mode });
+/** Ends the session's process here; the next message resumes it. */
+export const stopSession = (id: string): Promise<SessionView> =>
+  call("session_stop", () => mockSessionStop(id), { id });
+/** Gives the session to VS Code: the app stops it, opens the repo's window, then the session. */
+export const openSessionInVscode = (id: string): Promise<null> =>
+  call("session_open_vscode", () => mockSessionOpenVscode(id), { id });
+/** Takes the session off the Workspace list (its transcript stays). */
+export const hideSession = (id: string): Promise<null> => call("session_hide", () => mockSessionHide(id), { id });
+/** Changes of sessions the app runs, as they happen. Returns the unsubscribe function. */
+export function onSessionPatch(handler: (patch: SessionPatch) => void): () => void {
+  if (!isTauri()) return onMockSessionPatch(handler);
+  return onEvent<SessionPatch>("opw://session", handler);
+}
 
 // ---------- update check ----------
 

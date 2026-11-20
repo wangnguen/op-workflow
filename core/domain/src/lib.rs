@@ -5,6 +5,7 @@
 
 pub mod error;
 pub mod finding;
+pub mod session;
 pub mod task;
 pub mod view;
 pub mod workflow;

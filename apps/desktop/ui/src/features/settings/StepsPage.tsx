@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { agentLabel, stepHint, stepLabel, vi } from "../../i18n/vi";
 import { errorMessage, setStepChoice, setVerifyMcp, setStepLimits } from "../../ipc/client";
 import type { AgentCatalog, AgentKind, SettingsView, StepChoiceRequest, StepModels, StepSetting } from "../../ipc/types";
@@ -137,6 +137,9 @@ function StepRow({ number, row, catalog, saved, onSave, onSaveLimits }: {
   const entry = modelEntry(catalog, row.model);
   const loading = catalog === undefined;
   const about = entry?.description ? `${entry.label}: ${entry.description}.` : undefined;
+  const notes = agentNotes(row).join(" ");
+  // room for the notes kept whenever switching the agent can bring one, so nothing below moves
+  const mayNote = notes !== "" || (row.agentChoice && agentNotes({ ...row, agent: "codex" }).length > 0);
   const history = t.history(
     row.runs,
     row.avgCostUsd !== undefined ? formatUsd(row.avgCostUsd) : undefined,
@@ -154,7 +157,8 @@ function StepRow({ number, row, catalog, saved, onSave, onSaveLimits }: {
           {saved && <span className="set-ok"> · {t.saved}</span>}
         </span>
       </div>
-      <div className="set-step-controls">
+      {/* two columns, every hint under its own control: Agent | Model, Effort | Quyền, limits */}
+      <div className="set-step-grid">
         <label className="set-step-field">
           <span className="faint">{t.agent}</span>
           {row.agentChoice ? (
@@ -170,9 +174,9 @@ function StepRow({ number, row, catalog, saved, onSave, onSaveLimits }: {
           ) : (
             <span className={`chip chip--${agent}`}>{agentLabel[agent]}</span>
           )}
-          <span className="set-row-hint set-choice-hint">{t.agentHint}</span>
+          <span className="set-row-hint set-step-hint">{t.agentHint}</span>
         </label>
-        <label className="set-step-field set-step-field--grow">
+        <label className="set-step-field">
           <span className="faint">{t.model}</span>
           <select
             className="input"
@@ -187,7 +191,7 @@ function StepRow({ number, row, catalog, saved, onSave, onSaveLimits }: {
               </option>
             ))}
           </select>
-          <span className="set-row-hint set-choice-hint">{t.modelHint}</span>
+          <span className="set-row-hint set-step-hint set-step-hint--long">{about ? `${about} ${t.modelHint}` : t.modelHint}</span>
         </label>
         <label className="set-step-field">
           <span className="faint">{t.effort}</span>
@@ -207,12 +211,10 @@ function StepRow({ number, row, catalog, saved, onSave, onSaveLimits }: {
               </option>
             ))}
           </select>
-          <span className="set-row-hint set-choice-hint">{t.effortHint}</span>
+          {/* a model without the old effort says so here, in the hint's place */}
+          <span className={`set-row-hint set-step-hint${resetNote ? " set-warn" : ""}`}>{resetNote ?? t.effortHint}</span>
         </label>
-      </div>
-      {/* its own row in every step, so all rows look alike whatever the mode's name */}
-      <div className="set-step-controls set-step-mode">
-        <div className="set-step-field set-step-field--mode">
+        <div className="set-step-field">
           <span className="faint">{t.permission}</span>
           <ModeSelect
             value={row.permissionMode ?? ""}
@@ -225,12 +227,11 @@ function StepRow({ number, row, catalog, saved, onSave, onSaveLimits }: {
               send({ permissionMode: mode });
             }}
           />
+          <span className="set-row-hint set-step-hint set-step-hint--long">{modeHint(row)}</span>
         </div>
-        <span className="set-row-hint set-step-mode-hint">{modeHint(row)}</span>
+        <StepLimits key={`${row.maxBudgetUsd}:${row.timeoutMin}`} row={row} onSave={onSaveLimits} />
       </div>
-      <StepLimits key={`${row.maxBudgetUsd}:${row.timeoutMin}`} row={row} onSave={onSaveLimits} />
-      <span className="set-row-hint set-warn set-reset-note">{resetNote ?? "\u00a0"}</span>
-      <span className="set-row-hint set-step-about">{[about, ...agentNotes(row)].filter(Boolean).join(" ")}</span>
+      {mayNote && <span className="set-row-hint set-step-notes">{notes || "\u00a0"}</span>}
     </div>
   );
 }
@@ -238,8 +239,10 @@ function StepRow({ number, row, catalog, saved, onSave, onSaveLimits }: {
 function StepLimits({ row, onSave }: { row: StepSetting; onSave: (c: { step: StepSetting["step"]; maxBudgetUsd?: number; timeoutMin?: number }) => void }) {
   const [budget, setBudget] = useState(row.maxBudgetUsd?.toString() ?? "");
   const [minutes, setMinutes] = useState(row.timeoutMin?.toString() ?? "");
+  const minutesId = useId();
+  // the form's two cells sit in the step's grid like the controls above
   return (
-    <form className="set-step-controls set-step-limits" onSubmit={(e) => {
+    <form className="set-step-limits" onSubmit={(e) => {
       e.preventDefault();
       onSave({ step: row.step, maxBudgetUsd: budget ? Number(budget) : undefined, timeoutMin: minutes ? Number(minutes) : undefined });
     }}>
@@ -247,15 +250,17 @@ function StepLimits({ row, onSave }: { row: StepSetting; onSave: (c: { step: Ste
         <span className="faint">{t.budget}</span>
         <input className="input" type="number" min="0.01" step="0.01" value={budget} placeholder={String(row.defaultBudgetUsd ?? "")}
           onChange={(e) => setBudget(e.target.value)} />
-        <span className="set-row-hint set-choice-hint">{t.budgetHint}</span>
+        <span className="set-row-hint set-step-hint">{t.budgetHint}</span>
       </label>
-      <label className="set-step-field">
-        <span className="faint">{t.timeout}</span>
-        <input className="input" type="number" min="1" max="4294967295" step="1" value={minutes} placeholder={String(row.defaultTimeoutMin ?? "")}
-          onChange={(e) => setMinutes(e.target.value)} />
-        <span className="set-row-hint set-choice-hint">{t.timeoutHint}</span>
-      </label>
-      <button className="btn btn--sm" type="submit">{t.saveLimits}</button>
+      <div className="set-step-field">
+        <label className="faint" htmlFor={minutesId}>{t.timeout}</label>
+        <div className="set-step-inline">
+          <input id={minutesId} className="input" type="number" min="1" max="4294967295" step="1" value={minutes} placeholder={String(row.defaultTimeoutMin ?? "")}
+            onChange={(e) => setMinutes(e.target.value)} />
+          <button className="btn btn--sm" type="submit">{t.saveLimits}</button>
+        </div>
+        <span className="set-row-hint set-step-hint">{t.timeoutHint}</span>
+      </div>
     </form>
   );
 }

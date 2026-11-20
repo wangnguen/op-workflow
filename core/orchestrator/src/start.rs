@@ -23,7 +23,7 @@ use opw_vcs::{Git, VcsError, discover_repos, is_protected_branch, origin_url, re
 
 /// How deep to look for repos under each workspace folder (`~/Desktop/<repo>` or
 /// `~/Desktop/<group>/<repo>`).
-const WORKSPACE_DEPTH: usize = 2;
+pub(crate) const WORKSPACE_DEPTH: usize = 2;
 /// Dirty entries listed in the dialog; the count is always exact.
 const MAX_DIRTY_SHOWN: usize = 50;
 
