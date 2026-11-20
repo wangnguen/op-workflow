@@ -1068,6 +1068,12 @@ export const vi = {
       stop: "Dừng bước",
       stopAbout: "Dừng lượt của bước; hội thoại vẫn còn, chạy lại hoặc gõ tiếp được.",
       run: (step: string) => `Chạy ${step} trong phiên này`,
+      notReady: (step: string) => `${step} chưa chạy được`,
+      startOver: "Làm lại từ đầu",
+      startOverAbout:
+        "Task quay về Phân tích trong một phiên mới. Phiên cũ vẫn nằm trong danh sách để đọc lại; plan, lỗi review, lịch sử vẫn còn ở tab Task, nhưng không lỗi nào còn được chọn để sửa. Code trong repo giữ nguyên.",
+      startOverConfirm: "Làm lại từ đầu",
+      cancel: "Huỷ",
     },
     newDialog: {
       title: "Phiên mới",

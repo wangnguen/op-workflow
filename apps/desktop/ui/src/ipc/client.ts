@@ -137,19 +137,36 @@ export async function controlTerminal(
 }
 
 const previewFlows = new Map<number, WorkspaceFlow>();
+const PREVIEW_NEEDS_CODE = "Chưa có code để kiểm hay review: chạy Viết code, hoặc nhờ Claude sửa trong chat trước.";
+const PREVIEW_NEEDS_PICK =
+  "Chưa có lỗi nào được chọn để sửa: chạy một bước review, rồi chọn lỗi cần sửa (Xem quyết định).";
+
+/** The preview's rule for a step that cannot run yet, like the app's (code from Viết code on). */
+function previewWhyNot(step: StepKind, coded: boolean): string | undefined {
+  if (step === "analyze" || step === "implement" || step === "intake") return undefined;
+  if (step === "fix" || step === "fixCross") return PREVIEW_NEEDS_PICK;
+  return coded ? undefined : PREVIEW_NEEDS_CODE;
+}
+
+function previewFlow(wpId: number): WorkspaceFlow {
+  const detail = mockTaskDetail(wpId);
+  const steps = detail.steps.filter((s) => s.kind !== "intake");
+  const coded = steps.some((s) => s.kind === "implement" && s.state === "done");
+  return {
+    enabled: false, auto: detail.autoAdvance, running: null, sessionStep: false,
+    gate: null, error: null,
+    steps: steps.map((s) => ({
+      step: s.kind, enabled: !["harness", "browserTest"].includes(s.kind), state: s.state,
+      whyNot: previewWhyNot(s.kind, coded),
+    })),
+  };
+}
 
 export async function getWorkspaceFlow(wpId: number): Promise<WorkspaceFlow> {
   if (isTauri()) return invoke("workspace_flow", { wpId });
   let view = previewFlows.get(wpId);
   if (!view) {
-    const detail = mockTaskDetail(wpId);
-    view = {
-      enabled: false, auto: detail.autoAdvance, running: null, sessionStep: false,
-      gate: null, error: null,
-      steps: detail.steps.filter((s) => s.kind !== "intake").map((s) => ({
-        step: s.kind, enabled: !["harness", "browserTest"].includes(s.kind), state: s.state,
-      })),
-    };
+    view = previewFlow(wpId);
     previewFlows.set(wpId, view);
   }
   return view;
@@ -162,6 +179,18 @@ export async function workspaceFlowAction(wpId: number, action: FlowAction): Pro
     const view = await getWorkspaceFlow(wpId);
     if (action.type === "setWorkspaceFlow") previewFlows.set(wpId, { ...view, enabled: action.on });
     if (action.type === "setAuto") previewFlows.set(wpId, { ...view, auto: action.on });
+    if (action.type === "startOver") {
+      previewFlows.set(wpId, {
+        ...view,
+        steps: view.steps.map((s) => ({
+          ...s, state: s.step === "analyze" ? "running" : "pending", whyNot: previewWhyNot(s.step, false),
+        })),
+      });
+    }
+    if (action.type === "runWorkspaceStep") {
+      const why = view.steps.find((s) => s.step === action.step)?.whyNot;
+      if (why) throw { code: "step.notReady", message: why };
+    }
     if (action.type === "setWorkspaceStep" || action.type === "runWorkspaceStep") {
       previewFlows.set(wpId, {
         ...view,

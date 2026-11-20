@@ -12,7 +12,7 @@ const POLL_MS = 1200;
 /** The task's steps above its chat (PLAN.md §12 C): turn the app's steps on, pick which ones,
  *  run one as a message in the session; a step ends when Claude reports it or you press Xong. */
 export function WorkspaceSteps({
-  wpId, session, beforeRun, onChanged, onOpenTask,
+  wpId, session, beforeRun, onChanged, onOpenTask, onSession,
 }: {
   wpId: number;
   session: SessionView | undefined;
@@ -20,11 +20,16 @@ export function WorkspaceSteps({
   beforeRun: () => Promise<void>;
   onChanged: () => void;
   onOpenTask: (wpId: number, tab: string) => void;
+  /** the task's steps go to another session now (after Làm lại từ đầu): show it */
+  onSession: (id: string) => void;
 }) {
   const [flow, setFlow] = useState<WorkspaceFlow>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  // why a step that cannot run yet was not run (shown where the error goes)
+  const [notice, setNotice] = useState<string>();
   const [edit, setEdit] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   // read by the poll without restarting it
   const acting = useRef(false);
 
@@ -55,6 +60,7 @@ export function WorkspaceSteps({
     acting.current = true;
     setBusy(true);
     setError(undefined);
+    setNotice(undefined);
     try {
       await work();
     } catch (e) {
@@ -71,6 +77,14 @@ export function WorkspaceSteps({
       onChanged();
     });
   const done = (step: StepKind) => run(() => completeWorkspaceStep(wpId, step));
+  const startOver = () =>
+    run(async () => {
+      const next = await workspaceFlowAction(wpId, { type: "startOver" });
+      setFlow(next);
+      setConfirming(false);
+      if (next.session && next.session !== session?.id) onSession(next.session);
+      onChanged();
+    });
 
   if (!flow) return error ? <p className="note note--error ws-flow">{error}</p> : null;
   const disabled = busy || !!flow.running;
@@ -110,9 +124,24 @@ export function WorkspaceSteps({
             <button className="btn btn--sm btn--ghost" title={t.openAbout} onClick={() => onOpenTask(wpId, gateTab)}>
               {flow.gate ? t.openGate : t.openTask}
             </button>
+            <button className="btn btn--sm btn--ghost" aria-expanded={confirming} title={t.startOverAbout}
+              disabled={disabled} onClick={() => setConfirming(!confirming)}>
+              {t.startOver}
+            </button>
           </div>
         )}
       </div>
+      {confirming && flow.enabled && (
+        <div className="note ws-flow-confirm">
+          <span>{t.startOverAbout}</span>
+          <span className="ws-flow-confirm-actions">
+            <button className="btn btn--sm btn--danger" disabled={disabled} onClick={() => void startOver()}>
+              {t.startOverConfirm}
+            </button>
+            <button className="btn btn--sm btn--ghost" onClick={() => setConfirming(false)}>{t.cancel}</button>
+          </span>
+        </div>
+      )}
       {flow.enabled && (
         <div className="ws-flow-steps">
           {flow.steps.filter((s) => edit || s.enabled).map((s) => edit ? (
@@ -122,9 +151,14 @@ export function WorkspaceSteps({
               {stepLabel[s.step]}
             </label>
           ) : (
-            <button key={s.step} className="btn btn--sm" disabled={disabled || !!occupied}
-              title={t.run(stepLabel[s.step])}
-              onClick={() => void act({ type: "runWorkspaceStep", step: s.step })}>
+            // a step that cannot run yet stays clickable and says why instead of running
+            <button key={s.step} className={`btn btn--sm${s.whyNot ? " is-blocked" : ""}`}
+              aria-disabled={s.whyNot ? true : undefined}
+              disabled={disabled || !!occupied}
+              title={s.whyNot ?? t.run(stepLabel[s.step])}
+              onClick={() => s.whyNot
+                ? setNotice(`${t.notReady(stepLabel[s.step])}. ${s.whyNot}`)
+                : void act({ type: "runWorkspaceStep", step: s.step })}>
               <StatusIcon state={s.state === "running" && flow.running !== s.step ? "pending" : s.state} />
               {stepLabel[s.step]}
             </button>
@@ -148,6 +182,7 @@ export function WorkspaceSteps({
         </div>
       )}
       {message && <p className="note note--error">{message}</p>}
+      {notice && !message && <p className="note note--warn">{notice}</p>}
     </section>
   );
 }

@@ -1042,6 +1042,8 @@ export type FlowAction =
   | { type: "setWorkspaceFlow"; on: boolean }
   | { type: "setWorkspaceStep"; step: StepKind; on: boolean }
   | { type: "runWorkspaceStep"; step: StepKind }
+  /** Workspace: start the task again at Phân tích, in a new session */
+  | { type: "startOver" }
   | { type: "selfCodeDone" }
   /** Test trình duyệt: the dev server the app starts (remembered for the repo); empty url = none */
   | { type: "setDevServer"; url: string; commands: DevCommand[]; howTo?: string }
@@ -1130,13 +1132,16 @@ export interface WorkspaceTask {
 }
 
 export interface WorkspaceFlow {
+  /** the task's main session, where its steps go (the newest after Làm lại từ đầu) */
+  session?: string;
   enabled: boolean;
   auto: boolean;
   running: StepKind | null;
   sessionStep: boolean;
   gate: GateKind | null;
   error: { code: string; message: string } | null;
-  steps: { step: StepKind; enabled: boolean; state: StepState }[];
+  /** `whyNot`: why the step cannot run now (nothing to review yet, no finding picked) */
+  steps: { step: StepKind; enabled: boolean; state: StepState; whyNot?: string }[];
 }
 
 export interface WorkspaceSnapshot {

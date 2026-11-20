@@ -948,6 +948,48 @@ fn to_fix(f: &FindingRow) -> bool {
     f.chosen && f.state == "open"
 }
 
+/// How long the Workspace steps bar trusts git's last answer about the task's code.
+const CODE_SEEN_FOR: Duration = Duration::from_secs(5);
+const NEEDS_CODE: &str =
+    "Chưa có code để kiểm hay review: chạy Viết code, hoặc nhờ Claude sửa trong chat trước.";
+const NEEDS_PICK: &str =
+    "Chưa có lỗi nào được chọn để sửa: chạy một bước review, rồi chọn lỗi cần sửa (Xem quyết định).";
+
+/// Why a step picked in Workspace cannot run now: a review needs code, a fix needs a picked
+/// finding. Phân tích and Viết code (from the brief and the conversation) can always run.
+fn step_blocked(step: StepKind, findings: &[FindingRow], code: bool) -> Option<&'static str> {
+    use StepKind::*;
+    match step {
+        Intake | Analyze | Implement => None,
+        Fix | FixCross => (!findings.iter().any(to_fix)).then_some(NEEDS_PICK),
+        Checks | ReviewLocal | Harness | CrossReview | BrowserTest | FinalReview | PushSummary => {
+            (!code).then_some(NEEDS_CODE)
+        }
+    }
+}
+
+/// The branch holds work of its own: a tracked file changed, or a commit since it left `base`.
+/// Untracked files do not count (local configs would make every repo look changed).
+fn repo_changed(repo: &Path, base: &str) -> bool {
+    let git = Git::new(repo);
+    if git
+        .run(&[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ])
+        .is_ok_and(|out| !out.trim().is_empty())
+    {
+        return true;
+    }
+    git.merge_base(base, "HEAD")
+        .ok()
+        .and_then(|fork| git.run(&["rev-list", "--count", &format!("{fork}..HEAD")]).ok())
+        .and_then(|n| n.trim().parse::<u64>().ok())
+        .is_some_and(|n| n > 0)
+}
+
 fn finding_view(f: &FindingRow, saved: &Saved) -> FindingView {
     let state = serde_json::from_value(serde_json::Value::String(f.state.clone()))
         .unwrap_or(opw_domain::finding::FindingState::Open);
@@ -1160,6 +1202,8 @@ struct Inner {
     require_mcp: bool,
     config_path: Mutex<Option<PathBuf>>,
     sessions: Mutex<Option<Sessions>>,
+    /// wp_id → when git was last asked whether the repo holds the task's code, and the answer.
+    code_seen: Mutex<HashMap<u64, (std::time::Instant, bool)>>,
 }
 
 /// The workflow engine shared by the Tauri commands.
@@ -1251,10 +1295,14 @@ impl Flow {
     pub fn workspace(&self, ctx: &TaskCtx) -> opw_domain::session::WorkspaceFlow {
         use opw_domain::session::{WorkspaceFlow, WorkspaceStep};
         self.ensure(ctx);
+        let findings = self.inner.findings(ctx.row.wp_id);
+        let code = self.inner.has_code(ctx, CODE_SEEN_FOR);
+        let session = self.inner.sessions().and_then(|s| s.task_session(ctx.row.wp_id));
         let tasks = self.inner.lock_tasks();
         let entry = &tasks[&ctx.row.wp_id];
         let running = entry.run.as_ref().map(|r| r.step);
         WorkspaceFlow {
+            session,
             enabled: entry.saved.workspace,
             auto: ctx.auto(&entry.saved),
             running,
@@ -1274,6 +1322,7 @@ impl Flow {
                     step,
                     enabled: entry.saved.workflow.enabled(step),
                     state: entry.saved.workflow.state_of(step),
+                    why_not: step_blocked(step, &findings, code).map(str::to_owned),
                 })
                 .collect(),
         }
@@ -1429,6 +1478,7 @@ impl Flow {
                 require_mcp,
                 config_path: Mutex::new(None),
                 sessions: Mutex::new(None),
+                code_seen: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -1668,6 +1718,13 @@ impl Flow {
             return self.talk(ctx, text);
         }
         let wp_id = ctx.row.wp_id;
+        // a step picked in Workspace runs only when there is something for it to work on
+        if let FlowAction::RunWorkspaceStep { step } = &action {
+            let code = self.inner.has_code(&ctx, Duration::ZERO);
+            if let Some(why) = step_blocked(*step, &self.inner.findings(wp_id), code) {
+                return Err(ApiError::new("step.notReady", why));
+            }
+        }
         let claim = {
             let mut tasks = self.inner.lock_tasks();
             let entry = tasks.get_mut(&wp_id).ok_or_else(flow_missing)?;
@@ -1700,6 +1757,17 @@ impl Flow {
         };
         if left {
             self.inner.close_browser(wp_id);
+        }
+        // Làm lại từ đầu goes on in a new session; the old one stays in the list to read
+        if matches!(action, FlowAction::StartOver) {
+            if let (Some(sessions), Some(repo)) = (self.inner.sessions(), ctx.row.repo.as_deref()) {
+                sessions.create(Some(wp_id), repo)?;
+            }
+            self.inner
+                .code_seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&wp_id);
         }
         if let Some((claim, text)) = claim {
             if let Ok(store) = self.inner.store.lock() {
@@ -2687,6 +2755,7 @@ fn apply_action(
                 | FlowAction::SetAuto { .. }
                 | FlowAction::SetWorkspaceFlow { .. }
                 | FlowAction::SetWorkspaceStep { .. }
+                | FlowAction::StartOver
                 | FlowAction::Stop
         )
     {
@@ -3092,6 +3161,16 @@ fn apply_action(
             if *step == StepKind::Implement && phase == Phase::Gate(GateKind::PlanReview) {
                 return apply_action(entry, ctx, &FlowAction::ApprovePlan, store, require_mcp);
             }
+            // at "Chọn lỗi cần sửa", Sửa lỗi fixes what was picked there, for that review
+            if step.is_fix() && phase == Phase::Gate(GateKind::Findings) {
+                return apply_action(
+                    entry,
+                    ctx,
+                    &FlowAction::PickFindings { fix: true },
+                    store,
+                    require_mcp,
+                );
+            }
             entry
                 .saved
                 .workflow
@@ -3099,6 +3178,45 @@ fn apply_action(
                 .map_err(|e| ApiError::new("flow.invalid", e.to_string()))?;
             entry.saved.error = None;
             Ok(true)
+        }
+        FlowAction::StartOver => {
+            if running {
+                return Err(ApiError::new("step.running", "Bước này đang chạy"));
+            }
+            if !entry.saved.workspace {
+                return Err(not_now("làm lại từ đầu"));
+            }
+            let old = std::mem::take(&mut entry.saved);
+            let mut saved = new_saved();
+            // what the user set for this task stays: the steps it runs, Tự chạy, the issue, the
+            // dev server; everything the earlier attempt produced starts over
+            for step in StepKind::ALL.into_iter().skip(1) {
+                let on = old.workflow.enabled(step);
+                if on != saved.workflow.enabled(step) {
+                    let _ = saved.workflow.set_enabled(step, on);
+                }
+            }
+            saved.workspace = true;
+            saved.auto = old.auto;
+            saved.issue = old.issue;
+            saved.dev_server = old.dev_server;
+            saved.picked = old.picked;
+            entry.saved = saved;
+            if let Ok(store) = store.lock() {
+                for mut f in store.findings(ctx.row.wp_id).unwrap_or_default() {
+                    if f.chosen && !settled(&f.state) {
+                        f.chosen = false;
+                        let _ = store.upsert_finding(&f);
+                    }
+                }
+            }
+            push_log(
+                entry,
+                None,
+                "info",
+                "Làm lại từ đầu: phiên mới, bắt đầu từ Phân tích",
+            );
+            Ok(false)
         }
         FlowAction::SelfCode => {
             if phase != Phase::Gate(GateKind::PlanReview) {
@@ -3748,6 +3866,37 @@ impl Inner {
 
     fn sessions(&self) -> Option<Sessions> {
         self.sessions.lock().ok()?.clone()
+    }
+
+    /// The task has code to check or review: Viết code ran, the user coded by hand, or git sees
+    /// a change on the branch (asked again after `max_age`).
+    fn has_code(&self, ctx: &TaskCtx, max_age: Duration) -> bool {
+        let wp_id = ctx.row.wp_id;
+        let wrote = self.lock_tasks().get(&wp_id).is_some_and(|e| {
+            e.saved.coded_by_hand || e.saved.workflow.state_of(StepKind::Implement) == StepState::Done
+        });
+        if wrote {
+            return true;
+        }
+        let cached = self
+            .code_seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&wp_id)
+            .filter(|(at, _)| at.elapsed() < max_age)
+            .map(|(_, code)| *code);
+        if let Some(code) = cached {
+            return code;
+        }
+        let code = ctx
+            .repo()
+            .zip(ctx.row.base.as_deref())
+            .is_some_and(|(repo, base)| repo_changed(&repo, base));
+        self.code_seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(wp_id, (std::time::Instant::now(), code));
+        code
     }
 
     /// Steps that run in the task's Workspace session leave its id as the task's Claude session,
@@ -7459,6 +7608,65 @@ mod tests {
     fn run(flow: &Flow, ctx: &TaskCtx, action: FlowAction) -> TaskDetail {
         flow.act(ctx.clone(), action).unwrap();
         settle(flow, ctx)
+    }
+
+    #[test]
+    fn workspace_steps_need_something_to_work_on_and_start_over_goes_back_to_analysis() {
+        let Some(s) = setup() else { return };
+        let (flow, _fake) = flow_with(&s, false, happy(CLEAN));
+        let ctx = s.ctx(1, &Config::default());
+        flow.started(&ctx, None).unwrap();
+        flow.act(ctx.clone(), FlowAction::SetWorkspaceFlow { on: true })
+            .unwrap();
+        let why = |step: StepKind| {
+            flow.workspace(&ctx)
+                .steps
+                .into_iter()
+                .find(|s| s.step == step)
+                .and_then(|s| s.why_not)
+        };
+        // nothing done yet: analysis and coding can run, a fix or a review cannot
+        assert_eq!(why(StepKind::Analyze), None);
+        assert_eq!(why(StepKind::Implement), None);
+        assert!(why(StepKind::Fix).is_some_and(|w| w.contains("lỗi")));
+        assert!(why(StepKind::ReviewLocal).is_some_and(|w| w.contains("code")));
+        let refused = flow
+            .act(ctx.clone(), FlowAction::RunWorkspaceStep { step: StepKind::Fix })
+            .unwrap_err();
+        assert_eq!(refused.code, "step.notReady");
+        assert_eq!(flow.workspace(&ctx).running, None);
+        // a change on the branch is code to review; a fix still needs a picked finding
+        std::fs::write(
+            s.repo.join("a.ts"),
+            "export const a = 2;
+",
+        )
+        .unwrap();
+        let refused = flow
+            .act(
+                ctx.clone(),
+                FlowAction::RunWorkspaceStep {
+                    step: StepKind::FixCross,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "step.notReady");
+        assert_eq!(why(StepKind::ReviewLocal), None);
+        assert!(why(StepKind::FixCross).is_some());
+
+        // Làm lại từ đầu: back at Phân tích, the Workspace flow stays on
+        flow.act(ctx.clone(), FlowAction::SetAuto { on: true }).unwrap();
+        flow.act(ctx.clone(), FlowAction::StartOver).unwrap();
+        let view = flow.workspace(&ctx);
+        assert!(view.enabled && view.auto);
+        let analyze = view.steps.iter().find(|s| s.step == StepKind::Analyze).unwrap();
+        assert_eq!(analyze.state, StepState::Running);
+        assert!(
+            view.steps
+                .iter()
+                .filter(|s| s.step != StepKind::Analyze)
+                .all(|s| s.state != StepState::Done)
+        );
     }
 
     mod followup {

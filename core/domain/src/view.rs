@@ -1635,6 +1635,9 @@ pub enum FlowAction {
     RunWorkspaceStep {
         step: StepKind,
     },
+    /// Workspace: the task starts again at Phân tích in a new session (the old session, plan
+    /// and findings stay to look at; no finding stays picked).
+    StartOver,
     /// Test trình duyệt: the dev server the app starts for this task, remembered for the repo
     /// too. An empty URL clears both (the AI starts the app itself again).
     #[serde(rename_all = "camelCase")]

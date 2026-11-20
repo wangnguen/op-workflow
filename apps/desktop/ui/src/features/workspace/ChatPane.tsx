@@ -181,7 +181,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
             }
             setView(undefined);
           }}
-          onChanged={onChanged} onOpenTask={onOpenTask} />
+          onChanged={onChanged} onOpenTask={onOpenTask} onSession={onCreated} />
       )}
       <div className="ws-tabs" role="group" aria-label={ws.views}>
         <button className="btn btn--sm" aria-pressed={tab === "chat"} onClick={() => switchTab("chat")}>

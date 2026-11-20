@@ -13,15 +13,59 @@ const tt = vi.workspace.terminal;
 /** an open of the same console waits for the one before it (React mounts twice in dev) */
 const connections = new Map<string, Promise<void>>();
 
-function terminalTheme(el: HTMLElement) {
-  const css = getComputedStyle(el);
-  const value = (name: string) => css.getPropertyValue(name).trim();
-  return {
-    background: value("--bg"),
-    foreground: value("--text"),
-    cursor: value("--text"),
-    selectionBackground: value("--fill-strong"),
+/** Reads theme tokens as #rrggbb (a token may be any CSS colour, color-mix included). */
+function tokenReader(el: HTMLElement) {
+  const probe = document.createElement("span");
+  probe.style.display = "none";
+  el.appendChild(probe);
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 1;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const read = (name: string) => {
+    probe.style.color = `var(${name})`;
+    const css = getComputedStyle(probe).color;
+    if (!ctx) return css;
+    ctx.clearRect(0, 0, 1, 1);
+    ctx.fillStyle = "#000";
+    ctx.fillStyle = css;
+    ctx.fillRect(0, 0, 1, 1);
+    const px = ctx.getImageData(0, 0, 1, 1).data;
+    return `#${[px[0], px[1], px[2]].map((v) => (v ?? 0).toString(16).padStart(2, "0")).join("")}`;
   };
+  return { read, done: () => probe.remove() };
+}
+
+const luminance = (hex: string) => {
+  const [r = 0, g = 0, b = 0] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+
+/** The console in the app's theme: its surface and text, the 16 ANSI colours from the theme's
+ *  hues (black / white swap on a light theme so "black" text still reads). */
+function terminalTheme(el: HTMLElement) {
+  const { read, done } = tokenReader(el);
+  const bg = read("--bg");
+  const light = luminance(bg) > 0.5;
+  const [text, dim, faint, elev] = ["--text", "--text-dim", "--text-faint", "--bg-elev"].map(read);
+  const hue = (name: string) => read(`--hue-${name}`);
+  const [red, green, yellow, blue, purple, teal, orange, pink] =
+    ["red", "green", "yellow", "blue", "purple", "teal", "orange", "pink"].map(hue);
+  const theme = {
+    background: bg,
+    foreground: text,
+    cursor: text,
+    cursorAccent: bg,
+    selectionBackground: `${read("--accent")}55`,
+    black: light ? text : elev,
+    brightBlack: light ? dim : faint,
+    white: light ? faint : dim,
+    brightWhite: light ? elev : text,
+    red, green, yellow, blue, magenta: purple, cyan: teal,
+    brightRed: orange, brightGreen: green, brightYellow: yellow, brightBlue: blue,
+    brightMagenta: pink, brightCyan: teal,
+  };
+  done();
+  return theme;
 }
 
 /** One console of a Workspace session: the session's Claude TUI or a shell in its repo
@@ -59,6 +103,8 @@ export function TerminalPane({
       fontSize: 13,
       scrollback: 3000,
       cursorBlink: true,
+      // colours a program picks itself (Claude Code's own palette) still read on a light theme
+      minimumContrastRatio: 4.5,
       theme: terminalTheme(el),
     });
     instance.current = term;

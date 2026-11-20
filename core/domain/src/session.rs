@@ -95,6 +95,9 @@ pub struct WorkspaceTask {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceFlow {
+    /// The task's main session, where its steps go (the newest one after Làm lại từ đầu).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     pub enabled: bool,
     pub auto: bool,
     pub running: Option<StepKind>,
@@ -110,6 +113,9 @@ pub struct WorkspaceStep {
     pub step: StepKind,
     pub enabled: bool,
     pub state: StepState,
+    /// Why it cannot run now (nothing to review yet, no finding picked to fix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_not: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
