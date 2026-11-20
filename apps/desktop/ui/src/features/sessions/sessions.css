@@ -277,6 +277,25 @@
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
+/* the title opens the session in Workspace */
+.s-title-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.s-title-btn:hover,
+.s-title-btn:focus-visible {
+  color: var(--accent-ink);
+  text-decoration: underline;
+}
 .s-titles .faint {
   font-size: 12px;
   overflow-wrap: anywhere;

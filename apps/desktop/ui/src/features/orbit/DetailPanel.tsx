@@ -12,12 +12,13 @@ import {
 import type { AgentView, OrbitSnapshot, StepView, TaskSystem } from "../../ipc/types";
 import { formatClock, formatDuration, formatRelative, formatTokens, formatUsd } from "../../shared/format";
 import { STEP_COUNT } from "../../shared/steps";
+import type { Go, Primary } from "./primary";
 import { findAgent, type Selection } from "./selection";
 import { Icon } from "../../shared/ui/Icon";
 import { PriorityChip } from "../../shared/ui/PriorityChip";
 import { HideSideButton } from "../../shared/ui/SidePanel";
 import { StatusChip } from "../../shared/ui/StatusChip";
-import { gateTab, type TaskTab } from "../task/taskTabs";
+import type { TaskTab } from "../task/taskTabs";
 
 interface Props {
   snapshot: OrbitSnapshot;
@@ -29,6 +30,9 @@ interface Props {
   onOpenTask?: (taskId: string, tab?: TaskTab) => void;
   /** open a task on OpenProject in the browser */
   onOpenLink?: (wpId: number) => void;
+  /** the picked item's main button, on top (a double click on the map does the same) */
+  primary?: Primary;
+  onGo?: (go: Go) => void;
   now: number;
   /** hide the panel (it sits in a SidePanel) */
   onHide?: () => void;
@@ -86,9 +90,11 @@ interface AgentDetailProps {
   now: number;
   onSelect: (s: Selection) => void;
   onOpenTask?: (taskId: string, tab?: TaskTab) => void;
+  /** the main button already opens the task window's Chat tab */
+  chatOnTop: boolean;
 }
 
-function AgentDetail({ task, agent, now, onSelect, onOpenTask }: AgentDetailProps) {
+function AgentDetail({ task, agent, now, onSelect, onOpenTask, chatOnTop }: AgentDetailProps) {
   const ratio = agent.handoffAt > 0 ? agent.contextTokens / agent.handoffAt : 0;
   return (
     <>
@@ -105,7 +111,7 @@ function AgentDetail({ task, agent, now, onSelect, onOpenTask }: AgentDetailProp
         <span style={{ width: `${Math.min(100, ratio * 100)}%` }} />
       </div>
       <Row label={t.compactions}>{agent.compactions}</Row>
-      {onOpenTask && (
+      {onOpenTask && !chatOnTop && (
         <button className="btn btn--sm dp-open" title={t.openChatHint} onClick={() => onOpenTask(task.taskId, "chat")}>
           {t.openChat}
         </button>
@@ -156,7 +162,7 @@ function AgentDetail({ task, agent, now, onSelect, onOpenTask }: AgentDetailProp
   );
 }
 
-export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, onOpenTask, onOpenLink, onHide }: Props) {
+export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, onOpenTask, onOpenLink, primary, onGo, onHide }: Props) {
   const a = snapshot.active;
   let body: ReactNode = <p className="dp-empty">{t.noneSelected}</p>;
 
@@ -208,7 +214,10 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
     }
   } else if (selection?.kind === "agent" && a) {
     const agent = findAgent(a.agents, selection.id);
-    if (agent) body = <AgentDetail task={a} agent={agent} now={now} onSelect={onSelect} onOpenTask={onOpenTask} />;
+    if (agent) {
+      const chatOnTop = primary?.go.to === "task" && primary.go.tab === "chat";
+      body = <AgentDetail task={a} agent={agent} now={now} onSelect={onSelect} onOpenTask={onOpenTask} chatOnTop={chatOnTop} />;
+    }
   } else if (selection?.kind === "finding" && a) {
     const f = a.findings.find((x) => x.fingerprint === selection.fingerprint);
     if (f) {
@@ -228,11 +237,6 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
           </Row>
           <Row label={t.source}>{f.source}</Row>
           {f.detail && <p className="dim">{f.detail}</p>}
-          {onOpenTask && (
-            <button className="btn btn--sm dp-open" onClick={() => onOpenTask(a.taskId, "findings")}>
-              {vi.flow.tabs.findings}
-            </button>
-          )}
         </>
       );
     }
@@ -246,13 +250,6 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
         </header>
         <h3 className="dp-title">{gateLabel[a.gate.kind]}</h3>
         <p>{a.gate.message}</p>
-        <button
-          className="btn btn--primary"
-          disabled={!onOpenTask}
-          onClick={() => a.gate && onOpenTask?.(a.taskId, gateTab(a.gate.kind))}
-        >
-          {t.openGate}
-        </button>
       </div>
     );
   } else if (selection?.kind === "nebula") {
@@ -277,22 +274,14 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
           </Row>
           <Row label={t.project}>{item.project}</Row>
           <Row label={t.priority}>{item.priority ? <PriorityChip priority={item.priority} /> : "—"}</Row>
-          <div className="dp-actions">
-            <button
-              className="btn btn--primary btn--sm"
-              disabled={!onStartTask}
-              title={onStartTask ? undefined : t.startFromBoard}
-              onClick={() => onStartTask?.(item.taskId)}
-            >
-              {vi.board.start}
-            </button>
-            {onOpenLink && (
+          {onOpenLink && (
+            <div className="dp-actions">
               <button className="btn btn--sm" title={t.openOnNxHint} onClick={() => onOpenLink(item.wpId)}>
                 <Icon name="external" size={12} />
                 {t.openOnNx}
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </>
       );
     }
@@ -305,8 +294,16 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
             <span className={`chip chip--${d.agent}`}>{agentLabel[d.agent]}</span>
             <span className={`dp-status dp-status--${d.status}`}>{sessionStatusLabel[d.status]}</span>
           </header>
-          <h3 className="dp-title">{d.label}</h3>
+          <h3 className="dp-title">{d.title || d.label}</h3>
           <p className="dim">{t.distant}</p>
+          {d.cwd && (
+            <Row label={t.folder}>
+              <span className="mono" title={d.cwd}>
+                {d.label}
+              </span>
+            </Row>
+          )}
+          {d.openIn && <Row label={t.openIn}>{d.openIn}</Row>}
         </>
       );
     }
@@ -317,6 +314,20 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
       {onHide && (
         <div className="dp-bar">
           <HideSideButton side="right" name={vi.side.detail} onHide={onHide} />
+        </div>
+      )}
+      {primary && onGo && selection && (
+        <div className="dp-primary" key={JSON.stringify(selection)}>
+          <button
+            className="btn btn--primary btn--sm"
+            disabled={primary.go.to === "start" && !onStartTask}
+            onClick={() => onGo(primary.go)}
+          >
+            {primary.label}
+          </button>
+          <p className="faint">
+            {primary.go.to === "start" && !onStartTask ? t.startFromBoard : primary.hint}. {t.doubleClick}
+          </p>
         </div>
       )}
       {body}

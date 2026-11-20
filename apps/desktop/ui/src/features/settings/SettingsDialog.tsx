@@ -18,6 +18,7 @@ import {
   setHarnessDir,
   setRepoChecks,
   setOnClose,
+  setHideOutsideSessions,
   setQuotaProbe,
   setTasksDir,
 } from "../../ipc/client";
@@ -899,11 +900,25 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                 )}
 
                 {page === "appearance" && (
-                  <Group title={t.theme}>
-                    <div className="set-row set-row--stacked" data-setting-row="theme">
-                      <ThemePicker />
-                    </div>
-                  </Group>
+                  <>
+                    <Group title={t.theme}>
+                      <div className="set-row set-row--stacked" data-setting-row="theme">
+                        <ThemePicker />
+                      </div>
+                    </Group>
+                    <Group title={t.sessionsSection}>
+                      <Row id="outsideSessions" label={t.outsideSessions} hint={t.outsideSessionsHint}>
+                        <input
+                          type="checkbox"
+                          className="set-check"
+                          aria-label={t.outsideSessions}
+                          checked={!(view?.hideOutsideSessions ?? false)}
+                          disabled={busy || !view}
+                          onChange={(e) => run(() => setHideOutsideSessions(!e.target.checked), false)}
+                        />
+                      </Row>
+                    </Group>
+                  </>
                 )}
 
                 {page === "about" && (

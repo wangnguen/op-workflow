@@ -44,6 +44,7 @@ export const ENTRIES: SettingEntry[] = [
   { page: "notify", id: "tray", label: vi.notify.trayLabel, keywords: "khay tray icon taskbar hạn mức quota" },
   { page: "notify", id: "onClose", label: vi.close.setting, keywords: "đóng close thoát quit x khay tray thu nhỏ minimize cửa sổ window" },
   { page: "appearance", id: "theme", label: t.theme, keywords: "giao diện theme chủ đề màu color sáng tối light dark dracula tokyo catppuccin nord gruvbox" },
+  { page: "appearance", id: "outsideSessions", label: t.outsideSessions, keywords: "phiên session ngoài outside vs code terminal sao xa ẩn hide claude" },
   { page: "about", id: "version", label: t.versionSection, keywords: "version phiên bản update cập nhật bản mới release github" },
   { page: "about", id: "tasksDir", label: t.tasksDir, keywords: "brief task thư mục folder desktop lưu chuyển" },
   { page: "about", id: "data", label: t.dataDir, keywords: "data dữ liệu folder thư mục sqlite" },

@@ -1,7 +1,74 @@
-import type { SessionChat, SessionPatch, SessionView, WorkspaceSnapshot, WorkspaceTask } from "../../ipc/types";
+import type {
+  ChatItem,
+  SessionChat,
+  SessionPatch,
+  SessionView,
+  StepKind,
+  WorkspaceSnapshot,
+  WorkspaceTask,
+} from "../../ipc/types";
 
-/** What the chat pane shows: a session, or a task (or new session) that has no message yet. */
-export type Selection = { kind: "session"; id: string } | { kind: "task"; wpId: number };
+/** The chat pane's tabs that another screen can open. */
+export type PaneView = "chat" | "changes" | "brief" | "comments";
+
+/** Where to land in the chat pane, from another screen: a tab, the message a step started with,
+ *  or the question the session waits on. `at` tells two clicks on the same thing apart. */
+export interface Focus {
+  view?: PaneView;
+  step?: StepKind;
+  ask?: boolean;
+  at: number;
+}
+
+/** What the chat pane shows: a session, a task (or new session) that has no message yet, or a
+ *  session opened outside the app (read-only). */
+export type Selection =
+  | { kind: "session"; id: string; focus?: Focus }
+  | { kind: "task"; wpId: number; focus?: Focus }
+  | { kind: "outside"; id: string };
+
+/** Both point at the same row of the list (whatever they focus on). */
+export function samePick(a: Selection | undefined, b: Selection): boolean {
+  if (a?.kind === "task") return b.kind === "task" && a.wpId === b.wpId;
+  if (a === undefined || b.kind === "task") return false;
+  return a.kind === b.kind && a.id === b.id;
+}
+
+/** Where another screen sends you in Workspace (the map, a card, a task window). */
+export interface WorkspaceTarget {
+  sessionId?: string;
+  /** a task: its main session (the newest), or the task itself before it has one */
+  wpId?: number;
+  /** a session opened outside the app */
+  outsideId?: string;
+  view?: PaneView;
+  step?: StepKind;
+  /** the question the session waits on */
+  ask?: boolean;
+}
+
+/** The pick a target lands on (none when Workspace has nothing for it). A task with `ask` prefers
+ *  its session that waits. `at` makes the same target land again when sent twice. */
+export function pickFor(target: WorkspaceTarget, snapshot: WorkspaceSnapshot | undefined, at: number): Selection | undefined {
+  if (target.outsideId !== undefined) return { kind: "outside", id: target.outsideId };
+  const { view, step, ask } = target;
+  const focus: Focus | undefined = view || step || ask ? { view, step, ask, at } : undefined;
+  if (target.sessionId !== undefined) return { kind: "session", id: target.sessionId, focus };
+  if (target.wpId === undefined) return undefined;
+  const mine = snapshot?.sessions.filter((s) => s.wpId === target.wpId) ?? [];
+  const s =
+    (ask ? mine.find((x) => x.state === "waiting") : undefined) ?? mine.find((x) => x.kind === "main") ?? mine[0];
+  if (s) return { kind: "session", id: s.id, focus };
+  // a task Workspace does not list (finished, no session left): nothing to open there
+  return snapshot?.tasks.some((t) => t.wpId === target.wpId) ? { kind: "task", wpId: target.wpId, focus } : undefined;
+}
+
+/** The item a step's focus lands on: the newest message labelled with that step (a step run
+ *  again lands on its last run). */
+export function stepItemIndex(items: ChatItem[], step: StepKind): number {
+  for (let i = items.length - 1; i >= 0; i--) if (items[i]?.step === step) return i;
+  return -1;
+}
 
 /** A pushed change applied to the chat. `refetch` = a change was missed (or arrived before the
  *  chat was read), read the whole chat again. */

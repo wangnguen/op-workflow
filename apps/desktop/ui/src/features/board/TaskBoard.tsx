@@ -8,6 +8,7 @@ import { TaskPeek, type PeekTab } from "./TaskPeek";
 import { FinishDialog } from "../task/FinishDialog";
 import { TaskWindow } from "../task/TaskWindow";
 import type { TaskTab } from "../task/taskTabs";
+import type { WorkspaceTarget } from "../workspace/chatState";
 import { Icon } from "../../shared/ui/Icon";
 import { dropRule, type DropAction } from "./dropRule";
 import { DraggableCard, DropColumn, cardCollision, makeDropAnimation, useCardSensors, type DropEnd } from "./cardDnd";
@@ -20,6 +21,8 @@ interface Props {
   onSettings: () => void;
   /** reload board + orbit after the user started or paused a task */
   onChanged: () => void;
+  /** a task's chat in Workspace (`false`: Workspace has nothing for it) */
+  onOpenWorkspace?: (target: WorkspaceTarget) => boolean;
 }
 
 const b = vi.board;
@@ -55,7 +58,7 @@ interface Toast {
 
 /** Inbox / Đang làm / Chờ bạn push / Đã xong. Several tasks can be in progress at once; cards
  *  move between columns by drag and drop or with their buttons. */
-export function TaskBoard({ board, onSettings, onChanged }: Props) {
+export function TaskBoard({ board, onSettings, onChanged, onOpenWorkspace }: Props) {
   const start = useStartWork({ tasks: board.tasks, onChanged });
   const [offerBusy, setOfferBusy] = useState(false);
   const [opened, setOpened] = useState<{ wpId: number; tab?: TaskTab }>();
@@ -272,6 +275,10 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
                         onFinish={setFinishing}
                         onContinue={(c) => setContinuing({ card: c })}
                         onPeek={(c, tab) => setPeeking({ card: c, tab })}
+                        onSession={(c) => {
+                          // nothing left in Workspace (a finished task): its window instead
+                          if (!onOpenWorkspace?.({ wpId: c.wpId })) setOpened({ wpId: c.wpId });
+                        }}
                         onLogin={(p) => run(openLogin(p))}
                         onError={(text) => start.setFlash({ kind: "warn", text })}
                       />
@@ -339,7 +346,8 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
         />
       )}
       {opened && (
-        <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={onChanged} />
+        <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={onChanged}
+          onOpenWorkspace={onOpenWorkspace} />
       )}
       {peeking && (
         <TaskPeek

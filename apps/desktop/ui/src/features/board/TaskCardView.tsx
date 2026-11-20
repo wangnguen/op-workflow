@@ -43,6 +43,8 @@ export interface TaskCardProps {
   /** "Xem task" / "N comment mới" on an Inbox card: its description and comments without
    *  starting the task */
   onPeek?: (card: TaskCard, tab: PeekTab) => void;
+  /** the title of a started task: its chat in Workspace */
+  onSession?: (card: TaskCard) => void;
   /** the card can be dragged to another column (absent on the copy that follows the pointer) */
   drag?: CardDrag;
   /** this card is being dragged (its copy follows the pointer) */
@@ -291,6 +293,19 @@ function PushLine({ check }: { check: PushCheck }) {
   );
 }
 
+/** The title opens the task where you work on it: its chat in Workspace once started, its
+ *  description while it is in the Inbox. */
+function CardTitle({ card, onSession, onPeek }: TaskCardProps) {
+  const inbox = card.column === "inbox";
+  const open = inbox ? onPeek && (() => onPeek(card, "description")) : onSession && (() => onSession(card));
+  if (!open) return <>{card.title}</>;
+  return (
+    <button type="button" className="card-title-btn" title={inbox ? b.titlePeekHint : b.titleSessionHint} onClick={open}>
+      {card.title}
+    </button>
+  );
+}
+
 export function TaskCardView(props: TaskCardProps) {
   const { card, drag, dragging } = props;
   const step = card.step;
@@ -309,7 +324,9 @@ export function TaskCardView(props: TaskCardProps) {
           {monogram(card.project)}
         </span>
         <span className="card-heading">
-          <h3 className="card-title">{card.title}</h3>
+          <h3 className="card-title">
+            <CardTitle {...props} />
+          </h3>
           <span className="card-sub">
             <button
               type="button"

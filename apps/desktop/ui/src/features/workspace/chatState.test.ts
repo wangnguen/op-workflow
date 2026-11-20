@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { SessionChat, SessionPatch, SessionView, WorkspaceSnapshot } from "../../ipc/types";
-import { OTHER_PROJECT, applyPatch, buildTree, repoName, taskState } from "./chatState";
+import {
+  OTHER_PROJECT,
+  applyPatch,
+  buildTree,
+  pickFor,
+  repoName,
+  samePick,
+  stepItemIndex,
+  taskState,
+} from "./chatState";
 
 const view = (id: string, part: Partial<SessionView> = {}): SessionView => ({
   id,
@@ -101,5 +110,65 @@ describe("buildTree", () => {
   it("names repos by their folder", () => {
     expect(repoName("C:\\Users\\me\\Desktop\\acme-web\\")).toBe("acme-web");
     expect(repoName("~/code/api")).toBe("api");
+  });
+});
+
+describe("pickFor", () => {
+  const snapshot: WorkspaceSnapshot = {
+    tasks: [
+      { wpId: 1, taskId: "WP-1", title: "A", project: "Web" },
+      { wpId: 2, taskId: "WP-2", title: "B", project: "Web" },
+    ],
+    sessions: [
+      view("asks", { kind: "free", wpId: 1, state: "waiting" }),
+      view("main-new", { kind: "main", wpId: 1 }),
+      view("main-old", { kind: "main", wpId: 1 }),
+    ],
+  };
+
+  it("opens a task on its newest main session, focused when asked to", () => {
+    expect(pickFor({ wpId: 1 }, snapshot, 5)).toEqual({ kind: "session", id: "main-new", focus: undefined });
+    expect(pickFor({ wpId: 1, step: "analyze" }, snapshot, 5)).toEqual({
+      kind: "session",
+      id: "main-new",
+      focus: { view: undefined, step: "analyze", ask: undefined, at: 5 },
+    });
+    // the question: the session that waits
+    expect(pickFor({ wpId: 1, ask: true }, snapshot, 6)).toMatchObject({ kind: "session", id: "asks" });
+  });
+
+  it("opens a task without a session as a draft, and nothing for a task Workspace does not list", () => {
+    expect(pickFor({ wpId: 2, view: "brief" }, snapshot, 7)).toEqual({
+      kind: "task",
+      wpId: 2,
+      focus: { view: "brief", step: undefined, ask: undefined, at: 7 },
+    });
+    expect(pickFor({ wpId: 99 }, snapshot, 7)).toBeUndefined();
+    expect(pickFor({}, snapshot, 7)).toBeUndefined();
+  });
+
+  it("opens sessions by id, outside ones included", () => {
+    expect(pickFor({ sessionId: "x" }, undefined, 1)).toEqual({ kind: "session", id: "x", focus: undefined });
+    expect(pickFor({ outsideId: "ext-1", wpId: 1 }, snapshot, 1)).toEqual({ kind: "outside", id: "ext-1" });
+  });
+
+  it("tells the same row apart from another whatever it focuses on", () => {
+    const focus = { step: "fix" as const, at: 1 };
+    expect(samePick({ kind: "session", id: "a", focus }, { kind: "session", id: "a" })).toBe(true);
+    expect(samePick({ kind: "outside", id: "a" }, { kind: "session", id: "a" })).toBe(false);
+    expect(samePick({ kind: "task", wpId: 1 }, { kind: "task", wpId: 1 })).toBe(true);
+    expect(samePick(undefined, { kind: "task", wpId: 1 })).toBe(false);
+  });
+
+  it("lands a step on its latest run", () => {
+    const items = [
+      { kind: "prompt" as const, text: "a", step: "analyze" as const },
+      { kind: "text" as const, text: "b" },
+      { kind: "prompt" as const, text: "c", step: "fix" as const },
+      { kind: "prompt" as const, text: "d", step: "fix" as const },
+    ];
+    expect(stepItemIndex(items, "fix")).toBe(3);
+    expect(stepItemIndex(items, "analyze")).toBe(0);
+    expect(stepItemIndex(items, "pushSummary")).toBe(-1);
   });
 });

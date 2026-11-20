@@ -19,7 +19,7 @@ import { TaskPeek, type PeekTab } from "../features/board/TaskPeek";
 import { TaskBoard } from "../features/board/TaskBoard";
 import { SessionsView } from "../features/sessions/SessionsView";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
-import type { Selection } from "../features/workspace/chatState";
+import { pickFor, type Selection, type WorkspaceTarget } from "../features/workspace/chatState";
 import { WorkspaceView } from "../features/workspace/WorkspaceView";
 import { TaskWindow } from "../features/task/TaskWindow";
 import { asTab, type TaskTab } from "../features/task/taskTabs";
@@ -108,15 +108,22 @@ export function App() {
       if (!shown) void notifySessionWait(s.id).catch(() => undefined);
     }
   }, [workspace.data]);
-  useEffect(
-    () =>
-      onSessionClicked((id) => {
-        setOpened(undefined);
-        setTab("workspace");
-        setWsPicked({ kind: "session", id });
-      }),
-    [],
-  );
+  // the latest Workspace list, for a target sent whenever
+  const wsData = useRef(workspace.data);
+  wsData.current = workspace.data;
+  /** Another screen sends you to Workspace: a session, a task's session (at a step, a tab or
+   *  its question) or a session opened outside the app. A task window or box open here closes.
+   *  `false` = Workspace has nothing for it (a finished task without a session). */
+  const openWorkspace = useCallback((target: WorkspaceTarget): boolean => {
+    const pick = pickFor(target, wsData.current, Date.now());
+    if (!pick) return false;
+    setOpened(undefined);
+    setPeeking(undefined);
+    setTab("workspace");
+    setWsPicked(pick);
+    return true;
+  }, []);
+  useEffect(() => onSessionClicked((id) => openWorkspace({ sessionId: id })), [openWorkspace]);
 
   return (
     <div className="app">
@@ -141,7 +148,8 @@ export function App() {
         {/* keyed by tab: the new screen fades in instead of popping */}
         <div className="tab-pane" key={tab}>
           {tab === "task" && board.data && (
-            <TaskBoard board={board.data} onSettings={() => setSettingsOpen(true)} onChanged={refreshAll} />
+            <TaskBoard board={board.data} onSettings={() => setSettingsOpen(true)} onChanged={refreshAll}
+              onOpenWorkspace={openWorkspace} />
           )}
           {tab === "workspace" && (
             <WorkspaceView
@@ -153,12 +161,14 @@ export function App() {
             />
           )}
           {tab === "sessions" && (
-            <SessionsView snapshot={orbit.data} board={board.data} now={now} onChanged={refreshAll} />
+            <SessionsView snapshot={orbit.data} board={board.data} workspace={workspace.data} now={now}
+              onChanged={refreshAll} onOpenWorkspace={openWorkspace} />
           )}
         </div>
       </main>
       {opened && (
-        <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={refreshAll} />
+        <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={refreshAll}
+          onOpenWorkspace={openWorkspace} />
       )}
       {peeking && (
         <TaskPeek

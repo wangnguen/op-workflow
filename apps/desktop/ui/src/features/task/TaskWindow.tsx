@@ -33,6 +33,7 @@ import { ContinueDialog } from "./ContinueDialog";
 import { CopyPush } from "./CopyPush";
 import { DiffTab } from "./DiffTab";
 import { StartOver } from "./StartOver";
+import type { WorkspaceTarget } from "../workspace/chatState";
 import { FinishDialog } from "./FinishDialog";
 import { BudgetChoices } from "./GateChoices";
 import { TalkPanel } from "./TalkPanel";
@@ -65,10 +66,12 @@ interface Props {
   onClose: () => void;
   /** an action changed the task: reload the board and the map */
   onChanged: () => void;
+  /** "Mở trong Workspace": the task's chat there (the window closes) */
+  onOpenWorkspace?: (target: WorkspaceTarget) => boolean;
 }
 
 /** Brief, plan, review findings, push summary and log of one task, with the step buttons. */
-export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props) {
+export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged, onOpenWorkspace }: Props) {
   const fetcher = useCallback(() => getTaskDetail(wpId), [wpId]);
   const polled = usePolling(fetcher, POLL_MS);
   const [latest, setLatest] = useState<TaskDetail>();
@@ -204,6 +207,20 @@ export function TaskWindow({ wpId, tab: initialTab, onClose, onChanged }: Props)
             <span className="chip" title={t.cost}>
               {formatUsd(d.costUsd)}
             </span>
+          )}
+          {onOpenWorkspace && (
+            <button
+              type="button"
+              className="btn btn--sm"
+              title={t.toWorkspaceHint}
+              onClick={() => {
+                if (onOpenWorkspace({ wpId })) onClose();
+                else setError(t.toWorkspaceNone);
+              }}
+            >
+              <Icon name="chat" size={12} />
+              {t.toWorkspace}
+            </button>
           )}
           {d && d.status !== "running" && (
             <StartOver wpId={wpId} onDone={() => { polled.refresh(); onChanged(); }} />

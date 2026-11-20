@@ -29,7 +29,7 @@ import { DiffPanel } from "../task/DiffTab";
 import { ModeSelect } from "../settings/ModeSelect";
 import type { Option } from "../settings/stepChoice";
 import { AskCard } from "./AskCard";
-import { repoName } from "./chatState";
+import { type Focus, repoName, stepItemIndex } from "./chatState";
 import { AttachmentStrip, SuggestList, useAttachments, useSuggest } from "./ComposerExtras";
 import { useSessionChat } from "./useSessionChat";
 import { WorkspaceSteps } from "./WorkspaceSteps";
@@ -60,9 +60,13 @@ interface Props {
   onHidden: () => void;
   onChanged: () => void;
   onOpenTask: (wpId: number, tab: string) => void;
+  /** sent here from another screen: open this tab, land on a step's message or the question */
+  focus?: Focus;
 }
 
-export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOpenTask }: Props) {
+const reducedMotion = () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+
+export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOpenTask, focus }: Props) {
   const { chat, error, reload, setSession } = useSessionChat(sessionId);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState<string>();
@@ -118,6 +122,41 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
     const el = list.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [count, chat?.partial]);
+
+  // sent here from another screen: open the tab, then (once the chat is read) scroll to the
+  // message the step started with, or to the question; nothing to land on = the bottom as usual
+  const landing = useRef<Focus | undefined>(undefined);
+  useEffect(() => {
+    if (!focus) return;
+    landing.current = focus;
+    setView({ id: sessionId, tab: focus.view ?? "chat" });
+  }, [focus?.at]);
+  useEffect(() => {
+    const f = landing.current;
+    if (!f) return;
+    if ((f.view ?? "chat") !== "chat" || (!f.step && !f.ask)) {
+      landing.current = undefined;
+      return;
+    }
+    if (!chat) return;
+    landing.current = undefined;
+    const el = list.current;
+    const i = f.step ? stepItemIndex(chat.items, f.step) : -1;
+    const target = f.ask
+      ? el?.querySelector<HTMLElement>(".ask")
+      : i >= 0
+        ? el?.querySelector<HTMLElement>(`[data-item="${i}"]`)
+        : null;
+    if (!target) return;
+    stick.current = false;
+    requestAnimationFrame(() => {
+      target.scrollIntoView({ block: f.ask ? "center" : "start", behavior: reducedMotion() ? "auto" : "smooth" });
+      // a short glow shows where you landed
+      target.classList.remove("is-target");
+      void target.offsetWidth;
+      target.classList.add("is-target");
+    });
+  }, [chat, focus?.at]);
 
   // the input fits its text (wrapped lines too), before paint so it never flickers
   useLayoutEffect(() => {
@@ -452,7 +491,11 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
           {chat && chat.dropped > 0 && <p className="faint">{t.dropped(chat.dropped)}</p>}
           {chat?.items.map((item, i) => (
             <Fragment key={i}>
-              {item.step && <span className="chip ws-step-label">{stepLabel[item.step]}</span>}
+              {item.step && (
+                <span className="chip ws-step-label" data-item={i}>
+                  {stepLabel[item.step]}
+                </span>
+              )}
               <ChatItemView item={item} />
             </Fragment>
           ))}

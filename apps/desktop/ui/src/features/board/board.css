@@ -297,6 +297,23 @@ body.is-card-dragging * {
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
+/* the title is a button: it opens the task's chat in Workspace (Inbox: its description) */
+.card-title-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.card-title-btn:hover,
+.card-title-btn:focus-visible {
+  color: var(--accent-ink);
+  text-decoration: underline;
+}
 .card-sub {
   display: flex;
   flex-wrap: wrap;

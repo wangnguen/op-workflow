@@ -10,6 +10,7 @@ import { DetailPanel } from "./DetailPanel";
 import { Legend } from "./Legend";
 import { HOME_VIEW, OrbitScene, type ViewState } from "./OrbitScene";
 import { focusSystem, systemsOf } from "./focus";
+import { primaryAction, type Go } from "./primary";
 import { VIEW, clampZoom, planetDrift, topLeftFuelLabelX } from "./geometry";
 import { resolveSelection, type Selection } from "./selection";
 import { useCompactionMarkers } from "./useCompactionMarkers";
@@ -32,7 +33,13 @@ interface Props {
   onOpenLink?: (wpId: number) => void;
   /** the map is hidden (Phiên shows Bảng): stop the motion, keep the angle */
   paused?: boolean;
+  /** the main button of the picked item, or a double click on it */
+  onGo?: (go: Go) => void;
+  /** task ids whose session waits for an answer: their gate leads to the question */
+  waiting?: ReadonlySet<string>;
 }
+
+const NONE: ReadonlySet<string> = new Set();
 
 /** Where the map's top-left status line has to stop, for orbit.css. */
 const STATUS_CLEAR = {
@@ -60,7 +67,18 @@ function statusLine(s: OrbitSnapshot): string {
   return parts.join(" · ");
 }
 
-export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, onStartTask, onOpenTask, onOpenLink, paused = false }: Props) {
+export function OrbitView({
+  snapshot: live,
+  now,
+  focusId: focusProp,
+  onFocus,
+  onStartTask,
+  onOpenTask,
+  onOpenLink,
+  paused = false,
+  onGo,
+  waiting = NONE,
+}: Props) {
   const [picked, setPicked] = useState<Selection | null>(null);
   // several tasks can be in progress; the picked one sits in the centre
   const [ownFocus, setOwnFocus] = useState<string | null>(null);
@@ -76,6 +94,7 @@ export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, on
   const markers = useCompactionMarkers(snapshot.active);
   const layout = useLayout();
   const selection = resolveSelection(picked, snapshot);
+  const primary = primaryAction(selection, snapshot, waiting);
   // planets drift on their orbits; reduced motion, a hidden map or no task stops them in place
   const seconds = useMotionClock(!still && !paused && snapshot.active !== undefined);
   const rot = useMemo(() => planetDrift(seconds), [seconds]);
@@ -87,6 +106,10 @@ export function OrbitView({ snapshot: live, now, focusId: focusProp, onFocus, on
           snapshot={snapshot}
           selection={selection}
           onSelect={setPicked}
+          onOpen={(sel) => {
+            const go = primaryAction(sel, snapshot, waiting)?.go;
+            if (go && onGo && (go.to !== "start" || onStartTask)) onGo(go);
+          }}
           view={view}
           onView={setView}
           markers={markers}
@@ -170,7 +193,8 @@ ${vi.orbit.systemPick}`,
         name={vi.side.detail} className="orbit-side">
         {(hide) => (
           <DetailPanel snapshot={snapshot} selection={selection} onSelect={setPicked} now={now}
-            onStartTask={onStartTask} onOpenTask={onOpenTask} onOpenLink={onOpenLink} onHide={hide} />
+            onStartTask={onStartTask} onOpenTask={onOpenTask} onOpenLink={onOpenLink}
+            primary={primary} onGo={onGo} onHide={hide} />
         )}
       </SidePanel>
     </div>

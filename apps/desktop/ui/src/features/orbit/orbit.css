@@ -822,7 +822,23 @@
 .dp-empty {
   color: var(--text-dim);
 }
-/* buttons under an Inbox task: start it, or open it on OpenProject */
+/* the picked item's main button on top (Tới phiên, Mở chỗ cần làm…), what it does under it */
+.dp-primary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 0 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  animation: tab-in var(--dur-base) var(--ease-out);
+}
+.dp-primary p {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+/* buttons under an Inbox task: open it on OpenProject */
 .dp-actions {
   display: flex;
   flex-wrap: wrap;

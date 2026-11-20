@@ -5,6 +5,7 @@ import type { WorkspaceSnapshot } from "../../ipc/types";
 import { ChatPane } from "./ChatPane";
 import type { Selection } from "./chatState";
 import { NewSessionDialog } from "./NewSessionDialog";
+import { OutsidePane } from "./OutsidePane";
 import { SessionTree } from "./SessionTree";
 import "./workspace.css";
 
@@ -21,7 +22,7 @@ interface Props {
  *  picked. */
 export function WorkspaceView({ snapshot, selected, onSelect, onChanged, onOpenTask }: Props) {
   const [creating, setCreating] = useState(false);
-  const data = snapshot ?? { tasks: [], sessions: [] };
+  const data = snapshot ?? { tasks: [], sessions: [], outside: [] };
   const session = selected?.kind === "session" ? data.sessions.find((s) => s.id === selected.id) : undefined;
   const task =
     selected?.kind === "task"
@@ -41,7 +42,9 @@ export function WorkspaceView({ snapshot, selected, onSelect, onChanged, onOpenT
         )}
       </SidePanel>
       <section className="ws-main">
-        {sessionId || task ? (
+        {selected?.kind === "outside" ? (
+          <OutsidePane key={selected.id} id={selected.id} known={data.outside?.find((o) => o.id === selected.id)} />
+        ) : sessionId || task ? (
           <ChatPane
             key={task ? `task-${task.wpId}` : sessionId}
             sessionId={sessionId}
@@ -56,6 +59,7 @@ export function WorkspaceView({ snapshot, selected, onSelect, onChanged, onOpenT
             }}
             onChanged={onChanged}
             onOpenTask={onOpenTask}
+            focus={selected?.focus}
           />
         ) : (
           <div className="placeholder">

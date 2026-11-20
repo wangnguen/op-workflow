@@ -3,7 +3,8 @@
 //! a running session reach the window as the `opw://session` event (`SessionPatch`).
 
 use opw_domain::session::{
-    AskAnswer, ImageIn, NewSession, RepoScript, SessionChat, SessionView, SlashCommand, WorkspaceSnapshot,
+    AskAnswer, ImageIn, NewSession, OutsideChat, RepoScript, SessionChat, SessionView, SlashCommand,
+    WorkspaceSnapshot,
 };
 use opw_domain::view::{ApiError, DiffView};
 use opw_domain::workflow::StepKind;
@@ -234,4 +235,10 @@ pub fn terminal_control(
     service
         .workspace_sessions()?
         .terminal_control(&id, kind, &view, action)
+}
+
+/// The conversation of a Claude session opened outside the app (read-only).
+#[tauri::command(async)]
+pub fn outside_chat(id: String, service: State<'_, AppService>) -> Result<OutsideChat, ApiError> {
+    service.outside_chat(&id)
 }

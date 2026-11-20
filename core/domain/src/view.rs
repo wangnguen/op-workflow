@@ -352,6 +352,10 @@ pub struct SettingsView {
     /// What the window's X does (`onClose`).
     #[serde(default)]
     pub on_close: CloseChoice,
+    /// Claude sessions opened outside the app stay off the Phiên and Workspace screens
+    /// (`hideOutsideSessions`).
+    #[serde(default)]
+    pub hide_outside_sessions: bool,
     /// Harness library of every known repo.
     #[serde(default)]
     pub harness_libs: Vec<HarnessLib>,
@@ -1709,8 +1713,18 @@ pub struct InboxItem {
 pub struct DistantSession {
     pub id: String,
     pub agent: AgentKind,
+    /// Short name under the star: its folder.
     pub label: String,
     pub status: SessionStatus,
+    /// What it is about (Claude's title or its first message).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// The folder it runs in.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cwd: String,
+    /// Where it is open: VS Code, terminal, …
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub open_in: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

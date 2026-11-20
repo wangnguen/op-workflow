@@ -17,6 +17,7 @@ import {
   mockSetHarnessDir,
   mockSetRepoChecks,
   mockSetOnClose,
+  mockSetHideOutside,
   mockSetQuotaProbe,
   mockSetStepChoice,
   mockSetVerifyMcp,
@@ -54,6 +55,7 @@ import {
   mockSessionHide,
   mockSessionInterrupt,
   mockSessionNew,
+  mockOutsideChat,
   mockSessionOpenVscode,
   mockSessionSend,
   mockSessionSetMode,
@@ -65,6 +67,7 @@ import {
 import type {
   AskAnswer,
   NewSession,
+  OutsideChat,
   SessionChat,
   SessionPatch,
   SessionView,
@@ -401,6 +404,9 @@ export const closeWindow = (choice: CloseChoice, remember: boolean): Promise<nul
 /** Settings → Thông báo → "Khi đóng cửa sổ". */
 export const setOnClose = (choice: CloseChoice): Promise<SettingsView> =>
   call("set_on_close", () => mockSetOnClose(choice), { choice });
+/** Settings → Phiên: hide (or show again) Claude sessions opened outside the app. */
+export const setHideOutsideSessions = (hide: boolean): Promise<SettingsView> =>
+  call("set_hide_outside_sessions", () => mockSetHideOutside(hide), { hide });
 
 /** The tray icon asks to open the quota popover. Returns the unsubscribe function. */
 export const onOpenQuota = (handler: () => void): (() => void) => onEvent("opw://open-quota", () => handler());
@@ -471,6 +477,9 @@ export const getSessionScripts = (id: string): Promise<RepoScript[]> =>
   call("session_scripts", () => MOCK_SCRIPTS, { id });
 /** A Windows notification for a session that started waiting (when those are on). */
 export const notifySessionWait = (id: string): Promise<null> => call("session_notify_wait", () => null, { id });
+/** The conversation of a Claude session opened outside the app (read-only). */
+export const getOutsideChat = (id: string): Promise<OutsideChat> =>
+  call("outside_chat", () => mockOutsideChat(id), { id });
 /** A session's notification was clicked: open that session. */
 export const onSessionClicked = (handler: (id: string) => void): (() => void) =>
   onEvent<string>("opw://open-session", handler);

@@ -43,6 +43,7 @@ import type {
 import { AI_STEPS, OPTIONAL_STEPS, STEP_COUNT, STEP_ORDER, stepIndex } from "../shared/steps";
 import { mockDoneCards, mockFlowCard, mockFlowSystem, mockMoved, mockPlaceCard, mockRegisterFlow, mockStarted } from "./mockFlow";
 import { mockNewComments, mockNotify, mockUnreadAlerts } from "./mockTask";
+import { mockOutside, mockOutsideHidden, mockSetOutsideHidden } from "./mockWorkspace";
 
 export const DEMO_FRAME_MS = 4000;
 /** One demo frame stands for this much "real" time in timestamps. */
@@ -243,12 +244,6 @@ const INBOX: InboxItem[] = [
   },
 ];
 
-const BASE_DISTANT: DistantSession[] = [
-  { id: "ext-1", agent: "claude", label: "acme-desktop", status: "idle" },
-  { id: "ext-2", agent: "codex", label: "misfile-buster", status: "running" },
-  { id: "ext-3", agent: "claude", label: "study-workspace", status: "waiting" },
-];
-
 /** `?inbox=N&distant=N` in the browser URL fills the map with N items (layout reviews). */
 function urlCount(key: string): number | undefined {
   if (typeof window === "undefined") return undefined;
@@ -278,16 +273,26 @@ const INBOX_VIEW: InboxItem[] = (() => {
   );
 })();
 
-const DISTANT: DistantSession[] = (() => {
+/** The far stars: the mock sessions opened outside the app (mockWorkspace), or N made-up ones. */
+function distant(): DistantSession[] {
+  const base: DistantSession[] = mockOutside().map((o) => ({
+    id: o.id,
+    agent: "claude",
+    label: o.cwd.split("/").pop() ?? o.cwd,
+    status: o.state === "running" || o.state === "waiting" ? o.state : "idle",
+    title: o.title,
+    cwd: o.cwd,
+    openIn: o.openIn,
+  }));
   const n = urlCount("distant");
-  if (n === undefined) return BASE_DISTANT;
+  if (n === undefined || mockOutsideHidden()) return base;
   return Array.from({ length: n }, (_, i) => ({
     id: `ext-${i + 1}`,
-    agent: i % 3 === 1 ? "codex" : "claude",
-    label: BASE_DISTANT[i]?.label ?? `repo-${i + 1}`,
+    agent: "claude",
+    label: base[i]?.label ?? `repo-${i + 1}`,
     status: STATUSES[i % 3] ?? "idle",
   }));
-})();
+}
 
 // ---------- quota connections ----------
 
@@ -475,7 +480,7 @@ function secondSystem(now: number): TaskSystem {
 export function orbitForFrame(frameIndex: number, now: number): OrbitSnapshot {
   const f = frameAt(frameIndex);
   const quota = mockQuota(frameIndex, now);
-  if (!f.active) return { inbox: INBOX_VIEW, distant: DISTANT, quota };
+  if (!f.active) return { inbox: INBOX_VIEW, distant: distant(), quota };
   const active: TaskSystem = {
     taskId: ACTIVE_ID,
     title: "Không tải được danh sách file khi user chưa có org",
@@ -490,7 +495,7 @@ export function orbitForFrame(frameIndex: number, now: number): OrbitSnapshot {
     newComments: f.newComments,
   };
   if (f.gate) active.gate = { kind: f.gate.kind, since: iso(now - 40_000), message: f.gate.message };
-  return { active, others: [secondSystem(now)], inbox: INBOX_VIEW, distant: DISTANT, quota };
+  return { active, others: [secondSystem(now)], inbox: INBOX_VIEW, distant: distant(), quota };
 }
 
 export function boardForFrame(frameIndex: number, now: number): BoardSnapshot {
@@ -603,6 +608,7 @@ export function mockSettings(): SettingsView {
     claudeActiveProbeSec: mockProbe.activeSec,
     claudeProbeMin: mockProbe.idleMin,
     onClose: mockClose.choice,
+    hideOutsideSessions: mockOutsideHidden(),
     harnessLibs: mockHarnessLibs(),
     repoChecks: mockRepos.map((repo) => ({ repo, commands: mockChecks.get(repo) ?? [] })),
   };
@@ -645,6 +651,12 @@ const mockClose: { choice: CloseChoice } = { choice: "ask" };
 /** Browser preview: Settings → Thông báo → "Khi đóng cửa sổ", in memory only. */
 export function mockSetOnClose(choice: CloseChoice): SettingsView {
   mockClose.choice = choice;
+  return mockSettings();
+}
+
+/** Browser preview: Settings → Phiên → "Hiện phiên mở ngoài app", in memory only. */
+export function mockSetHideOutside(hide: boolean): SettingsView {
+  mockSetOutsideHidden(hide);
   return mockSettings();
 }
 

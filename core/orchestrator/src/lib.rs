@@ -41,16 +41,17 @@ use std::time::Duration;
 use opw_config::{Config, secrets};
 use opw_context::BriefComment;
 use opw_domain::session::{
-    AskAnswer, NewSession, SessionChat, SessionView, WorkspaceSnapshot, WorkspaceTask,
+    AskAnswer, NewSession, OutsideChat, OutsideSession, SessionChat, SessionState, SessionView,
+    WorkspaceSnapshot, WorkspaceTask,
 };
 use opw_domain::task::display_id;
 use opw_domain::view::{
-    AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CloseChoice, CommentsView, DataMode,
-    DeleteBranchRequest, DiffView, FindingDecision, FlowAction, FlowStatus, HarnessLib, InboxItem,
-    IssueFetch, IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, PushCheck, QuotaNote,
-    QuotaSnapshot, RepoChecks, RepoState, SettingsView, StartOptions, StartRequest, StartResult,
-    StepChoiceRequest, StepRef, StepView, TaskCard, TaskColumn, TaskDetail, TaskSystem, TaskText,
-    TasksDirChange, TodayStats, UpdateView,
+    AgentKind, AlertKind, AlertView, ApiError, AppInfo, BoardSnapshot, ChatView, CloseChoice, CommentsView,
+    DataMode, DeleteBranchRequest, DiffView, DistantSession, FindingDecision, FlowAction, FlowStatus,
+    HarnessLib, InboxItem, IssueFetch, IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider,
+    PushCheck, QuotaNote, QuotaSnapshot, RepoChecks, RepoState, SessionStatus, SettingsView, StartOptions,
+    StartRequest, StartResult, StepChoiceRequest, StepRef, StepView, TaskCard, TaskColumn, TaskDetail,
+    TaskSystem, TaskText, TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
@@ -679,7 +680,7 @@ impl AppService {
                     priority: state.priority(&wp.priority),
                 })
                 .collect(),
-            distant: Vec::new(),
+            distant: self.outside_sessions().iter().map(distant).collect(),
             quota: live_quota(&state),
             notice: self.inbox_notice(&state),
         }
@@ -1882,6 +1883,7 @@ impl AppService {
             claude_active_probe_sec: config.quota.claude_active_probe_sec,
             claude_probe_min: config.quota.claude_probe_min,
             on_close: config.on_close,
+            hide_outside_sessions: config.hide_outside_sessions,
             harness_libs: harness_libs(&config),
             repo_checks: repo_checks(&config),
         }
@@ -2194,7 +2196,33 @@ impl AppService {
         WorkspaceSnapshot {
             tasks,
             sessions: self.sessions.as_ref().map(Sessions::list).unwrap_or_default(),
+            outside: self.outside_sessions(),
         }
+    }
+
+    /// Claude sessions open outside the app (VS Code, a terminal); none when the user hid them.
+    fn outside_sessions(&self) -> Vec<OutsideSession> {
+        match &self.sessions {
+            Some(s) if !self.config().hide_outside_sessions => s.outside(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The conversation of a session opened outside the app (read-only).
+    pub fn outside_chat(&self, id: &str) -> Result<OutsideChat, ApiError> {
+        self.sessions()?.outside_chat(id)
+    }
+
+    /// Settings → Phiên: show or hide Claude sessions opened outside the app.
+    pub fn set_hide_outside_sessions(&self, hide: bool) -> Result<SettingsView, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
+        opw_config::save_hide_outside_sessions(path, hide)
+            .map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        Ok(self.settings())
     }
 
     /// Repos "+ Phiên mới" offers: those of tasks in progress, those the config knows and the
@@ -2452,6 +2480,26 @@ fn nx_task_url(state: &LiveState, wp_id: u64) -> Option<String> {
         .then(|| format!("{}/work_packages/{wp_id}", state.base_url.trim_end_matches('/')))
 }
 
+/// A session opened outside the app as a far star on the map, named after its folder.
+fn distant(s: &OutsideSession) -> DistantSession {
+    let folder = std::path::Path::new(&s.cwd)
+        .file_name()
+        .map_or_else(|| s.cwd.clone(), |n| n.to_string_lossy().into_owned());
+    DistantSession {
+        id: s.id.clone(),
+        agent: AgentKind::Claude,
+        label: folder,
+        status: match s.state {
+            SessionState::Running => SessionStatus::Running,
+            SessionState::Waiting => SessionStatus::Waiting,
+            SessionState::Idle | SessionState::Outside => SessionStatus::Idle,
+        },
+        title: s.title.clone(),
+        cwd: s.cwd.clone(),
+        open_in: s.open_in.clone(),
+    }
+}
+
 fn live_quota(state: &LiveState) -> Vec<QuotaSnapshot> {
     state.claude.iter().chain(state.codex.iter()).cloned().collect()
 }
@@ -2465,6 +2513,45 @@ struct TaskComments<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outside_sessions_are_far_stars_named_after_their_folder() {
+        let star = distant(&OutsideSession {
+            id: "89d2".into(),
+            cwd: "C:/code/acme-web".into(),
+            title: "Sửa lỗi build".into(),
+            state: SessionState::Waiting,
+            open_in: "VS Code".into(),
+            updated_at: None,
+        });
+        assert_eq!(
+            (star.label.as_str(), star.status, star.title.as_str(), star.agent),
+            (
+                "acme-web",
+                SessionStatus::Waiting,
+                "Sửa lỗi build",
+                AgentKind::Claude
+            )
+        );
+        // the setting hides them from the map and Workspace, and is kept in config.json
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, "{}").unwrap();
+        let service = AppService {
+            config_path: Some(path),
+            ..AppService::default()
+        };
+        service.reload_config();
+        assert!(!service.settings().hide_outside_sessions);
+        assert!(
+            service
+                .set_hide_outside_sessions(true)
+                .unwrap()
+                .hide_outside_sessions
+        );
+        assert!(service.outside_sessions().is_empty());
+        assert!(service.workspace_snapshot().outside.is_empty());
+    }
 
     #[test]
     fn ai_step_settings_validate_and_save_limits_separately() {

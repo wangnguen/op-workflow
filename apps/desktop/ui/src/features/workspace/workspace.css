@@ -351,6 +351,25 @@
 .ws-step-label {
   align-self: flex-start;
   margin-bottom: -4px;
+  scroll-margin-top: 12px;
+}
+/* where another screen sent you (a step's message, the question): a short glow */
+.ws-step-label.is-target,
+.ask.is-target {
+  animation: ws-target 1.8s var(--ease-out);
+}
+@keyframes ws-target {
+  0%,
+  45% {
+    box-shadow:
+      0 0 0 1px var(--accent),
+      0 0 0 4px var(--accent-soft);
+  }
+  100% {
+    box-shadow:
+      0 0 0 1px transparent,
+      0 0 0 4px transparent;
+  }
 }
 /* the header sits in the same centered column as the messages and the input: titles on the
    left, the session's buttons on the right */

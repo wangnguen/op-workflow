@@ -307,6 +307,9 @@ pub struct Config {
     pub notify: NotifySettings,
     /// What the window's X does (`onClose`): ask (default), tray or quit.
     pub on_close: CloseChoice,
+    /// Claude sessions opened outside the app (VS Code, a terminal) stay off the Phiên and
+    /// Workspace screens (`hideOutsideSessions`; shown by default).
+    pub hide_outside_sessions: bool,
     pub workspaces: Vec<String>,
     pub projects: BTreeMap<String, ProjectConfig>,
     pub repos: BTreeMap<String, RepoConfig>,
@@ -330,6 +333,7 @@ impl Config {
             steps: section(root, "steps", &mut warnings),
             notify: section(root, "notify", &mut warnings),
             on_close: section(root, "onClose", &mut warnings),
+            hide_outside_sessions: section(root, "hideOutsideSessions", &mut warnings),
             workspaces: section(root, "workspaces", &mut warnings),
             projects: section(root, "projects", &mut warnings),
             repos: section(root, "repos", &mut warnings),
@@ -391,6 +395,13 @@ pub fn save_notify(path: &Path, kind: NotifyKind, on: bool) -> ConfigResult<()> 
     };
     edit_file(path, |root| {
         object_at(root, "notify").insert(key.into(), Value::Bool(on));
+    })
+}
+
+/// Write `hideOutsideSessions`, keeping every other key.
+pub fn save_hide_outside_sessions(path: &Path, hide: bool) -> ConfigResult<()> {
+    edit_file(path, |root| {
+        root.insert("hideOutsideSessions".into(), Value::Bool(hide));
     })
 }
 
@@ -1005,6 +1016,12 @@ mod tests {
         );
         let cfg = Config::from_value(&json!({ "onClose": "minimize" }));
         assert_eq!((cfg.on_close, cfg.warnings.len()), (CloseChoice::Ask, 1));
+        // sessions opened outside the app are shown until the user hides them
+        assert!(!Config::load(&path).unwrap().hide_outside_sessions);
+        save_hide_outside_sessions(&path, true).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.hide_outside_sessions);
+        assert_eq!(cfg.on_close, CloseChoice::Tray, "other keys stay");
     }
 
     #[test]

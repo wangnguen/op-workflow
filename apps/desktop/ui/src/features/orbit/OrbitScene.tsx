@@ -30,6 +30,8 @@ interface Props {
   snapshot: OrbitSnapshot;
   selection: Selection | null;
   onSelect: (s: Selection) => void;
+  /** a double click on an item: do what its panel's main button does */
+  onOpen?: (s: Selection) => void;
   view: ViewState;
   onView: (v: ViewState) => void;
   markers: CompactionMarker[];
@@ -46,9 +48,17 @@ interface Props {
 export type ItemDragStart = (key: string, from: Point) => (e: PointerEvent<SVGGElement>) => void;
 
 const DRAG_THRESHOLD_PX = 4;
+/** A double click opens the item the click just before it picked, if it came this soon. */
+const OPEN_AFTER_PICK_MS = 600;
 
-export function OrbitScene({ snapshot, selection, onSelect, view, onView, markers, now, layout, onMoveItem, rot = 0 }: Props) {
+export function OrbitScene({ snapshot, selection, onSelect: select, onOpen, view, onView, markers, now, layout, onMoveItem, rot = 0 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
+  // the item the last click picked, so the double click that follows opens that very item
+  const lastPick = useRef<{ sel: Selection; at: number } | null>(null);
+  const onSelect = (s: Selection) => {
+    lastPick.current = { sel: s, at: performance.now() };
+    select(s);
+  };
   const drag = useRef<{ px: number; py: number; vx: number; vy: number; moved: boolean } | null>(null);
   const justDragged = useRef(false);
   const [dragging, setDragging] = useState(false);
@@ -145,6 +155,10 @@ export function OrbitScene({ snapshot, selection, onSelect, view, onView, marker
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
       onWheel={onWheel}
+      onDoubleClick={() => {
+        const p = lastPick.current;
+        if (p && performance.now() - p.at < OPEN_AFTER_PICK_MS) onOpen?.(p.sel);
+      }}
       onClickCapture={(e) => {
         if (justDragged.current) e.stopPropagation();
       }}

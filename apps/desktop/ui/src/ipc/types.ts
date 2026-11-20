@@ -232,6 +232,8 @@ export interface SettingsView {
   claudeProbeMin?: number;
   /** what the window's X does */
   onClose?: CloseChoice;
+  /** Claude sessions opened outside the app stay off the Phiên and Workspace screens */
+  hideOutsideSessions?: boolean;
   /** harness library of every known repo */
   harnessLibs?: HarnessLib[];
   /** Kiểm tra commands of every known repo (empty = guessed per package) */
@@ -712,11 +714,19 @@ export interface InboxItem {
   priority?: PriorityView;
 }
 
+/** A Claude session opened outside the app (VS Code, a terminal), as a far star. */
 export interface DistantSession {
   id: string;
   agent: AgentKind;
+  /** short name under the star: its folder */
   label: string;
   status: SessionStatus;
+  /** what it is about (Claude's title or its first message) */
+  title?: string;
+  /** the folder it runs in */
+  cwd?: string;
+  /** where it is open: VS Code, terminal, … */
+  openIn?: string;
 }
 
 export interface OrbitSnapshot {
@@ -1165,6 +1175,30 @@ export interface WorkspaceSnapshot {
   tasks: WorkspaceTask[];
   /** newest first */
   sessions: SessionView[];
+  /** Claude sessions open outside the app (empty when hidden in Settings), newest first */
+  outside?: OutsideSession[];
+}
+
+/** A Claude session opened outside the app (VS Code, a terminal); the app only shows it. */
+export interface OutsideSession {
+  id: string;
+  /** the folder it runs in */
+  cwd: string;
+  title: string;
+  /** idle, running or waiting */
+  state: SessionState;
+  /** where it is open: VS Code, terminal, … */
+  openIn: string;
+  /** when its status last changed */
+  updatedAt?: string;
+}
+
+/** The conversation of a session opened outside the app, read from its transcript. */
+export interface OutsideChat {
+  session: OutsideSession;
+  items: ChatItem[];
+  /** older items left out */
+  dropped: number;
 }
 
 /** permission: a tool call needs approval · question: AskUserQuestion · plan: ExitPlanMode ·
@@ -1313,6 +1347,8 @@ export interface Commands {
   session_commands: SlashCommand[];
   session_scripts: RepoScript[];
   session_notify_wait: null;
+  outside_chat: OutsideChat;
+  set_hide_outside_sessions: SettingsView;
 }
 
 export interface CommandArgs {
@@ -1376,4 +1412,6 @@ export interface CommandArgs {
   session_commands: { id: string };
   session_scripts: { id: string };
   session_notify_wait: { id: string };
+  outside_chat: { id: string };
+  set_hide_outside_sessions: { hide: boolean };
 }

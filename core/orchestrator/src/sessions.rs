@@ -20,8 +20,8 @@ use opw_agents::env::{Account, is_stripped};
 use opw_agents::session_log::{self, SessionLog};
 use opw_agents::transcript::claude_tool_text;
 use opw_domain::session::{
-    AskAnswer, AskKind, AskOption, AskQuestion, MODES, SessionAsk, SessionChat, SessionKind, SessionPatch,
-    SessionState, SessionView,
+    AskAnswer, AskKind, AskOption, AskQuestion, MODES, OutsideChat, OutsideSession, SessionAsk, SessionChat,
+    SessionKind, SessionPatch, SessionState, SessionView,
 };
 use opw_domain::view::{ApiError, QuotaSnapshot};
 use opw_storage::{SessionRow, Store};
@@ -497,6 +497,168 @@ fn parse_status(text: &str) -> Option<(String, Held)> {
             entrypoint: v["entrypoint"].as_str().unwrap_or_default().to_owned(),
         },
     ))
+}
+
+/// One Claude process's status file, as the list of sessions opened outside the app reads it.
+#[derive(Debug, Clone, PartialEq)]
+struct StatusRecord {
+    id: String,
+    pid: u32,
+    status: String,
+    entrypoint: String,
+    cwd: String,
+    /// `interactive` for a session someone works in (not a `-p` run).
+    kind: String,
+    /// The name Claude Code derived for it (`op-workflow-3a`).
+    name: String,
+    updated_ms: Option<u64>,
+}
+
+fn parse_record(text: &str) -> Option<StatusRecord> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let s = |k: &str| v[k].as_str().unwrap_or_default().to_owned();
+    Some(StatusRecord {
+        id: v["sessionId"].as_str()?.to_owned(),
+        pid: u32::try_from(v["pid"].as_u64()?).ok()?,
+        status: s("status"),
+        entrypoint: s("entrypoint"),
+        cwd: s("cwd"),
+        kind: s("kind"),
+        name: s("name"),
+        updated_ms: v["updatedAt"].as_u64().or_else(|| v["startedAt"].as_u64()),
+    })
+}
+
+fn status_records() -> Vec<StatusRecord> {
+    let Some(dir) = claude_home().map(|h| h.join("sessions")) else {
+        return Vec::new();
+    };
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter_map(|t| parse_record(&t))
+        .collect()
+}
+
+/// How often the list of running processes is asked again.
+const PIDS_FOR: Duration = Duration::from_secs(10);
+
+/// Process ids running on this machine (one `tasklist`, kept [`PIDS_FOR`]); `None` when they
+/// cannot be listed, then every status file counts.
+fn alive_pids() -> Option<std::collections::HashSet<u32>> {
+    type Cached = Option<(Instant, Option<std::collections::HashSet<u32>>)>;
+    static CACHE: Mutex<Cached> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, pids)) = cache.as_ref().filter(|(at, _)| at.elapsed() < PIDS_FOR) {
+        return pids.clone();
+    }
+    let pids = list_pids();
+    *cache = Some((Instant::now(), pids.clone()));
+    pids
+}
+
+#[cfg(windows)]
+fn list_pids() -> Option<std::collections::HashSet<u32>> {
+    let mut cmd = Command::new("tasklist");
+    cmd.args(["/NH", "/FO", "CSV"]);
+    crate::live::hidden(&mut cmd);
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
+    Some(pids_from_tasklist(&String::from_utf8_lossy(&out.stdout)))
+}
+
+#[cfg(not(windows))]
+fn list_pids() -> Option<std::collections::HashSet<u32>> {
+    None
+}
+
+/// The PID column of `tasklist /NH /FO CSV` (`"name.exe","1234","Console",…`).
+fn pids_from_tasklist(text: &str) -> std::collections::HashSet<u32> {
+    text.lines()
+        .filter_map(|l| l.split("\",\"").nth(1)?.trim_matches('"').parse().ok())
+        .collect()
+}
+
+/// Transcript path → (its modified time when read, the title found).
+type TitleCache = std::collections::BTreeMap<String, (Option<SystemTime>, Option<String>)>;
+
+/// Titles of sessions opened outside the app, by transcript, kept while it does not change.
+static OUTSIDE_TITLES: Mutex<TitleCache> = Mutex::new(std::collections::BTreeMap::new());
+
+/// What a session opened outside the app is called: the CLI's title, else its first message,
+/// else the name Claude Code gave it, else its folder.
+fn outside_title(r: &StatusRecord) -> String {
+    let fallback = || {
+        Some(r.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| repo_name(&r.cwd))
+    };
+    let Some(path) = transcript_path(&r.cwd, &r.id) else {
+        return fallback();
+    };
+    let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let key = path.to_string_lossy().into_owned();
+    let mut titles = OUTSIDE_TITLES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, title)) = titles.get(&key).filter(|(at, _)| *at == modified) {
+        return title.clone().unwrap_or_else(fallback);
+    }
+    let title = title_from_tail(&path).or_else(|| first_prompt(&path));
+    titles.insert(key, (modified, title.clone()));
+    title.unwrap_or_else(fallback)
+}
+
+/// The first thing typed in a transcript (its first lines only).
+fn first_prompt(path: &Path) -> Option<String> {
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(TITLE_TAIL * 4)
+        .read_to_end(&mut buf)
+        .ok()?;
+    String::from_utf8_lossy(&buf).lines().find_map(|l| {
+        let v: Value = serde_json::from_str(l).ok()?;
+        if v["type"] != "user" || v["isMeta"].as_bool() == Some(true) {
+            return None;
+        }
+        let content = &v["message"]["content"];
+        let text = content.as_str().map(str::to_owned).or_else(|| {
+            content.as_array()?.iter().find_map(|c| {
+                (c["type"] == "text")
+                    .then(|| c["text"].as_str().map(str::to_owned))
+                    .flatten()
+            })
+        })?;
+        let text = text.trim();
+        (!text.is_empty() && !text.starts_with('<')).then(|| first_line(text, TITLE_MAX))
+    })
+}
+
+fn repo_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned())
+}
+
+fn outside_session(r: &StatusRecord) -> OutsideSession {
+    OutsideSession {
+        id: r.id.clone(),
+        cwd: r.cwd.clone(),
+        title: outside_title(r),
+        state: match r.status.as_str() {
+            "busy" => SessionState::Running,
+            "waiting" => SessionState::Waiting,
+            _ => SessionState::Idle,
+        },
+        open_in: where_open(&r.entrypoint),
+        #[allow(clippy::cast_precision_loss)]
+        updated_at: r
+            .updated_ms
+            .and_then(|ms| opw_quota::unix_to_rfc3339(ms as f64 / 1000.0)),
+    }
 }
 
 fn status_of_pid(pid: u32) -> Option<String> {
@@ -1063,6 +1225,51 @@ impl Sessions {
                 e.view(held.get(&id))
             })
             .collect()
+    }
+
+    /// Claude sessions open on this machine that the app does not run (VS Code, a terminal):
+    /// status files of live interactive processes whose session the app does not know. Newest
+    /// first.
+    pub fn outside(&self) -> Vec<OutsideSession> {
+        let known: std::collections::HashSet<String> = self
+            .store()
+            .sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        let alive = alive_pids();
+        let mut records: Vec<StatusRecord> = status_records()
+            .into_iter()
+            .filter(|r| r.kind == "interactive" && !known.contains(&r.id))
+            .filter(|r| alive.as_ref().is_none_or(|a| a.contains(&r.pid)))
+            .collect();
+        records.sort_by_key(|r| std::cmp::Reverse(r.updated_ms));
+        records.iter().map(outside_session).collect()
+    }
+
+    /// The conversation of a session opened outside the app, read from its transcript.
+    pub fn outside_chat(&self, id: &str) -> Result<OutsideChat, ApiError> {
+        let session = self
+            .outside()
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| err("session.closed", "Phiên này không còn mở ở ngoài app"))?;
+        let Some(path) = transcript_path(&session.cwd, id) else {
+            return Ok(OutsideChat {
+                session,
+                items: Vec::new(),
+                dropped: 0,
+            });
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| err("session.transcript", format!("Không đọc được hội thoại: {e}")))?;
+        let log = SessionLog::from_transcript(&text);
+        Ok(OutsideChat {
+            session,
+            items: log.items().iter().cloned().map(crate::flow::chat_item).collect(),
+            dropped: u32::try_from(log.dropped()).unwrap_or(u32::MAX),
+        })
     }
 
     /// A new session: task `wp_id`'s (kind main) or one in `repo` without a task.
@@ -2380,6 +2587,26 @@ mod tests {
             suggestions: kind_req["permission_suggestions"].clone(),
             tool_use_id: kind_req["tool_use_id"].as_str().map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn outside_sessions_come_from_status_files_of_live_processes() {
+        let r = parse_record(
+            r#"{"pid":12032,"sessionId":"89d2","cwd":"c:\\code\\web","kind":"interactive","entrypoint":"claude-vscode","name":"web-3a","updatedAt":1795169659430,"status":"busy"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (r.id.as_str(), r.pid, r.kind.as_str()),
+            ("89d2", 12032, "interactive")
+        );
+        let s = outside_session(&r);
+        assert_eq!((s.state, s.open_in.as_str()), (SessionState::Running, "VS Code"));
+        assert!(s.updated_at.is_some());
+        assert_eq!(parse_record(r#"{"pid":1}"#), None, "no session id");
+        let pids = pids_from_tasklist(
+            "\"System Idle Process\",\"0\",\"Services\",\"0\",\"8 K\"\r\n\"claude.exe\",\"12032\",\"Console\",\"1\",\"90,000 K\"\r\n",
+        );
+        assert!(pids.contains(&12032) && pids.contains(&0) && pids.len() == 2);
     }
 
     #[test]

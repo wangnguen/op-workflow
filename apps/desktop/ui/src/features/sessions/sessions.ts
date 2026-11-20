@@ -1,35 +1,45 @@
 import { gateLabel, stepLabel, vi } from "../../i18n/vi";
-import type { AgentKind, AgentView, OrbitSnapshot, SessionStatus, StepKind, TaskSystem } from "../../ipc/types";
+import type {
+  AgentKind,
+  OrbitSnapshot,
+  SessionStatus,
+  SessionView,
+  StepKind,
+  TaskSystem,
+  WorkspaceSnapshot,
+} from "../../ipc/types";
 import { STEP_COUNT } from "../../shared/steps";
+import type { Go } from "../orbit/primary";
+import { repoName } from "../workspace/chatState";
 
 export interface SessionItem {
   id: string;
-  /** the AI of the session; absent for a task in "Đang làm" that has no AI session yet */
+  /** the AI of the card; absent for a task in "Đang làm" whose steps run no AI right now */
   agent?: AgentKind;
-  /** task the item belongs to (in-app sessions and tasks) */
+  /** task the item belongs to (in-app tasks) */
   taskId?: string;
   title: string;
   detail: string;
   /** branch of the task, for in-app items */
   branch?: string;
-  /** repo of the task, for in-app items */
+  /** repo of the task or session */
   repo?: string;
   /** OpenProject status of the task, for in-app items */
   nxStatus?: string;
   nxStatusColor?: string;
   status: SessionStatus;
-  /** 0..100 of the handoff threshold, when known */
+  /** 0..100 of the handoff threshold (or of the session's context), when known */
   contextPct?: number;
   inApp: boolean;
+  /** where "Tới phiên" (and the title) lead */
+  to: Go;
+  /** the session waits for an answer: "Tới phiên" lands on the question */
+  asks: boolean;
 }
 
 export type SessionGroups = Record<SessionStatus, SessionItem[]>;
 
-function flatten(agents: AgentView[]): AgentView[] {
-  return agents.flatMap((a) => [a, ...flatten(a.children)]);
-}
-
-/** What every in-app card shows about its task: name, OpenProject status, repo, branch. */
+/** What every task card shows about its task: name, OpenProject status, repo, branch. */
 function taskInfo(a: TaskSystem) {
   return {
     taskId: a.taskId,
@@ -48,54 +58,97 @@ function stepText(a: TaskSystem, kind: StepKind): string {
   return s ? `${s.index}/${STEP_COUNT} ${stepLabel[kind]}` : stepLabel[kind];
 }
 
-/** A task with no AI running: the last finished step, and it is the user's turn. */
-function taskItem(a: TaskSystem): SessionItem {
+/** One card per task in progress: the most urgent of its steps and of its Workspace sessions.
+ *  A gate or a session's question needs you; a step or a session that runs is running; a
+ *  step that waits to be run is idle; nothing run by an AI = your turn. */
+function taskCard(a: TaskSystem, sessions: SessionView[]): SessionItem {
+  const main = a.agents[0];
+  const asking = sessions.find((s) => s.state === "waiting");
+  const talking = sessions.find((s) => s.state === "running");
+  const step = main ? stepText(a, main.step) : undefined;
   const last = [...a.steps].reverse().find((s) => s.state === "done");
+  let status: SessionStatus;
+  let detail: string;
+  if (a.gate) {
+    status = "waiting";
+    detail = step ? `${step} · ${gateLabel[a.gate.kind]}` : gateLabel[a.gate.kind];
+  } else if (asking) {
+    status = "waiting";
+    detail = vi.sessions.sessionAsks;
+  } else if (main?.status === "running" || main?.status === "waiting") {
+    status = main.status;
+    detail = step ?? "";
+  } else if (talking) {
+    status = "running";
+    detail = vi.sessions.sessionRunning;
+  } else if (main && step) {
+    status = "idle";
+    detail = vi.flow.ready(step);
+  } else {
+    status = "waiting";
+    detail = last ? vi.sessions.yourTurn(stepLabel[last.kind]) : vi.sessions.notStarted;
+  }
+  const session = sessions.find((s) => s.kind === "main") ?? sessions[0];
+  const ratio = main && main.handoffAt > 0 ? (main.contextTokens / main.handoffAt) * 100 : session?.contextPercent;
   return {
     ...taskInfo(a),
     id: `task:${a.taskId}`,
-    detail: last ? vi.sessions.yourTurn(stepLabel[last.kind]) : vi.sessions.notStarted,
-    status: "waiting",
+    agent: main?.kind,
+    detail,
+    status,
+    contextPct: ratio,
+    to: { to: "session", taskId: a.taskId, ask: asking !== undefined && !a.gate },
+    asks: asking !== undefined && !a.gate,
   };
 }
 
-/** Group every known session (app agents, tasks waiting for you, outside sessions) by status. */
-export function groupSessions(s: OrbitSnapshot): SessionGroups {
+/** A Workspace session without a task. */
+function freeCard(v: SessionView): SessionItem {
+  const status: SessionStatus = v.state === "outside" ? "idle" : v.state;
+  const state = v.state === "outside" && v.outside ? vi.workspace.outsideAt(v.outside) : vi.workspace.state[v.state];
+  return {
+    id: `session:${v.id}`,
+    agent: "claude",
+    title: v.title,
+    detail: `${vi.sessions.free} · ${state ?? v.state}`,
+    repo: repoName(v.repo),
+    status,
+    contextPct: v.contextPercent,
+    inApp: true,
+    to: { to: "chat", sessionId: v.id, ask: v.state === "waiting" },
+    asks: v.state === "waiting",
+  };
+}
+
+/** Group what runs (tasks in progress, Workspace sessions without a task, Claude sessions open
+ *  outside the app) by status. */
+export function groupSessions(s: OrbitSnapshot, ws?: WorkspaceSnapshot): SessionGroups {
   const groups: SessionGroups = { waiting: [], running: [], idle: [] };
+  const sessions = ws?.sessions ?? [];
   for (const a of [s.active, ...(s.others ?? [])]) {
     if (!a) continue;
-    if (a.agents.length === 0) {
-      groups.waiting.push(taskItem(a));
-      continue;
-    }
-    for (const agent of flatten(a.agents)) {
-      const main = agent === a.agents[0];
-      const status: SessionStatus = a.gate && main ? "waiting" : agent.status;
-      const step = stepText(a, agent.step);
-      const detail =
-        a.gate && main
-          ? `${step} · ${gateLabel[a.gate.kind]}`
-          : main && agent.status === "idle"
-            ? vi.flow.ready(step)
-            : step;
-      groups[status].push({
-        ...taskInfo(a),
-        id: agent.id,
-        agent: agent.kind,
-        detail,
-        status,
-        contextPct: agent.handoffAt > 0 ? (agent.contextTokens / agent.handoffAt) * 100 : undefined,
-      });
-    }
+    const card = taskCard(
+      a,
+      sessions.filter((x) => x.taskId === a.taskId),
+    );
+    groups[card.status].push(card);
+  }
+  for (const v of sessions) {
+    if (v.wpId !== undefined) continue;
+    const card = freeCard(v);
+    groups[card.status].push(card);
   }
   for (const d of s.distant) {
     groups[d.status].push({
-      id: d.id,
+      id: `outside:${d.id}`,
       agent: d.agent,
-      title: d.label,
-      detail: vi.sessions.outside,
+      title: d.title || d.label,
+      detail: d.openIn ? `${vi.sessions.outside} · ${d.openIn}` : vi.sessions.outside,
+      repo: d.title ? d.label : undefined,
       status: d.status,
       inApp: false,
+      to: { to: "outside", id: d.id },
+      asks: false,
     });
   }
   return groups;

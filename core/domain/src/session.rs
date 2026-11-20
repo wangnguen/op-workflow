@@ -124,6 +124,38 @@ pub struct WorkspaceSnapshot {
     pub tasks: Vec<WorkspaceTask>,
     /// Newest first.
     pub sessions: Vec<SessionView>,
+    /// Claude sessions open on this machine that the app does not run (empty when the user
+    /// hid them). Newest first.
+    #[serde(default)]
+    pub outside: Vec<OutsideSession>,
+}
+
+/// A Claude session opened outside the app (VS Code, a terminal), read from Claude Code's
+/// status file and transcript. The app only shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutsideSession {
+    pub id: String,
+    /// The folder it runs in.
+    pub cwd: String,
+    pub title: String,
+    /// Idle, running or waiting (never `outside`: all of these are).
+    pub state: SessionState,
+    /// Where it is open: VS Code, terminal, …
+    pub open_in: String,
+    /// When its status last changed (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+/// The conversation of a session opened outside the app, read from its transcript.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutsideChat {
+    pub session: OutsideSession,
+    pub items: Vec<ChatItem>,
+    /// Older items left out.
+    pub dropped: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -111,3 +111,12 @@ pub fn set_repo_checks(
 pub fn step_models(service: State<'_, AppService>, refresh: bool) -> StepModels {
     service.step_models(refresh)
 }
+
+/// Settings → Phiên: show or hide Claude sessions opened outside the app.
+#[tauri::command]
+pub fn set_hide_outside_sessions(
+    service: State<'_, AppService>,
+    hide: bool,
+) -> Result<SettingsView, ApiError> {
+    service.set_hide_outside_sessions(hide)
+}

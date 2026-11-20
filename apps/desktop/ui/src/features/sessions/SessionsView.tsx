@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { vi } from "../../i18n/vi";
 import { errorMessage, isMockMode, openBrief, openTaskLink } from "../../ipc/client";
-import type { BoardSnapshot, OrbitSnapshot, TaskCard } from "../../ipc/types";
+import type { BoardSnapshot, OrbitSnapshot, TaskCard, WorkspaceSnapshot } from "../../ipc/types";
 import { useDismiss } from "../../shared/hooks";
 import { Icon } from "../../shared/ui/Icon";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
@@ -9,6 +9,8 @@ import { StatusChip } from "../../shared/ui/StatusChip";
 import { useStartWork } from "../board/useStartWork";
 import "../board/board.css";
 import { OrbitView } from "../orbit/OrbitView";
+import type { Go } from "../orbit/primary";
+import type { WorkspaceTarget } from "../workspace/chatState";
 import { TaskWindow } from "../task/TaskWindow";
 import type { TaskTab } from "../task/taskTabs";
 import { SessionBoard } from "./SessionBoard";
@@ -18,9 +20,13 @@ interface Props {
   snapshot: OrbitSnapshot | undefined;
   /** task cards (Inbox to start from here, ids → wpId for brief / issues) */
   board: BoardSnapshot | undefined;
+  /** Workspace sessions: which task's session waits, and the cards of sessions without a task */
+  workspace: WorkspaceSnapshot | undefined;
   now: number;
   /** reload board + orbit after starting a task */
   onChanged: () => void;
+  /** go to a session in Workspace (`false`: Workspace has nothing for it) */
+  onOpenWorkspace?: (target: WorkspaceTarget) => boolean;
 }
 
 type Mode = "orbit" | "board";
@@ -82,7 +88,7 @@ function StartMenu({ inbox, disabled, onPick }: { inbox: TaskCard[]; disabled: b
 }
 
 /** "Phiên": watch the agents on the map (Quỹ đạo) or as cards (Bảng); start tasks from here too. */
-export function SessionsView({ snapshot, board, now, onChanged }: Props) {
+export function SessionsView({ snapshot, board, workspace, now, onChanged, onOpenWorkspace }: Props) {
   const [mode, setMode] = useState<Mode>(loadMode);
   // the task in the centre of the map; a task started here is centred right away
   const [focusId, setFocusId] = useState<string | null>(null);
@@ -106,6 +112,35 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
   const openTask = (taskId: string, tab?: TaskTab) => {
     const c = card(taskId);
     if (c) setOpened({ wpId: c.wpId, tab });
+  };
+  // tasks whose session waits for an answer: their gate on the map leads to the question
+  const waiting = useMemo(
+    () => new Set((workspace?.sessions ?? []).filter((s) => s.state === "waiting" && s.taskId).map((s) => s.taskId ?? "")),
+    [workspace],
+  );
+  /** Where the map's main button, a double click or a card's "Tới phiên" leads. */
+  const go = (g: Go) => {
+    switch (g.to) {
+      case "session": {
+        const c = card(g.taskId);
+        // Workspace has nothing for the task: its window, on the Chat tab
+        if (!c || !onOpenWorkspace?.({ wpId: c.wpId, step: g.step, ask: g.ask })) openTask(g.taskId, "chat");
+        return;
+      }
+      case "chat":
+        onOpenWorkspace?.({ sessionId: g.sessionId, ask: g.ask });
+        return;
+      case "outside":
+        onOpenWorkspace?.({ outsideId: g.id });
+        return;
+      case "task":
+        openTask(g.taskId, g.tab);
+        return;
+      case "start": {
+        const c = card(g.taskId);
+        if (c) start.open(c);
+      }
+    }
   };
 
   // Both views stay mounted: switching only fades the other one in on top, so nothing is
@@ -148,11 +183,15 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
                 }}
                 onOpenTask={openTask}
                 onOpenLink={(wpId) => openTaskLink(wpId).catch(fail)}
+                onGo={go}
+                waiting={waiting}
               />
             </div>
             <div {...pane("board")}>
               <SessionBoard
                 snapshot={snapshot}
+                workspace={workspace}
+                onGo={go}
                 onShow={(taskId) => {
                   setFocusId(taskId);
                   changeMode("orbit");
@@ -180,7 +219,8 @@ export function SessionsView({ snapshot, board, now, onChanged }: Props) {
       </div>
       {start.dialog}
       {opened && (
-        <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={onChanged} />
+        <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={onChanged}
+          onOpenWorkspace={onOpenWorkspace} />
       )}
     </div>
   );

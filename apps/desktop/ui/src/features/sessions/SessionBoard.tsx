@@ -1,12 +1,17 @@
 import { agentLabel, vi } from "../../i18n/vi";
-import type { AgentKind, OrbitSnapshot, SessionStatus } from "../../ipc/types";
+import type { AgentKind, OrbitSnapshot, SessionStatus, WorkspaceSnapshot } from "../../ipc/types";
 import { Icon } from "../../shared/ui/Icon";
 import { StatusChip } from "../../shared/ui/StatusChip";
+import type { Go } from "../orbit/primary";
 import { StartOver } from "../task/StartOver";
 import { groupSessions, type SessionItem } from "./sessions";
 
 interface Props {
   snapshot: OrbitSnapshot;
+  /** Workspace sessions: a task's card takes their state, sessions without a task get cards */
+  workspace?: WorkspaceSnapshot;
+  /** "Tới phiên" and the card's title */
+  onGo?: (go: Go) => void;
   /** centre the task on the map */
   onShow?: (taskId: string) => void;
   /** "Lấy issue" for a task in "Đang làm" */
@@ -31,10 +36,12 @@ const COLUMNS: { key: SessionStatus; title: string; hint: string }[] = [
   { key: "idle", title: vi.sessions.idle, hint: vi.sessions.idleHint },
 ];
 
-function Card({ s, onShow, onIssues, onBrief, onOpen, reading, wpIdOf, onChanged }: { s: SessionItem } & Omit<Props, "snapshot">) {
+function Card({ s, onShow, onIssues, onBrief, onOpen, onGo, reading, wpIdOf, onChanged }: { s: SessionItem } & Omit<Props, "snapshot" | "workspace">) {
   const taskId = s.taskId;
-  const isTask = !s.agent;
+  // a task whose steps run no AI right now: issues and brief can be read again
+  const isTask = taskId !== undefined && !s.agent;
   const wpId = taskId && s.inApp ? wpIdOf?.(taskId) : undefined;
+  const goHint = s.inApp ? (s.asks ? vi.sessions.goAskHint : vi.sessions.goHint) : vi.sessions.goOutsideHint;
   return (
     <article className={`s-card s-card--${s.status}${s.agent ? ` s-card--${s.agent}` : " s-card--task"}`}>
       <header>
@@ -46,7 +53,13 @@ function Card({ s, onShow, onIssues, onBrief, onOpen, reading, wpIdOf, onChanged
           </span>
         )}
         <span className="s-titles">
-          <b title={s.title}>{s.title}</b>
+          {onGo ? (
+            <button type="button" className="s-title-btn" title={goHint} onClick={() => onGo(s.to)}>
+              {s.title}
+            </button>
+          ) : (
+            <b title={s.title}>{s.title}</b>
+          )}
           <span className="faint" title={s.agent ? `${agentLabel[s.agent]} · ${s.detail}` : s.detail}>
             {s.agent ? `${agentLabel[s.agent]} · ${s.detail}` : s.detail}
           </span>
@@ -76,6 +89,12 @@ function Card({ s, onShow, onIssues, onBrief, onOpen, reading, wpIdOf, onChanged
         </div>
       )}
       <footer className="s-actions">
+        {onGo && (
+          <button className={`btn btn--sm${s.asks ? " btn--primary" : ""}`} title={goHint} onClick={() => onGo(s.to)}>
+            <Icon name="chat" size={12} />
+            {s.asks ? vi.sessions.goAsk : vi.sessions.go}
+          </button>
+        )}
         {taskId && onShow && (
           <button className="btn btn--sm btn--ghost" title={vi.sessions.showOnMapHint} onClick={() => onShow(taskId)}>
             <Icon name="dot" size={12} />
@@ -107,19 +126,14 @@ function Card({ s, onShow, onIssues, onBrief, onOpen, reading, wpIdOf, onChanged
         {wpId !== undefined && (
           <StartOver wpId={wpId} small disabled={s.status === "running"} onDone={() => onChanged?.()} />
         )}
-        {!s.inApp && (
-          <button className="btn btn--sm" disabled title={vi.sessions.openPaneLater}>
-            {vi.sessions.openPane}
-          </button>
-        )}
       </footer>
     </article>
   );
 }
 
 /** Session cards grouped Cần bạn / Đang chạy / Rảnh. */
-export function SessionBoard({ snapshot, ...actions }: Props) {
-  const groups = groupSessions(snapshot);
+export function SessionBoard({ snapshot, workspace, ...actions }: Props) {
+  const groups = groupSessions(snapshot, workspace);
   return (
     <div className="session-board">
       {COLUMNS.map((col) => (

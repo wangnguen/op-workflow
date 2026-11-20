@@ -148,6 +148,7 @@ fn main() {
             alerts_api::set_notify,
             window_api::close_window,
             window_api::set_on_close,
+            settings_api::set_hide_outside_sessions,
             session_api::workspace_snapshot,
             session_api::workspace_repos,
             session_api::workspace_flow,
@@ -173,6 +174,7 @@ fn main() {
             session_api::session_commands,
             session_api::session_scripts,
             session_api::session_notify_wait,
+            session_api::outside_chat,
         ])
         .build(tauri::generate_context!())
         .expect("error while building op-workflow")

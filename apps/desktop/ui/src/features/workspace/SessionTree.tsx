@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { vi } from "../../i18n/vi";
-import type { SessionState, SessionView, WorkspaceSnapshot } from "../../ipc/types";
+import type { OutsideSession, SessionState, SessionView, WorkspaceSnapshot } from "../../ipc/types";
 import { formatHourMinute } from "../../shared/format";
 import { Icon } from "../../shared/ui/Icon";
 import { HideSideButton } from "../../shared/ui/SidePanel";
-import { OTHER_PROJECT, type Selection, type TaskNode, buildTree, repoName, taskState } from "./chatState";
+import { OTHER_PROJECT, type Selection, type TaskNode, buildTree, repoName, samePick, taskState } from "./chatState";
 
 const w = vi.workspace;
 
@@ -25,15 +25,13 @@ function stateLabel(s: SessionView): string {
   return s.state === "outside" && s.outside ? w.outsideAt(s.outside) : (w.state[s.state] ?? s.state);
 }
 
-/** Project → task → sessions, then the sessions without a task. Every row opens its chat. */
+/** Project → task → sessions, then the sessions without a task, then those open outside the
+ *  app. Every row opens its chat. */
 export function SessionTree({ snapshot, selected, onSelect, onNew, onHide }: Props) {
   const tree = buildTree(snapshot);
   const [closed, setClosed] = useState<Record<string, boolean>>({});
   const toggle = (key: string) => setClosed((c) => ({ ...c, [key]: !c[key] }));
-  const isOn = (s: Selection) =>
-    selected !== undefined &&
-    selected.kind === s.kind &&
-    (s.kind === "session" ? selected.kind === "session" && selected.id === s.id : selected.kind === "task" && selected.wpId === s.wpId);
+  const isOn = (s: Selection) => samePick(selected, s);
 
   const sessionRow = (s: SessionView, nested: boolean) => (
     <button
@@ -112,7 +110,29 @@ export function SessionTree({ snapshot, selected, onSelect, onNew, onHide }: Pro
     );
   };
 
-  const empty = tree.projects.length === 0 && tree.free.length === 0;
+  const outsideRow = (o: OutsideSession) => {
+    const state = w.state[o.state] ?? o.state;
+    return (
+      <button
+        key={o.id}
+        className={`ws-row ws-row--session${isOn({ kind: "outside", id: o.id }) ? " is-on" : ""}`}
+        onClick={() => onSelect({ kind: "outside", id: o.id })}
+        title={`${o.title} · ${state} · ${o.openIn}`}
+      >
+        <Dot state={o.state} />
+        <span className="ws-row-main">
+          <span className="ws-row-title">{o.title}</span>
+          <span className="ws-row-meta faint">
+            {`${o.openIn} · ${repoName(o.cwd)}`}
+            {o.updatedAt && ` · ${formatHourMinute(o.updatedAt)}`}
+          </span>
+        </span>
+      </button>
+    );
+  };
+
+  const outside = snapshot.outside ?? [];
+  const empty = tree.projects.length === 0 && tree.free.length === 0 && outside.length === 0;
   return (
     <nav className="ws-tree" aria-label={w.title}>
       <div className="ws-tree-top">
@@ -146,6 +166,16 @@ export function SessionTree({ snapshot, selected, onSelect, onNew, onHide }: Pro
               <span>{w.free}</span>
             </button>
             {!closed.free && tree.free.map((s) => sessionRow(s, false))}
+          </section>
+        )}
+        {outside.length > 0 && (
+          <section className="ws-group">
+            <button className="ws-group-head" aria-expanded={!closed.outside} title={w.outsideGroupHint}
+              onClick={() => toggle("outside")}>
+              <Icon name="chevron" size={11} className={!closed.outside ? "is-open" : undefined} />
+              <span>{w.outsideGroup}</span>
+            </button>
+            {!closed.outside && outside.map(outsideRow)}
           </section>
         )}
       </div>

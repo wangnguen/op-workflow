@@ -5,6 +5,8 @@ import type {
   AskAnswer,
   ChatItem,
   NewSession,
+  OutsideChat,
+  OutsideSession,
   SessionAsk,
   SessionChat,
   SessionPatch,
@@ -25,13 +27,14 @@ const tasks: WorkspaceTask[] = [
     repo: REPO_WEB,
     branch: "feature/187716",
   },
+  // the board's second task in progress (mock.ts SECOND)
   {
-    wpId: 188002,
-    taskId: "WP-188002",
-    title: "Thêm bộ lọc theo ngày ở trang báo cáo",
+    wpId: 188003,
+    taskId: "WP-188003",
+    title: "Tối ưu truy vấn danh sách thư mục dùng chung",
     project: "Web Platform",
-    repo: REPO_WEB,
-    branch: "feature/188002",
+    repo: REPO_API,
+    branch: "f/WP-188003",
   },
 ];
 
@@ -82,7 +85,11 @@ add(
     updatedAt: iso(4),
   }),
   [
-    { kind: "user", text: "Đọc brief.md rồi tìm nguyên nhân đơn hàng không hiện khi user chưa có tổ chức." },
+    {
+      kind: "user",
+      step: "analyze",
+      text: "Đọc brief.md rồi tìm nguyên nhân đơn hàng không hiện khi user chưa có tổ chức.",
+    },
     { kind: "text", text: "Mình đọc brief trước, rồi tìm chỗ lọc đơn hàng theo tổ chức." },
     { kind: "tool", tool: "Read", text: "brief.md", output: "# [WP-187716] Đơn hàng không hiện…" },
     { kind: "tool", tool: "Grep", text: "orgId  ·  src/orders", output: "src/orders/order.repository.ts:42" },
@@ -165,7 +172,81 @@ export function mockWorkspace(): WorkspaceSnapshot {
   const list = [...sessions.values()]
     .map((s) => ({ ...s.view, state: state(s) }))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  return structuredClone({ tasks, sessions: list });
+  return structuredClone({ tasks, sessions: list, outside: mockOutside() });
+}
+
+// ---------- sessions opened outside the app (the map's far stars ext-1..3) ----------
+
+const OUTSIDE: { view: OutsideSession; items: ChatItem[] }[] = [
+  {
+    view: {
+      id: "ext-1",
+      cwd: "C:/Users/dev/Desktop/acme-desktop",
+      title: "Sửa lỗi build trên Windows",
+      state: "idle",
+      openIn: "VS Code",
+      updatedAt: iso(12),
+    },
+    items: [
+      { kind: "user", text: "Build trên Windows báo thiếu `link.exe`, xem giúp." },
+      { kind: "tool", tool: "Bash", text: "cargo build", output: "error: linker `link.exe` not found" },
+      {
+        kind: "text",
+        text: "Máy chưa có Build Tools của Visual Studio. Cài gói **Desktop development with C++** rồi build lại.",
+      },
+    ],
+  },
+  {
+    view: {
+      id: "ext-2",
+      cwd: "C:/Users/dev/code/misfile-buster",
+      title: "Viết test cho bộ phân loại file",
+      state: "running",
+      openIn: "terminal",
+      updatedAt: iso(1),
+    },
+    items: [
+      { kind: "user", text: "Viết test cho `classify()` với các đuôi file lạ." },
+      { kind: "tool", tool: "Read", text: "src/classify.ts" },
+      { kind: "text", text: "Mình thêm test cho `.tar.gz`, file không đuôi và tên có dấu chấm ở đầu." },
+    ],
+  },
+  {
+    view: {
+      id: "ext-3",
+      cwd: "C:/Users/dev/Desktop/study-workspace",
+      title: "Tóm tắt chương 3",
+      state: "waiting",
+      openIn: "VS Code",
+      updatedAt: iso(3),
+    },
+    items: [
+      { kind: "user", text: "Tóm tắt chương 3 vào notes/ch3.md." },
+      { kind: "text", text: "Mình sẽ ghi bản tóm tắt vào `notes/ch3.md`." },
+    ],
+  },
+];
+
+let outsideHidden = false;
+
+/** Browser preview of Settings → "Hiện phiên mở ngoài app". */
+export const mockOutsideHidden = (): boolean => outsideHidden;
+export function mockSetOutsideHidden(hide: boolean): void {
+  outsideHidden = hide;
+}
+
+/** Sessions open outside the app, newest first (none when hidden). */
+export function mockOutside(): OutsideSession[] {
+  if (outsideHidden) return [];
+  return structuredClone(OUTSIDE.map((o) => o.view)).sort((a, b) =>
+    (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
+  );
+}
+
+export function mockOutsideChat(id: string): OutsideChat {
+  const o = outsideHidden ? undefined : OUTSIDE.find((x) => x.view.id === id);
+  if (!o) throw { code: "session.closed", message: "Phiên này không còn mở ở ngoài app" };
+  return structuredClone({ session: o.view, items: o.items, dropped: 0 });
 }
 
 export const mockWorkspaceRepos = (): string[] => [REPO_WEB, REPO_API, "C:/Users/dev/Desktop/acme-docs"];
