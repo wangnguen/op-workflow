@@ -15,7 +15,7 @@ import {
   openReleasePage,
 } from "../ipc/client";
 import { OPEN_QUOTA_EVENT } from "../features/quota/quota";
-import { CommentsPeek } from "../features/board/CommentsPeek";
+import { TaskPeek, type PeekTab } from "../features/board/TaskPeek";
 import { TaskBoard } from "../features/board/TaskBoard";
 import { SessionsView } from "../features/sessions/SessionsView";
 import { SettingsDialog } from "../features/settings/SettingsDialog";
@@ -39,7 +39,7 @@ export function App() {
   // a task opened from the bell
   const [opened, setOpened] = useState<{ wpId: number; tab?: TaskTab }>();
   // the comments of an Inbox task, opened from the bell (it has no task window yet)
-  const [peeking, setPeeking] = useState<{ wpId: number; taskId: string; title: string }>();
+  const [peeking, setPeeking] = useState<{ wpId: number; taskId: string; title: string; tab: PeekTab }>();
   // the window's X asked what to do (`onClose` = ask): AI steps running at that moment
   const [closing, setClosing] = useState<number>();
   // the chat picked in Workspace, kept while other tabs are shown
@@ -59,15 +59,17 @@ export function App() {
     refreshWorkspace();
   }, [refreshBoard, refreshOrbit, refreshWorkspace]);
   const openRelease = useCallback(() => void openReleasePage().catch(() => setSettingsOpen(true)), []);
-  /** A task from the bell or a clicked notification: its window, or its comments while it is
-   *  still in the Inbox (no task window yet). */
+  /** A task from the bell or a clicked notification: its window, or its "Xem task" box while it
+   *  is still in the Inbox (no task window yet). */
   const openTask = (wpId: number, alertTab: string | undefined) => {
     const known = board.data?.tasks.find((c) => c.wpId === wpId);
     if (known && known.column !== "inbox") setOpened({ wpId, tab: asTab(alertTab) });
     else {
-      // inbox tasks have no task window yet: the board, with the task's comments on top
+      // inbox tasks have no task window yet: the board, with the task's box on top
       setTab("task");
-      if (known) setPeeking({ wpId, taskId: known.id, title: known.title });
+      // the bell's rows of an Inbox task are its comments and status: the comments first
+      const tab: PeekTab = alertTab === "description" ? "description" : "comments";
+      if (known) setPeeking({ wpId, taskId: known.id, title: known.title, tab });
     }
   };
   // the latest board, for a notification clicked whenever
@@ -159,10 +161,11 @@ export function App() {
         <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={refreshAll} />
       )}
       {peeking && (
-        <CommentsPeek
+        <TaskPeek
           wpId={peeking.wpId}
           taskId={peeking.taskId}
           title={peeking.title}
+          tab={peeking.tab}
           onClose={() => setPeeking(undefined)}
           onChanged={refreshAll}
         />

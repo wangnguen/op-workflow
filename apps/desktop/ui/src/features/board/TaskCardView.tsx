@@ -3,6 +3,7 @@ import { agentLabel, stepHint, stepLabel, stepStateLabel, vi } from "../../i18n/
 import { errorMessage, getTaskDetail, openTaskLink } from "../../ipc/client";
 import type { FlowAction, IssueStatus, Provider, PushCheck, TaskCard } from "../../ipc/types";
 import { CopyPush } from "../task/CopyPush";
+import type { PeekTab } from "./TaskPeek";
 import type { TaskTab } from "../task/taskTabs";
 import { formatHourMinute, formatRelative, formatUsd } from "../../shared/format";
 import { STEP_COUNT } from "../../shared/steps";
@@ -39,8 +40,9 @@ export interface TaskCardProps {
   onFinish: (card: TaskCard) => void;
   /** "Làm tiếp" on a finished task */
   onContinue: (card: TaskCard) => void;
-  /** "N comment mới" on an Inbox card: show the comments without starting the task */
-  onPeekComments?: (card: TaskCard) => void;
+  /** "Xem task" / "N comment mới" on an Inbox card: its description and comments without
+   *  starting the task */
+  onPeek?: (card: TaskCard, tab: PeekTab) => void;
   /** the card can be dragged to another column (absent on the copy that follows the pointer) */
   drag?: CardDrag;
   /** this card is being dragged (its copy follows the pointer) */
@@ -67,10 +69,15 @@ const beforeAnalyze = (card: TaskCard) =>
   (card.step?.kind === "analyze" && card.step.state === "pending");
 
 function primaryAction(props: TaskCardProps) {
-  const { card, onStart, onPause, onBrief, onIssues, readingIssues, onOpen, onFlow, onLogin, onError, onFinish, onContinue } = props;
+  const { card, onStart, onPause, onBrief, onIssues, readingIssues, onOpen, onFlow, onLogin, onError, onFinish, onContinue, onPeek } = props;
   if (card.column === "inbox") {
     return (
       <>
+        {onPeek && (
+          <button className="btn btn--ghost btn--sm" title={b.peek.openHint} onClick={() => onPeek(card, "description")}>
+            {b.peek.open}
+          </button>
+        )}
         {card.step && (
           // back in the Inbox after work: its brief, plan, findings and history can be read
           <button className="btn btn--ghost btn--sm" title={vi.carryOn.parkedHint} onClick={() => onOpen(card, "progress")}>
@@ -392,8 +399,8 @@ export function TaskCardView(props: TaskCardProps) {
           <button className="badge" title={vi.flow.comments.openHint} onClick={() => props.onOpen(card, "comments")}>
             {b.newComments(card.newComments)}
           </button>
-        ) : card.newComments > 0 && props.onPeekComments ? (
-          <button className="badge" title={b.peek.hint} onClick={() => props.onPeekComments?.(card)}>
+        ) : card.newComments > 0 && props.onPeek ? (
+          <button className="badge" title={b.peek.hint} onClick={() => props.onPeek?.(card, "comments")}>
             {b.newComments(card.newComments)}
           </button>
         ) : card.newComments > 0 ? (

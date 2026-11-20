@@ -909,3 +909,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---------- tab Brief ---------- */
+
+.ws-brief-text {
+  overflow-wrap: anywhere;
+}

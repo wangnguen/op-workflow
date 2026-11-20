@@ -4,7 +4,7 @@ import { stepLabel, vi } from "../../i18n/vi";
 import { errorMessage, flowAction, isMockMode, openBrief, openLogin, pauseTask, setTasksDir } from "../../ipc/client";
 import type { BoardSnapshot, TaskCard, TaskColumn } from "../../ipc/types";
 import { ContinueDialog } from "../task/ContinueDialog";
-import { CommentsPeek } from "./CommentsPeek";
+import { TaskPeek, type PeekTab } from "./TaskPeek";
 import { FinishDialog } from "../task/FinishDialog";
 import { TaskWindow } from "../task/TaskWindow";
 import type { TaskTab } from "../task/taskTabs";
@@ -59,8 +59,8 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
   const start = useStartWork({ tasks: board.tasks, onChanged });
   const [offerBusy, setOfferBusy] = useState(false);
   const [opened, setOpened] = useState<{ wpId: number; tab?: TaskTab }>();
-  // "N comment mới" on an Inbox card
-  const [peeking, setPeeking] = useState<TaskCard>();
+  // "Xem task" / "N comment mới" on an Inbox card
+  const [peeking, setPeeking] = useState<{ card: TaskCard; tab: PeekTab }>();
   const [finishing, setFinishing] = useState<TaskCard>();
   const [continuing, setContinuing] = useState<{ card: TaskCard; to?: TaskColumn }>();
   const [doneOpen, setDoneOpen] = useState(readDoneOpen);
@@ -271,7 +271,7 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
                         onFlow={(c, action) => run(flowAction(c.wpId, action))}
                         onFinish={setFinishing}
                         onContinue={(c) => setContinuing({ card: c })}
-                        onPeekComments={setPeeking}
+                        onPeek={(c, tab) => setPeeking({ card: c, tab })}
                         onLogin={(p) => run(openLogin(p))}
                         onError={(text) => start.setFlash({ kind: "warn", text })}
                       />
@@ -342,13 +342,14 @@ export function TaskBoard({ board, onSettings, onChanged }: Props) {
         <TaskWindow wpId={opened.wpId} tab={opened.tab} onClose={() => setOpened(undefined)} onChanged={onChanged} />
       )}
       {peeking && (
-        <CommentsPeek
-          wpId={peeking.wpId}
-          taskId={peeking.id}
-          title={peeking.title}
+        <TaskPeek
+          wpId={peeking.card.wpId}
+          taskId={peeking.card.id}
+          title={peeking.card.title}
+          tab={peeking.tab}
           onClose={() => setPeeking(undefined)}
           onChanged={onChanged}
-          onStart={() => start.open(peeking)}
+          onStart={() => start.open(peeking.card)}
         />
       )}
     </div>

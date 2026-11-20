@@ -53,12 +53,37 @@
   flex: none;
   gap: 8px;
 }
-/* The comment box of an Inbox card: wider, the list scrolls inside. */
+/* "Xem task" of an Inbox card: the description and the comments in two tabs of one fixed height,
+   so switching moves nothing; each tab scrolls inside and fades in when shown. */
 .flow-sheet.peek-sheet {
-  width: min(640px, calc(100vw - 32px));
+  width: min(680px, calc(100vw - 32px));
+  height: min(620px, calc(100vh - 2 * var(--sheet-gap)));
+}
+.peek-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.peek-bar-end {
+  margin-left: auto;
 }
 .peek-body {
+  flex: 1;
+  min-height: 0;
   gap: 10px;
+  animation: flow-in var(--dur-base) var(--ease-out);
+}
+.peek-body[hidden] {
+  display: none;
+}
+.peek-count {
+  margin: 0;
+}
+.peek-text {
+  overflow-wrap: anywhere;
 }
 .sheet-foot.flow-foot {
   justify-content: flex-end;

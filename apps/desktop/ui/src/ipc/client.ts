@@ -37,6 +37,7 @@ import {
   mockSaveBrief,
   mockStepChat,
   mockTaskDetail,
+  mockTaskText,
 } from "./mockFlow";
 import {
   mockAlerts,
@@ -103,6 +104,7 @@ import type {
   StepChoiceRequest,
   StepModels,
   TaskDetail,
+  TaskText,
   TasksDirChange,
   UpdateView,
   RepoPair,
@@ -313,6 +315,10 @@ export const openTaskLink = (wpId: number, url?: string): Promise<null> =>
 /** Comment tab: OpenProject comments (read now) and the last issue read; `markSeen` clears "mới". */
 export const getTaskComments = (wpId: number, markSeen: boolean): Promise<CommentsView> =>
   call("task_comments", () => mockTaskComments(wpId, markSeen), { wpId, markSeen });
+/** What the task asks: its brief once started, OpenProject's description (`readNow`: asked now,
+ *  else the last task list). Works for an Inbox task. */
+export const getTaskText = (wpId: number, readNow: boolean): Promise<TaskText> =>
+  call("task_text", () => mockTaskText(wpId, readNow), { wpId, readNow });
 /** Rewrites the brief's OpenProject comment section with the comments there now. */
 export const refreshBriefComments = (wpId: number): Promise<CommentsView> =>
   call("refresh_brief_comments", () => mockRefreshBriefComments(wpId), { wpId });

@@ -29,6 +29,7 @@ import type {
   TaskCard,
   TaskColumn,
   TaskDetail,
+  TaskText,
   TestView,
   ToolEvent,
   TalkTurn,
@@ -1482,6 +1483,34 @@ export function mockSaveBrief(wpId: number, text: string): TaskDetail {
     f.planChange = "Brief đã đổi sau khi bạn duyệt plan.\nBrief / plan được sửa tay.";
   }
   return mockTaskDetail(wpId);
+}
+
+/** OpenProject's description of a preview task (a made-up one, the repo is public). */
+const DESCRIPTION = `User chưa thuộc org nào mở trang **Files** thì gặp lỗi 500.
+
+## Cách tái hiện
+1. Đăng nhập bằng user mới, chưa được mời vào org
+2. Mở trang Files
+3. Thấy trang trắng, console báo \`GET /api/files 500\`
+
+## Mong muốn
+- Trang hiện danh sách trống kèm câu "Bạn chưa thuộc org nào"
+- Không gọi API khi chưa có org
+
+Issue gốc: https://github.com/acme/api/issues/456`;
+
+/** The Inbox "Xem task" box and the Workspace Brief tab. `?descError`: OpenProject cannot be
+ *  read now. A task with a mock flow was started, so it has a brief; the Workspace lists only
+ *  started tasks. */
+export function mockTaskText(wpId: number, readNow: boolean): TaskText {
+  const f = flows.get(wpId) ?? (readNow ? undefined : flowOf(wpId));
+  const failed = readNow && typeof location !== "undefined" && new URLSearchParams(location.search).has("descError");
+  return {
+    description: wpId % 5 === 0 ? "" : DESCRIPTION,
+    descriptionError: failed ? "Không đọc được mô tả từ OpenProject: cannot reach OpenProject: timed out" : undefined,
+    brief: f?.brief,
+    taskUrl: `https://openproject.example.com/work_packages/${wpId}`,
+  };
 }
 
 /** Card fields of a task with a mock flow (undefined when the task has none). */

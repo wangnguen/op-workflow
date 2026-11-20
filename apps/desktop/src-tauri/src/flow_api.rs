@@ -3,7 +3,7 @@
 //! A step runs on its own thread in the core; these commands only start, stop or read it.
 
 use opw_domain::view::{
-    ApiError, ChatView, CommentsView, DiffView, FindingDecision, FlowAction, PushCheck, TaskDetail,
+    ApiError, ChatView, CommentsView, DiffView, FindingDecision, FlowAction, PushCheck, TaskDetail, TaskText,
 };
 use opw_orchestrator::AppService;
 use tauri::State;
@@ -55,6 +55,13 @@ pub fn task_comments(
     service: State<'_, AppService>,
 ) -> Result<CommentsView, ApiError> {
     service.task_comments(wp_id, mark_seen)
+}
+
+/// What the task asks: its brief once started and OpenProject's description (`read_now`:
+/// network; else the last task list). Works for an Inbox task too.
+#[tauri::command(async)]
+pub fn task_text(wp_id: u64, read_now: bool, service: State<'_, AppService>) -> Result<TaskText, ApiError> {
+    service.task_text(wp_id, read_now)
 }
 
 /// Rewrite the brief's OpenProject comment section with the comments there now.

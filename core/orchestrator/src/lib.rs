@@ -49,8 +49,8 @@ use opw_domain::view::{
     DeleteBranchRequest, DiffView, FindingDecision, FlowAction, FlowStatus, HarnessLib, InboxItem,
     IssueFetch, IssueStatus, NotifyKind, OrbitSnapshot, ProjectMemory, Provider, PushCheck, QuotaNote,
     QuotaSnapshot, RepoChecks, RepoPair, RepoState, SettingsView, StartOptions, StartRequest, StartResult,
-    StepChoiceRequest, StepRef, StepView, TaskCard, TaskColumn, TaskDetail, TaskSystem, TasksDirChange,
-    TodayStats, UpdateView,
+    StepChoiceRequest, StepRef, StepView, TaskCard, TaskColumn, TaskDetail, TaskSystem, TaskText,
+    TasksDirChange, TodayStats, UpdateView,
 };
 use opw_domain::workflow::{StepKind, StepState};
 use opw_storage::{Store, TaskRow};
@@ -1383,6 +1383,49 @@ impl AppService {
         Ok(view)
     }
 
+    /// What the task asks: its brief once it was started, and OpenProject's description. Works
+    /// for a task never started (the Inbox "Xem task" box). `read_now`: ask OpenProject now
+    /// (network, off the UI thread), falling back to the last task list; else the list only.
+    pub fn task_text(&self, wp_id: u64, read_now: bool) -> Result<TaskText, ApiError> {
+        let brief = self
+            .task_ctx(wp_id)
+            .ok()
+            .and_then(|(ctx, _)| std::fs::read_to_string(ctx.task_dir.join(flow::BRIEF_FILE)).ok());
+        let state = self.live_state().unwrap_or_default();
+        let listed = state
+            .tasks
+            .as_ref()
+            .and_then(|tasks| tasks.iter().find(|wp| wp.id == wp_id))
+            .map(|wp| wp.description.clone());
+        if listed.is_none() && brief.is_none() && self.find_task(wp_id).is_none() {
+            return Err(task_not_found());
+        }
+        let (description, description_error) = if read_now {
+            match self.read_description(wp_id, &state) {
+                Ok(text) => (text, None),
+                Err(e) => (listed.unwrap_or_default(), Some(e)),
+            }
+        } else {
+            (listed.unwrap_or_default(), None)
+        };
+        Ok(TaskText {
+            description,
+            description_error,
+            brief,
+            task_url: nx_task_url(&state, wp_id),
+        })
+    }
+
+    fn read_description(&self, wp_id: u64, state: &LiveState) -> Result<String, String> {
+        let Some(token) = state.token.as_deref().filter(|_| !state.base_url.is_empty()) else {
+            return Err("Chưa có token OpenProject: nhập ở Cài đặt → OpenProject để đọc mô tả.".into());
+        };
+        HttpTracker::new(&state.base_url, token)
+            .work_package(wp_id)
+            .map(|wp| wp.description)
+            .map_err(|e| format!("Không đọc được mô tả từ OpenProject: {e}"))
+    }
+
     /// OpenProject comments of one task, read now; the cache (badges) and the saved copy follow.
     /// Callers must not hold the store lock.
     fn read_comments(&self, wp_id: u64, state: &LiveState) -> Result<Vec<Comment>, String> {
@@ -2655,13 +2698,21 @@ mod tests {
         let flow = Flow::new_without_mcp(store.clone(), Arc::new(NoAi), None);
         let svc = AppService::with_flow(store, flow, Config::default(), tmp.path().to_path_buf());
         assert_eq!(svc.task_detail(8).unwrap_err().code, "task.notFound");
+        assert_eq!(svc.task_text(8, false).unwrap_err().code, "task.notFound");
         let d = svc.task_detail(7).unwrap();
         assert_eq!(d.current, Some(StepKind::Analyze));
         assert!(d.brief.is_none());
+        assert_eq!(svc.task_text(7, false).unwrap().brief, None);
         std::fs::create_dir_all(tmp.path().join("WP-7")).unwrap();
         assert_eq!(svc.save_brief(7, "  ").unwrap_err().code, "brief.empty");
         let d = svc.save_brief(7, "# [WP-7] t\n").unwrap();
         assert_eq!(d.brief.as_deref(), Some("# [WP-7] t\n"));
+        // the Workspace Brief tab reads the same file; no token: the description says why
+        let text = svc.task_text(7, true).unwrap();
+        assert_eq!(text.brief.as_deref(), Some("# [WP-7] t\n"));
+        assert_eq!(text.description, "");
+        assert!(text.description_error.unwrap().contains("token"));
+        assert_eq!(svc.task_text(7, false).unwrap().description_error, None);
         // done before the push summary: the remaining steps are skipped, the task leaves "Đang làm"
         // and the last push check remembers the user overrode it
         let check = PushCheck {

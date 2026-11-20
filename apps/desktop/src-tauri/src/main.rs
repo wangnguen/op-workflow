@@ -135,6 +135,7 @@ fn main() {
             flow_api::open_task_link,
             flow_api::open_task_path,
             flow_api::task_comments,
+            flow_api::task_text,
             flow_api::refresh_brief_comments,
             flow_api::task_diff,
             flow_api::step_chat,

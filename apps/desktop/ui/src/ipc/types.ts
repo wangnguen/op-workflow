@@ -524,6 +524,17 @@ export interface CommentsView {
   fetchedAt: string;
 }
 
+/** What a task asks: the Inbox "Xem task" box and the Workspace Brief tab. */
+export interface TaskText {
+  /** OpenProject's description as written there (markdown); "" when it has none */
+  description: string;
+  /** why the description could not be read now: `description` is the last task list's copy */
+  descriptionError?: string;
+  /** brief.md of a started task (what the AI reads) */
+  brief?: string;
+  taskUrl?: string;
+}
+
 // ---------- diff ----------
 
 export type DiffChange = "added" | "deleted" | "modified" | "renamed";
@@ -1277,6 +1288,7 @@ export interface Commands {
   open_task_folder: null;
   open_task_link: null;
   task_comments: CommentsView;
+  task_text: TaskText;
   refresh_brief_comments: CommentsView;
   task_diff: DiffView;
   alerts: AlertView[];
@@ -1343,6 +1355,7 @@ export interface CommandArgs {
   open_task_folder: { wpId: number };
   open_task_link: { wpId: number; url?: string };
   task_comments: { wpId: number; markSeen: boolean };
+  task_text: { wpId: number; readNow: boolean };
   refresh_brief_comments: { wpId: number };
   task_diff: { wpId: number; markSeen: boolean };
   mark_alerts_read: { ids: number[] };

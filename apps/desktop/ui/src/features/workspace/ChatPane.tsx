@@ -24,6 +24,7 @@ import { Icon } from "../../shared/ui/Icon";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
 import { ChatItemView } from "../chat/ChatItems";
 import { CommentsTab } from "../task/CommentsTab";
+import { BriefPane } from "./BriefPane";
 import { DiffPanel } from "../task/DiffTab";
 import { ModeSelect } from "../settings/ModeSelect";
 import type { Option } from "../settings/stepChoice";
@@ -41,7 +42,7 @@ const tt = vi.workspace.terminal;
 const SHELLS = ["powerShell", "gitBash"] as const;
 type Shell = (typeof SHELLS)[number];
 const shellOptions: Option[] = SHELLS.map((s) => ({ value: s, label: tt.shells[s], about: tt.shellAbout[s] }));
-type View = "chat" | "claude" | "shell" | "changes" | "comments";
+type View = "chat" | "claude" | "shell" | "changes" | "brief" | "comments";
 const tc = vi.workspace.composer;
 const tsc = vi.workspace.scripts;
 const MODES = ["default", "acceptEdits", "plan", "auto"];
@@ -280,6 +281,12 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
           {ws.tabChanges}
         </button>
         {task && (
+          <button className="btn btn--sm" aria-pressed={tab === "brief"} title={ws.tabBriefHint}
+            onClick={() => setView({ id: sessionId, tab: "brief" })}>
+            {ws.tabBrief}
+          </button>
+        )}
+        {task && (
           <button className="btn btn--sm" aria-pressed={tab === "comments"} title={ws.tabCommentsHint}
             onClick={() => setView({ id: sessionId, tab: "comments" })}>
             {ws.tabComments}
@@ -348,6 +355,11 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
       {tab === "changes" && sessionId && (
         <div className="ws-tool-wrap">
           <DiffPanel key={sessionId} load={loadDiff} findings={[]} onOpenFile={openFile} onCompare={compareFile} />
+        </div>
+      )}
+      {tab === "brief" && task && (
+        <div className="ws-tool-wrap">
+          <BriefPane key={task.wpId} wpId={task.wpId} onOpenTask={onOpenTask} />
         </div>
       )}
       {tab === "comments" && task && (

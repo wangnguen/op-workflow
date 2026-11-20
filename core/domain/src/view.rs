@@ -824,6 +824,25 @@ pub struct CommentsView {
     pub fetched_at: String,
 }
 
+/// What a task asks, readable before it is started (the Inbox "Xem task" box) and beside its
+/// sessions (the Workspace Brief tab).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskText {
+    /// OpenProject's description as written there (raw markdown); empty when it has none or it
+    /// could not be read.
+    pub description: String,
+    /// Why the description could not be read now: `description` is the copy from the last task
+    /// list (or empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_error: Option<String>,
+    /// `brief.md` of a task that was started (what the AI reads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
+}
+
 // ---------- diff ----------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
