@@ -205,6 +205,68 @@
   padding: 10px 18px;
   border-bottom: 1px solid var(--line);
 }
+.ws-chat-body,
+.ws-term-wrap,
+.ws-terminal {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.ws-chat-body[hidden],
+.ws-term-wrap[hidden] {
+  display: none;
+}
+.ws-term-wrap {
+  animation: tab-in var(--dur-base) var(--ease-out);
+}
+.ws-term-wait {
+  margin: 12px 18px;
+}
+/* Chat | Terminal của phiên | Shell: one row of the same height whatever is picked */
+.ws-tabs,
+.ws-terminal-bar,
+.ws-shell-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 6px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.ws-tabs .btn {
+  gap: 6px;
+}
+.ws-tabs button[aria-pressed="true"] {
+  background: var(--fill);
+  border-color: var(--border-strong);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+/* the console of this tab runs */
+.ws-tab-live {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--st-running);
+}
+.ws-terminal-bar {
+  justify-content: space-between;
+}
+.input.ws-terminal-search {
+  width: min(320px, 50%);
+  height: 28px;
+}
+.ws-terminal-note {
+  margin: 8px 18px 0;
+}
+.ws-terminal-host {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  margin: 8px 12px;
+}
 /* the header sits in the same centered column as the messages and the input: titles on the
    left, the session's buttons on the right */
 .ws-chat-col.ws-chat-head-in {

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { vi } from "../../i18n/vi";
 import {
   answerSession,
@@ -12,7 +12,7 @@ import {
   setSessionMode,
   stopSession,
 } from "../../ipc/client";
-import type { AskAnswer, WorkspaceTask } from "../../ipc/types";
+import type { AskAnswer, TerminalKind, WorkspaceTask } from "../../ipc/types";
 import { Markdown } from "../../shared/Markdown";
 import { Icon } from "../../shared/ui/Icon";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
@@ -23,7 +23,15 @@ import { AskCard } from "./AskCard";
 import { repoName } from "./chatState";
 import { useSessionChat } from "./useSessionChat";
 
+const TerminalPane = lazy(() => import("./TerminalPane").then((m) => ({ default: m.TerminalPane })));
+
 const t = vi.workspace.chat;
+const ws = vi.workspace;
+const tt = vi.workspace.terminal;
+const SHELLS = ["powerShell", "gitBash"] as const;
+type Shell = (typeof SHELLS)[number];
+const shellOptions: Option[] = SHELLS.map((s) => ({ value: s, label: tt.shells[s], about: tt.shellAbout[s] }));
+type View = "chat" | "claude" | "shell";
 const MODES = ["default", "acceptEdits", "plan", "auto"];
 /** the input grows with its text up to this height, then scrolls */
 const INPUT_MAX = 220;
@@ -47,6 +55,10 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
   const [failure, setFailure] = useState<{ message: string; outside: boolean }>();
   // a draft's mode, set on the session when the first message creates it ("" = the CLI's own)
   const [draftMode, setDraftMode] = useState("");
+  const [view, setView] = useState<{ id?: string; tab: View }>();
+  const tab = view?.id === sessionId ? (view?.tab ?? "chat") : "chat";
+  const [shell, setShell] = useState<Shell>("powerShell");
+  const [shellRequested, setShellRequested] = useState<string>();
   const list = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -54,14 +66,23 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
   const session = chat?.session;
   const draft = !sessionId;
   const outside = session?.state === "outside";
+  const terminal = session?.terminal === true;
   const running = session?.state === "running";
   const asks = chat?.asks ?? [];
   const count = (chat?.items.length ?? 0) + (chat?.partial ? 1 : 0) + asks.length;
 
-  // a new session shown, or the draft of another task: start at the bottom, fresh input
+  // a new session shown, or the draft of another task: start at the bottom, fresh input. The pane
+  // stays mounted while a task's draft becomes its session (what was typed and picked is kept),
+  // but another session of the same task starts clean.
+  const shown = useRef(sessionId);
   useEffect(() => {
     stick.current = true;
     setFailure(undefined);
+    if (shown.current !== undefined && shown.current !== sessionId) {
+      setText("");
+      setDraftMode("");
+    }
+    shown.current = sessionId;
     input.current?.focus();
   }, [sessionId, task?.wpId]);
 
@@ -93,7 +114,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
 
   const send = (force = false) => {
     const message = text.trim();
-    if (!message || busy) return;
+    if (!message || busy || terminal) return;
     stick.current = true;
     void act("send", async () => {
       let id = sessionId;
@@ -107,6 +128,29 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
       setText("");
       if (sessionId) setSession(view);
     });
+  };
+
+  const switchTab = (next: View) => {
+    if (next === "chat" || sessionId) {
+      setView({ id: sessionId, tab: next });
+      return;
+    }
+    void act("terminal", async () => {
+      const created = await newSession(task ? { wpId: task.wpId } : {});
+      if (draftMode) await setSessionMode(created.id, draftMode);
+      setView({ id: created.id, tab: next });
+      onCreated(created.id);
+    });
+  };
+  // a terminal stays mounted (hidden) while it runs, so going back to it keeps its screen
+  const claudeShown = !!sessionId && (tab === "claude" || terminal);
+  const shellKind: TerminalKind | undefined =
+    session?.shell ?? (shellRequested !== undefined && shellRequested === sessionId ? shell : undefined);
+  const closeTerminal = (kind: TerminalKind) => {
+    if (kind !== "claude") setShellRequested(undefined);
+    setView({ id: sessionId, tab: "chat" });
+    reload();
+    onChanged();
   };
 
   const answer = (askId: string, a: AskAnswer) =>
@@ -125,6 +169,48 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
 
   return (
     <div className="ws-chat">
+      <div className="ws-tabs" role="group" aria-label={ws.views}>
+        <button className="btn btn--sm" aria-pressed={tab === "chat"} onClick={() => switchTab("chat")}>
+          {ws.tabChat}
+        </button>
+        <button className="btn btn--sm" aria-pressed={tab === "claude"} title={ws.tabClaudeHint}
+          disabled={busy !== undefined} onClick={() => switchTab("claude")}>
+          {ws.tabClaude}
+          {terminal && <span className="ws-tab-live" aria-hidden="true" />}
+        </button>
+        <button className="btn btn--sm" aria-pressed={tab === "shell"} title={ws.tabShellHint}
+          disabled={busy !== undefined} onClick={() => switchTab("shell")}>
+          {ws.tabShell}
+          {session?.shell && <span className="ws-tab-live" aria-hidden="true" />}
+        </button>
+      </div>
+      {tab === "shell" && !shellKind && (
+        <div className="ws-shell-pick">
+          <span className="faint">{tt.shellKind}</span>
+          <ModeSelect value={shell} options={shellOptions} label={tt.shellKind}
+            onChange={(v) => setShell(v === "gitBash" ? "gitBash" : "powerShell")} />
+          <button className="btn btn--sm" disabled={!sessionId} onClick={() => setShellRequested(sessionId)}>
+            {tt.openShell}
+          </button>
+        </div>
+      )}
+      {claudeShown && (
+        <div className="ws-term-wrap" hidden={tab !== "claude"}>
+          <Suspense fallback={<p className="dim ws-term-wait">{tt.opening}</p>}>
+            <TerminalPane key={`${sessionId}:claude`} id={sessionId} kind="claude" live={terminal}
+              onClose={() => closeTerminal("claude")} />
+          </Suspense>
+        </div>
+      )}
+      {sessionId && shellKind && (
+        <div className="ws-term-wrap" hidden={tab !== "shell"}>
+          <Suspense fallback={<p className="dim ws-term-wait">{tt.opening}</p>}>
+            <TerminalPane key={`${sessionId}:${shellKind}`} id={sessionId} kind={shellKind}
+              live={session?.shell === shellKind} onClose={() => closeTerminal(shellKind)} />
+          </Suspense>
+        </div>
+      )}
+      <div className="ws-chat-body" hidden={tab !== "chat"}>
       <header className="ws-chat-head">
         {/* titles on the left, the session's buttons on the right: a draft has the same height,
             so the first message moves nothing */}
@@ -141,6 +227,9 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
                 </span>
               )}
               {session?.model && <span>{t.model(session.model)}</span>}
+              {session?.contextPercent !== undefined && (
+                <span title={tt.contextHint}>{tt.context(session.contextPercent)}</span>
+              )}
               {session && session.costUsd > 0 && <span title={t.costHint}>{t.cost(session.costUsd)}</span>}
               {session && (
                 <span className={`ws-live${session.live ? " is-on" : ""}`} title={session.live ? t.liveHint : t.notLiveHint}>
@@ -151,7 +240,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
           </div>
           {session && (
             <div className="ws-chat-actions">
-              {session.started && (
+              {session.started && !terminal && (
                 <button
                   className="btn btn--sm"
                   title={t.openVscodeHint}
@@ -166,7 +255,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
                 <button
                   className="btn btn--sm btn--ghost"
                   title={t.endHint}
-                  disabled={busy !== undefined}
+                  disabled={busy !== undefined || terminal || !!session.shell}
                   onClick={() => void act("stop", () => stopSession(session.id).then(setSession))}
                 >
                   <Icon name="pause" size={12} />
@@ -176,7 +265,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
                 <button
                   className="btn btn--sm btn--ghost"
                   title={t.hideHint}
-                  disabled={busy !== undefined}
+                  disabled={busy !== undefined || terminal || !!session.shell}
                   onClick={() => void act("hide", () => hideSession(session.id).then(onHidden))}
                 >
                   <Icon name="trash" size={12} />
@@ -210,7 +299,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
               <Markdown text={chat.partial} className="task-md" />
             </div>
           )}
-          {running && !chat?.partial && asks.length === 0 && (
+          {running && !terminal && !chat?.partial && asks.length === 0 && (
             <p className="ws-working faint">
               <StatusIcon state="running" />
               {chat && chat.items.length > 0 ? t.writing : t.starting}
@@ -225,6 +314,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
 
       <footer className="ws-composer">
         <div className="ws-chat-col">
+          {terminal && <p className="note">{tt.chatReadOnly}</p>}
           {outside && session?.outside && (
             <div className="note ws-outside">
               <span>{t.outside(session.outside)}</span>
@@ -241,7 +331,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
             </div>
           )}
           {/* one box like the extension's: the text on top, the mode and the round button under it */}
-          <div className="ws-box">
+          {!terminal && <div className="ws-box">
             <textarea
               ref={input}
               className="ws-box-input"
@@ -294,9 +384,10 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged }: Pr
                 </button>
               )}
             </div>
-          </div>
+          </div>}
         </div>
       </footer>
+      </div>
     </div>
   );
 }

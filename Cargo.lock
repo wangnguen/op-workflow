@@ -2595,6 +2595,7 @@ name = "op-workflow-desktop"
 version = "0.2.0"
 dependencies = [
  "opw-domain",
+ "opw-hook",
  "opw-orchestrator",
  "serde",
  "tauri",

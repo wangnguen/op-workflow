@@ -51,6 +51,13 @@ pub struct SessionView {
     /// The app runs a process for it now.
     #[serde(default)]
     pub live: bool,
+    /// The interactive terminal owns this Claude session. Chat follows the transcript.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub terminal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_percent: Option<f64>,
     /// Where it is open while the app only shows it: "VS Code", "terminal", …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outside: Option<String>,

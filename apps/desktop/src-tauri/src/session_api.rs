@@ -91,3 +91,37 @@ pub fn session_open_vscode(id: String, service: State<'_, AppService>) -> Result
 pub fn session_hide(id: String, service: State<'_, AppService>) -> Result<(), ApiError> {
     service.session_hide(&id)
 }
+
+use opw_orchestrator::sessions::TerminalAction;
+use opw_orchestrator::terminals::{TerminalFrame, TerminalKind};
+
+#[tauri::command(async)]
+pub fn terminal_open(
+    id: String,
+    kind: TerminalKind,
+    view: String,
+    size: (u16, u16),
+    output: tauri::ipc::Channel<TerminalFrame>,
+    service: State<'_, AppService>,
+) -> Result<(), ApiError> {
+    service.workspace_sessions()?.terminal_open(
+        &id,
+        kind,
+        view,
+        size,
+        Box::new(move |frame| output.send(frame).is_ok()),
+    )
+}
+
+#[tauri::command(async)]
+pub fn terminal_control(
+    id: String,
+    kind: TerminalKind,
+    view: String,
+    action: TerminalAction,
+    service: State<'_, AppService>,
+) -> Result<(), ApiError> {
+    service
+        .workspace_sessions()?
+        .terminal_control(&id, kind, &view, action)
+}

@@ -29,6 +29,7 @@ pub mod sessions;
 pub mod start;
 pub mod steps;
 mod task_repo;
+pub mod terminals;
 pub mod tray;
 pub mod updater;
 
@@ -173,6 +174,9 @@ pub struct AppService {
 }
 
 impl AppService {
+    pub fn workspace_sessions(&self) -> Result<&Sessions, ApiError> {
+        self.sessions()
+    }
     /// Demo only, no background threads (tests, browser previews).
     pub fn new() -> Self {
         Self::default()
@@ -265,6 +269,8 @@ impl AppService {
         });
         let sessions = store.as_ref().zip(data_dir.as_ref()).map(|(store, dir)| {
             let sessions = Sessions::new(store.clone(), dir.join("guard-hooks"));
+            let quota = live.clone();
+            sessions.set_quota_sink(move |snap| quota.observe_claude(snap));
             sessions.start_janitor();
             sessions
         });

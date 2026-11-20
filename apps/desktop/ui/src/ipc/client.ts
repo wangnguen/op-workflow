@@ -1,5 +1,5 @@
 // The only module that talks to Tauri. Outside Tauri (plain browser) it serves mock data.
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   mockAppInfo,
@@ -67,6 +67,9 @@ import type {
   SessionChat,
   SessionPatch,
   SessionView,
+  TerminalAction,
+  TerminalFrame,
+  TerminalKind,
   WorkspaceSnapshot,
   CloseChoice,
   AlertView,
@@ -106,6 +109,28 @@ async function call<K extends keyof Commands>(
 ): Promise<Commands[K]> {
   if (isTauri()) return invoke<Commands[K]>(command, args);
   return mock();
+}
+
+export async function openTerminal(
+  id: string, kind: TerminalKind, view: string, size: [number, number],
+  onOutput: (frame: TerminalFrame) => void,
+): Promise<void> {
+  if (!isTauri()) {
+    onOutput({
+      bytes: [...new TextEncoder().encode("Terminal chỉ chạy trong ứng dụng desktop.\r\n")],
+      replay: true,
+      skipped: false,
+    });
+    return;
+  }
+  const output = new Channel<TerminalFrame>(onOutput);
+  await invoke("terminal_open", { id, kind, view, size, output });
+}
+
+export async function controlTerminal(
+  id: string, kind: TerminalKind, view: string, action: TerminalAction,
+): Promise<void> {
+  if (isTauri()) await invoke("terminal_control", { id, kind, view, action });
 }
 
 export const getAppInfo = (): Promise<AppInfo> => call("app_info", mockAppInfo);

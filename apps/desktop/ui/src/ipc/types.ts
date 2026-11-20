@@ -1087,6 +1087,9 @@ export interface SessionView {
   state: SessionState;
   /** the app runs a process for it now */
   live: boolean;
+  terminal?: boolean;
+  shell?: Exclude<TerminalKind, "claude">;
+  contextPercent?: number;
   /** where it is open while the app only shows it ("VS Code", "terminal") */
   outside?: string;
   /** permission mode in effect, else the one chosen for the next start */
@@ -1100,6 +1103,17 @@ export interface SessionView {
   /** why the last start or run failed */
   error?: string;
 }
+
+export type TerminalKind = "claude" | "powerShell" | "gitBash";
+export interface TerminalFrame {
+  bytes: number[];
+  replay: boolean;
+  skipped: boolean;
+}
+export type TerminalAction =
+  | { kind: "ack" | "detach" | "close" }
+  | { kind: "write"; data: string }
+  | { kind: "resize"; data: { cols: number; rows: number } };
 
 /** A task in progress, in the tree even before it has a session. */
 export interface WorkspaceTask {

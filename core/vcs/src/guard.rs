@@ -1,7 +1,7 @@
 //! Environment-only guard that stops AI processes from committing or pushing.
 //!
-//! Applied to every Claude/Codex process the app starts (headless and terminal panes), not to
-//! the plain `shell` pane. Nothing is written to the repository's `.git/config`.
+//! Applied to the workflow's AI processes and Workspace terminal panes.
+//! Nothing is written to the repository's `.git/config`.
 //!
 //! - `url.no-push://blocked/.pushInsteadOf` for `https://`, `http://`, `ssh://`, `git://`, `git@`,
 //!   `file://`: every push URL is rewritten to an unknown scheme, so `git push` fails even with

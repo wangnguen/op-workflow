@@ -18,6 +18,10 @@ mod window_api;
 use tauri::{Manager, RunEvent, WindowEvent};
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--statusline-hook") {
+        opw_hook::run("statusline", true);
+        return;
+    }
     // PTY spike from inside the app binary (PLAN.md §12): `op-workflow-desktop --pty-selftest`.
     if std::env::args().any(|a| a == "--pty-selftest") {
         let report = opw_orchestrator::selftest::run_pty();
@@ -155,6 +159,8 @@ fn main() {
             session_api::session_stop,
             session_api::session_open_vscode,
             session_api::session_hide,
+            session_api::terminal_open,
+            session_api::terminal_control,
         ])
         .build(tauri::generate_context!())
         .expect("error while building op-workflow")

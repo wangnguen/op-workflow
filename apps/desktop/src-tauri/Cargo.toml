@@ -12,6 +12,7 @@ tauri-build.workspace = true
 [dependencies]
 opw-domain.workspace = true
 opw-orchestrator.workspace = true
+opw-hook = { path = "../../../tools/opw-hook" }
 serde.workspace = true
 tauri.workspace = true
 tauri-plugin-notification.workspace = true

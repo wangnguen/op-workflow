@@ -36,7 +36,7 @@ export function WorkspaceView({ snapshot, selected, onSelect, onChanged }: Props
       <section className="ws-main">
         {sessionId || task ? (
           <ChatPane
-            key={sessionId ?? `task-${task?.wpId}`}
+            key={task ? `task-${task.wpId}` : sessionId}
             sessionId={sessionId}
             task={task}
             onCreated={(id) => {

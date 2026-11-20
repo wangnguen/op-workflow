@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -23,9 +23,12 @@ use opw_domain::session::{
     AskAnswer, AskKind, AskOption, AskQuestion, MODES, SessionAsk, SessionChat, SessionKind, SessionPatch,
     SessionState, SessionView,
 };
-use opw_domain::view::ApiError;
+use opw_domain::view::{ApiError, QuotaSnapshot};
 use opw_storage::{SessionRow, Store};
+use serde::Deserialize;
 use serde_json::{Value, json};
+
+use crate::terminals::{Pane, TerminalKind, TerminalSink, statusline_settings};
 
 /// Sessions the app runs say so (`entrypoint` in the transcript and the status file). Without it
 /// the CLI writes `sdk-cli`, and the VS Code extension leaves those out of its session list;
@@ -34,7 +37,7 @@ pub const ENTRYPOINT: &str = "op-workflow";
 /// A session with nothing to do for this long gives its process back (the next message resumes).
 const IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
 /// How often the janitor looks.
-const JANITOR_EVERY: Duration = Duration::from_secs(30);
+const JANITOR_EVERY: Duration = Duration::from_secs(1);
 /// Live text is pushed at most this often.
 const PARTIAL_EVERY: Duration = Duration::from_millis(80);
 /// After stdin closes, how long the CLI has to exit before its tree is killed.
@@ -53,6 +56,27 @@ const DENY_STOP: &str = "The user declined this action. Stop and wait for their 
 const PLAN_AGAIN: &str = "The user did not approve the plan. Keep planning and present a new plan.";
 
 pub type PatchSink = Arc<dyn Fn(SessionPatch) + Send + Sync>;
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "camelCase")]
+pub enum TerminalAction {
+    Ack,
+    Detach,
+    Close,
+    Write(String),
+    Resize { cols: u16, rows: u16 },
+}
+
+fn terminal_size((cols, rows): (u16, u16)) -> (u16, u16) {
+    (cols.clamp(2, 500), rows.clamp(2, 300))
+}
+
+fn resize_pane(pane: &Pane, size: (u16, u16)) -> Result<(), ApiError> {
+    let (cols, rows) = terminal_size(size);
+    pane.pty
+        .resize(cols, rows)
+        .map_err(|e| err("terminal.resize", e.to_string()))
+}
 
 fn err(code: &str, message: impl Into<String>) -> ApiError {
     ApiError::new(code, message)
@@ -101,6 +125,10 @@ struct Entry {
     partial_sent: Instant,
     asks: Vec<Pending>,
     proc: Option<Proc>,
+    terminal: Option<Pane>,
+    shell: Option<(TerminalKind, Pane)>,
+    statusline_at: Option<SystemTime>,
+    context_percent: Option<f64>,
     /// The last process the app ran for it: its status file can outlive it by a moment, and is
     /// not "open somewhere else".
     last_pid: Option<u32>,
@@ -132,6 +160,10 @@ impl Entry {
             partial_sent: Instant::now(),
             asks: Vec::new(),
             proc: None,
+            terminal: None,
+            shell: None,
+            statusline_at: None,
+            context_percent: None,
             last_pid: None,
             live_mode: None,
             open_turns: 0,
@@ -162,12 +194,19 @@ impl Entry {
     }
 
     fn view(&self, held: Option<&Held>) -> SessionView {
-        let ours =
-            |h: &Held| self.proc.as_ref().is_some_and(|p| p.pid == h.pid) || self.last_pid == Some(h.pid);
+        let ours = |h: &Held| {
+            self.proc.as_ref().is_some_and(|p| p.pid == h.pid)
+                || self.terminal.as_ref().and_then(|p| p.pty.pid()) == Some(h.pid)
+                || self.last_pid == Some(h.pid)
+        };
         let outside = held.filter(|h| !ours(h)).map(|h| where_open(&h.entrypoint));
-        let state = if !self.asks.is_empty() {
+        let terminal_status = self.terminal.as_ref().and_then(|pane| {
+            let pid = pane.pty.pid()?;
+            held.filter(|h| h.pid == pid).map(|h| h.status.as_str())
+        });
+        let state = if !self.asks.is_empty() || matches!(terminal_status, Some("waiting")) {
             SessionState::Waiting
-        } else if self.proc.is_some() && self.open_turns > 0 {
+        } else if (self.proc.is_some() && self.open_turns > 0) || matches!(terminal_status, Some("busy")) {
             SessionState::Running
         } else if outside.is_some() {
             SessionState::Outside
@@ -184,6 +223,9 @@ impl Entry {
             branch: self.branch.clone(),
             state,
             live: self.proc.is_some(),
+            terminal: self.terminal.is_some(),
+            shell: self.shell.as_ref().map(|(kind, _)| kind.key().to_owned()),
+            context_percent: self.context_percent,
             outside,
             mode: self.live_mode.clone().or_else(|| self.row.mode.clone()),
             model: self.row.model.clone(),
@@ -285,6 +327,14 @@ impl Entry {
         self.asks.clear();
         self.partial.clear();
         self.open_turns = 0;
+        self.held.clear();
+    }
+
+    fn pane(&self, kind: TerminalKind) -> Option<&Pane> {
+        match kind {
+            TerminalKind::Claude => self.terminal.as_ref(),
+            _ => self.shell.as_ref().filter(|(k, _)| *k == kind).map(|(_, p)| p),
+        }
     }
 }
 
@@ -664,7 +714,11 @@ struct Inner {
     /// repo → the user's trust answer this run (`true` = trusted / attested).
     trust: Mutex<HashMap<String, bool>>,
     run_no: AtomicU64,
+    quitting: AtomicBool,
+    quota: Mutex<Option<QuotaSink>>,
 }
+
+type QuotaSink = Arc<dyn Fn(QuotaSnapshot) + Send + Sync>;
 
 /// The sessions the Workspace shows. Cheap to clone.
 #[derive(Clone)]
@@ -695,6 +749,8 @@ impl Sessions {
                 sink: Mutex::new(None),
                 trust: Mutex::new(HashMap::new()),
                 run_no: AtomicU64::new(0),
+                quitting: AtomicBool::new(false),
+                quota: Mutex::new(None),
             }),
         }
     }
@@ -702,6 +758,23 @@ impl Sessions {
     /// Where pushed changes go (the shell turns them into a Tauri event).
     pub fn set_sink(&self, sink: PatchSink) {
         *lock(&self.inner.sink) = Some(sink);
+    }
+
+    pub fn set_quota_sink(&self, sink: impl Fn(QuotaSnapshot) + Send + Sync + 'static) {
+        *lock(&self.inner.quota) = Some(Arc::new(sink));
+    }
+
+    fn observe_quota(&self, snap: QuotaSnapshot) {
+        if let Some(sink) = lock(&self.inner.quota).clone() {
+            sink(snap);
+        }
+    }
+
+    fn ensure_open(&self) -> Result<(), ApiError> {
+        if self.inner.quitting.load(Ordering::Acquire) {
+            return Err(err("session.quitting", "App đang thoát"));
+        }
+        Ok(())
     }
 
     /// Closes sessions idle for [`IDLE_CLOSE`] and settles turns the CLI ended quietly.
@@ -721,6 +794,18 @@ impl Sessions {
     fn tidy(&self) {
         for (id, arc) in self.all_entries() {
             let mut e = lock(&arc);
+            if e.terminal.is_some() {
+                self.observe_statusline(&id, &mut e);
+            }
+            if e.terminal.as_mut().is_some_and(|p| p.pty.exit_code().is_some()) {
+                let _ = e.terminal.take().expect("checked").close();
+                e.refresh();
+                self.emit(&id, &mut e);
+            }
+            if e.shell.as_mut().is_some_and(|(_, p)| p.pty.exit_code().is_some()) {
+                let _ = e.shell.take().expect("checked").1.close();
+                self.emit(&id, &mut e);
+            }
             let Some(pid) = e.proc.as_ref().map(|p| p.pid) else {
                 continue;
             };
@@ -737,7 +822,7 @@ impl Sessions {
                 }
             } else if e.last_activity.elapsed() > IDLE_CLOSE {
                 if let Some(proc) = e.proc.take() {
-                    std::thread::spawn(move || close_proc(proc, EXIT_WAIT));
+                    close_proc(proc, EXIT_WAIT);
                 }
                 self.emit(&id, &mut e);
             }
@@ -879,6 +964,192 @@ impl Sessions {
         Ok(e.chat(held.get(id)))
     }
 
+    fn observe_statusline(&self, id: &str, e: &mut Entry) {
+        let Some(dir) = self.inner.hooks_dir.parent() else {
+            return;
+        };
+        let path = dir.join("events").join(format!("{id}.jsonl"));
+        let Some(at) = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()) else {
+            return;
+        };
+        if e.statusline_at == Some(at) {
+            return;
+        }
+        let line = (|| {
+            let mut file = std::fs::File::open(&path).ok()?;
+            let len = file.metadata().ok()?.len();
+            file.seek(SeekFrom::Start(len.saturating_sub(8192))).ok()?;
+            let mut tail = Vec::new();
+            file.take(8192).read_to_end(&mut tail).ok()?;
+            tail.rsplit(|&b| b == b'\n')
+                .filter_map(|l| serde_json::from_slice::<Value>(l).ok())
+                .find(|p| p["kind"] == "statusline" && p["session_id"] == id)
+        })();
+        let Some(line) = line else { return };
+        e.statusline_at = Some(at);
+        if let Some(snap) = opw_quota::from_claude_statusline(&line, &now()) {
+            self.observe_quota(snap);
+        }
+        let percent = line["context_window"]["used_percentage"].as_f64();
+        if percent != e.context_percent {
+            e.context_percent = percent;
+            self.emit(id, e);
+        }
+    }
+
+    pub fn terminal_open(
+        &self,
+        id: &str,
+        kind: TerminalKind,
+        view: String,
+        size: (u16, u16),
+        sink: TerminalSink,
+    ) -> Result<(), ApiError> {
+        let arc = self.entry(id)?;
+        let mut e = lock(&arc);
+        self.ensure_open()?;
+        if let Some(pane) = e.pane(kind) {
+            resize_pane(pane, size)?;
+            pane.attach(view, sink);
+            return Ok(());
+        }
+        let cwd = opw_config::expand_home(&e.row.repo);
+        if !cwd.is_dir() {
+            return Err(err("session.repo", "Không còn thư mục của phiên"));
+        }
+        let mut env = opw_vcs::guard_env(&self.inner.hooks_dir);
+        let (program, args) = if kind == TerminalKind::Claude {
+            if e.open_turns > 0 || !e.asks.is_empty() {
+                return Err(err(
+                    "session.busy",
+                    "Kết thúc lượt hiện tại trong chat trước khi mở terminal",
+                ));
+            }
+            if let Some(h) = status_files().get(id).filter(|h| e.last_pid != Some(h.pid)) {
+                if e.proc.as_ref().is_none_or(|p| p.pid != h.pid) {
+                    return Err(err(
+                        "session.outside",
+                        format!("Phiên đang mở ở {}", where_open(&h.entrypoint)),
+                    ));
+                }
+            }
+            let exe =
+                cli::find_claude().ok_or_else(|| err("claude.missing", "Không tìm thấy claude trên PATH"))?;
+            if let Some(proc) = e.proc.take() {
+                close_proc(proc, EXIT_WAIT);
+            }
+            e.clear_turn();
+            e.refresh();
+            let resume = e.transcript.as_ref().is_some_and(|p| p.is_file());
+            let mut args = vec![
+                if resume { "--resume" } else { "--session-id" }.into(),
+                id.to_owned(),
+                "--setting-sources".into(),
+                "user,project,local".into(),
+                "--disallowedTools".into(),
+                DISALLOWED_GIT.into(),
+            ];
+            if let Some(mode) = e.row.mode.as_ref() {
+                args.extend(["--permission-mode".into(), mode.clone()]);
+            }
+            env.push(("CLAUDE_CODE_ENTRYPOINT".into(), ENTRYPOINT.into()));
+            if let Ok(me) = std::env::current_exe() {
+                env.push((
+                    "OPW_STATUSLINE_EXE".into(),
+                    me.to_string_lossy().replace('\\', "/"),
+                ));
+                env.push(("OPW_STATUSLINE_REPO".into(), cwd.to_string_lossy().into_owned()));
+                if let Some(root) = self.inner.hooks_dir.parent() {
+                    env.push((
+                        opw_config::ENV_DATA_DIR.into(),
+                        root.to_string_lossy().into_owned(),
+                    ));
+                }
+                if let Some(shell) = crate::terminals::git_bash() {
+                    env.push((
+                        "OPW_STATUSLINE_SHELL".into(),
+                        shell.to_string_lossy().into_owned(),
+                    ));
+                }
+                args.extend(["--settings".into(), statusline_settings()]);
+            }
+            (exe, args)
+        } else {
+            if e.shell.is_some() {
+                return Err(err("terminal.shell", "Đóng shell đang mở để đổi sang shell khác"));
+            }
+            kind.shell()
+                .ok_or_else(|| err("terminal.missing", "Không tìm thấy shell đã chọn"))?
+        };
+        let (cols, rows) = terminal_size(size);
+        let pane = Pane::spawn(&opw_pty::SpawnSpec {
+            program: &program,
+            args: &args,
+            cwd: &cwd,
+            remove_env: &stripped_env(),
+            set_env: &env,
+            cols,
+            rows,
+        });
+        let pane = match pane {
+            Ok(pane) => pane,
+            Err(failure) => {
+                self.emit(id, &mut e);
+                return Err(err("terminal.spawn", failure.to_string()));
+            }
+        };
+        pane.attach(view, sink);
+        if kind == TerminalKind::Claude {
+            e.last_pid = pane.pty.pid();
+            e.statusline_at = None;
+            e.terminal = Some(pane);
+        } else {
+            e.shell = Some((kind, pane));
+        }
+        self.emit(id, &mut e);
+        Ok(())
+    }
+
+    pub fn terminal_control(
+        &self,
+        id: &str,
+        kind: TerminalKind,
+        view: &str,
+        action: TerminalAction,
+    ) -> Result<(), ApiError> {
+        let arc = self.entry(id)?;
+        let mut e = lock(&arc);
+        let Some(pane) = e.pane(kind).filter(|p| p.owns(view)) else {
+            return Ok(());
+        };
+        match action {
+            TerminalAction::Ack => pane.ack(view),
+            TerminalAction::Detach => pane.detach(view),
+            TerminalAction::Write(data) => {
+                if data.len() > 256 * 1024 {
+                    return Err(err("terminal.input", "Nội dung dán quá dài"));
+                }
+                pane.pty
+                    .write(data.as_bytes())
+                    .map_err(|e| err("terminal.write", e.to_string()))?;
+            }
+            TerminalAction::Resize { cols, rows } => resize_pane(pane, (cols, rows))?,
+            TerminalAction::Close => {
+                let pane = match kind {
+                    TerminalKind::Claude => e.terminal.take(),
+                    _ => e.shell.take().map(|(_, p)| p),
+                };
+                let result = pane.expect("owned pane").close();
+                if kind == TerminalKind::Claude {
+                    e.refresh();
+                }
+                self.emit(id, &mut e);
+                result.map_err(|e| err("terminal.close", e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Send a message: started (or resumed) first when nothing runs. `force` sends even though
     /// the session looks open somewhere else (a stale status file after a crash).
     pub fn send(&self, id: &str, text: &str, force: bool) -> Result<SessionView, ApiError> {
@@ -888,6 +1159,13 @@ impl Sessions {
         }
         let arc = self.entry(id)?;
         let mut e = lock(&arc);
+        self.ensure_open()?;
+        if e.terminal.is_some() {
+            return Err(err(
+                "session.terminal",
+                "Đóng Terminal của phiên để tiếp tục trong chat",
+            ));
+        }
         if e.proc.is_none() {
             if !force {
                 if let Some(h) = status_files().get(id).filter(|h| e.last_pid != Some(h.pid)) {
@@ -1047,6 +1325,11 @@ impl Sessions {
         }
         e.last_activity = Instant::now();
         match v["type"].as_str().unwrap_or_default() {
+            "rate_limit_event" => {
+                if let Some(snap) = opw_quota::from_claude_rate_limit_event(v, &now()) {
+                    self.observe_quota(snap);
+                }
+            }
             "control_request" => self.on_request(id, &mut e, v),
             "control_cancel_request" => {
                 let rid = v["request_id"].as_str().unwrap_or_default();
@@ -1273,6 +1556,12 @@ impl Sessions {
         }
         let arc = self.entry(id)?;
         let mut e = lock(&arc);
+        if e.terminal.is_some() {
+            return Err(err(
+                "session.terminal",
+                "Đổi chế độ ngay trong Terminal của phiên",
+            ));
+        }
         e.row.mode = Some(mode.to_owned());
         if e.proc.is_some() {
             e.request_mode(mode)?;
@@ -1287,7 +1576,7 @@ impl Sessions {
         let arc = self.entry(id)?;
         let mut e = lock(&arc);
         if let Some(proc) = e.proc.take() {
-            std::thread::spawn(move || close_proc(proc, EXIT_WAIT));
+            close_proc(proc, EXIT_WAIT);
         }
         e.clear_turn();
         self.emit(id, &mut e);
@@ -1299,19 +1588,24 @@ impl Sessions {
     pub fn open_vscode(&self, id: &str) -> Result<(), ApiError> {
         let arc = self.entry(id)?;
         let mut e = lock(&arc);
+        if e.terminal.is_some() {
+            return Err(err(
+                "session.terminal",
+                "Đóng Terminal của phiên trước khi mở VS Code",
+            ));
+        }
         if !e.started {
             return Err(err("session.empty", "Phiên chưa có tin nào để mở trong VS Code"));
         }
-        let proc = e.proc.take();
+        if let Some(proc) = e.proc.take() {
+            close_proc(proc, EXIT_WAIT);
+        }
         e.clear_turn();
         self.emit(id, &mut e);
         let repo = opw_config::expand_home(&e.row.repo);
         let url = format!("vscode://anthropic.claude-code/open?session={id}");
         drop(e);
         std::thread::spawn(move || {
-            if let Some(proc) = proc {
-                close_proc(proc, EXIT_WAIT);
-            }
             open_in_vscode(&repo, &url);
         });
         Ok(())
@@ -1319,16 +1613,20 @@ impl Sessions {
 
     /// Take a session off the list (its transcript stays; the CLI can still resume it).
     pub fn hide(&self, id: &str) -> Result<(), ApiError> {
-        let removed = lock(&self.inner.entries).remove(id);
-        if let Some(arc) = removed {
-            let proc = lock(&arc).proc.take();
-            if let Some(proc) = proc {
-                std::thread::spawn(move || close_proc(proc, EXIT_WAIT));
-            }
+        let arc = self.entry(id)?;
+        let mut e = lock(&arc);
+        if e.terminal.is_some() || e.shell.is_some() {
+            return Err(err("session.terminal", "Đóng terminal trước khi ẩn phiên"));
         }
+        if let Some(proc) = e.proc.take() {
+            close_proc(proc, EXIT_WAIT);
+        }
+        e.clear_turn();
         self.store()
             .hide_session(id, &now())
             .map_err(|e| err("storage", e.to_string()))?;
+        drop(e);
+        lock(&self.inner.entries).remove(id);
         Ok(())
     }
 
@@ -1338,25 +1636,32 @@ impl Sessions {
             .iter()
             .filter(|(_, arc)| {
                 let e = lock(arc);
-                e.proc.is_some() && e.open_turns > 0
+                (e.proc.is_some() && e.open_turns > 0) || e.terminal.is_some() || e.shell.is_some()
             })
             .count()
     }
 
     /// End every process (the app quits); waits at most `wait` before killing what is left.
     pub fn shutdown(&self, wait: Duration) {
-        let procs: Vec<Proc> = self
+        self.inner.quitting.store(true, Ordering::Release);
+        let handles: Vec<_> = self
             .all_entries()
-            .iter()
-            .filter_map(|(_, arc)| {
-                let mut e = lock(arc);
-                e.clear_turn();
-                e.proc.take()
-            })
-            .collect();
-        let handles: Vec<_> = procs
             .into_iter()
-            .map(|p| std::thread::spawn(move || close_proc(p, wait)))
+            .map(|(_, arc)| {
+                std::thread::spawn(move || {
+                    let mut e = lock(&arc);
+                    e.clear_turn();
+                    if let Some(p) = e.terminal.take() {
+                        let _ = p.close();
+                    }
+                    if let Some((_, p)) = e.shell.take() {
+                        let _ = p.close();
+                    }
+                    if let Some(p) = e.proc.take() {
+                        close_proc(p, wait);
+                    }
+                })
+            })
             .collect();
         for h in handles {
             let _ = h.join();
