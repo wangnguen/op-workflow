@@ -8,6 +8,7 @@ App chạy trên máy bạn, chỉ **đọc** OpenProject và **không bao giờ
 
 - Bảng task OpenProject (Inbox / Đang làm / Chờ push / Đã xong), báo comment mới bằng chuông và thông báo Windows.
 - Màn *Workspace*: mỗi task một phiên Claude Code như trong extension VS Code (chat, terminal của phiên, shell của repo); các bước của app chạy thành tin nhắn trong phiên đó.
+- Màn *Phiên*: mọi phiên trên bản đồ hoặc dạng bảng, kể cả phiên Claude bạn mở trong VS Code hay terminal; bấm vào là tới đúng phiên, đúng bước, đúng câu hỏi trong Workspace.
 - Luồng 12 bước, mặc định dừng sau mỗi bước để bạn xem; bật *Tự chạy* thì app chỉ dừng ở chỗ cần bạn quyết.
 - Mỗi bước AI chọn được Claude hoặc Codex, model, effort và chế độ quyền.
 - Có công tắc xác minh kết luận AI qua MCP cục bộ trong Cài đặt → Các bước AI (mặc định bật); thiếu kết luận hoặc AI báo chưa xong thì app dừng ở bước đó.
@@ -18,7 +19,7 @@ App chạy trên máy bạn, chỉ **đọc** OpenProject và **không bao giờ
 ## Luồng 12 bước
 
 1. **Nhận task**: chọn repo, base, branch; app tạo branch ở máy và ghi `brief.md`.
-2. **Phân tích**: AI đọc brief và code, viết `plan.md`; app kiểm tra đủ mục và khối JSON. Bạn duyệt, góp ý, hoặc tự code.
+2. **Phân tích**: AI đọc brief và code, viết `plan.md`; cần bạn quyết gì thì AI hỏi ngay trong chat. Bạn duyệt, góp ý, hoặc tự code.
 3. **Viết code**
 4. **Kiểm tra**: typecheck / lint / prettier, chỉ tính lỗi ở phần task đổi.
 5. **Harness** (khi task cần): test dựng ngoài repo theo brief và plan; AI còn lại review harness trước khi app chạy.
