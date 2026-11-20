@@ -25,10 +25,102 @@
 
 /* ---------- top bar ---------- */
 
+/* the window has no frame: minimize / maximize / close sit flush at the bar's right end, full
+   height, in the bar's own colour (tints only, like the tabs) */
+.topbar--frameless {
+  padding-right: 0;
+}
+.window-controls {
+  display: flex;
+  align-self: stretch;
+  align-items: center;
+  margin-left: 2px;
+}
+.window-controls-error {
+  max-width: 220px;
+  margin-right: 8px;
+  overflow: hidden;
+  color: var(--st-failed);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.window-button {
+  display: grid;
+  place-items: center;
+  align-self: stretch;
+  width: 46px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-dim);
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.window-button:hover {
+  background: var(--fill);
+  color: var(--text);
+}
+.window-button:active {
+  background: var(--fill-strong);
+}
+.window-button--close:hover,
+.window-button--close:active {
+  background: var(--st-failed);
+  color: var(--on-hue);
+}
+.window-button:focus-visible {
+  outline-offset: -2px;
+}
+.window-glyph {
+  position: relative;
+  display: block;
+  width: 10px;
+  height: 10px;
+}
+.window-glyph--minimize::before,
+.window-glyph--close::before,
+.window-glyph--close::after {
+  content: "";
+  position: absolute;
+  inset: 50% 0 auto;
+  border-top: 1px solid currentColor;
+}
+.window-glyph--close::before {
+  transform: rotate(45deg);
+}
+.window-glyph--close::after {
+  transform: rotate(-45deg);
+}
+.window-glyph--maximize {
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+.window-glyph--restore::before,
+.window-glyph--restore::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  border-radius: 1px;
+}
+.window-glyph--restore::before {
+  top: 0;
+  right: 0;
+  border-left: 0;
+  border-bottom: 0;
+}
+.window-glyph--restore::after {
+  bottom: 0;
+  left: 0;
+}
+
 .topbar {
   display: flex;
   align-items: center;
   gap: 12px;
+  height: 48px;
   padding: 0 14px;
   border-bottom: 1px solid var(--border);
   background: var(--chrome);

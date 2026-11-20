@@ -20,6 +20,13 @@ export const vi = {
     openSettings: "Nhập token",
   },
   tabs: { task: "Task", workspace: "Workspace", sessions: "Phiên" },
+  window: {
+    controls: "Điều khiển cửa sổ",
+    minimize: "Thu nhỏ",
+    maximize: "Phóng to",
+    restore: "Khôi phục kích thước",
+    close: "Đóng cửa sổ",
+  },
   topbar: {
     search: "Ctrl+K",
     searchHint: "Tìm task, repo, lệnh (sắp có)",

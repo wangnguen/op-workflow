@@ -99,6 +99,7 @@ export function App() {
         onRefresh={refreshAll}
         onSettings={() => setSettingsOpen(true)}
         onOpenRelease={openRelease}
+        frameless={!isMockMode()}
       />
       <main className="app-main">
         {/* keyed by tab: the new screen fades in instead of popping */}

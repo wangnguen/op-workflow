@@ -3,6 +3,7 @@ import type { ProviderLink, QuotaSnapshot, UpdateView } from "../ipc/types";
 import { QuotaGauges } from "../features/quota/QuotaGauges";
 import { OPEN_QUOTA_EVENT } from "../features/quota/quota";
 import { AlertBell } from "./AlertBell";
+import { WindowControls } from "./WindowControls";
 
 export type Tab = "task" | "workspace" | "sessions";
 
@@ -23,6 +24,8 @@ interface Props {
   onRefresh: () => void;
   onSettings: () => void;
   onOpenRelease: () => void;
+  /** the window has no frame: the bar carries its buttons and drags it */
+  frameless: boolean;
 }
 
 const TABS: { key: Tab; label: string }[] = [
@@ -60,9 +63,11 @@ export function TopBar({
   onRefresh,
   onSettings,
   onOpenRelease,
+  frameless,
 }: Props) {
   return (
-    <header className="topbar">
+    // "deep": a press anywhere in the bar that is not a button, tab or field drags the window
+    <header className={`topbar${frameless ? " topbar--frameless" : ""}`} data-tauri-drag-region={frameless ? "deep" : undefined}>
       <div className="brand">
         {/* the app icon in small: a task flows from a done step through the current one to done */}
         <svg viewBox="0 0 24 24" width={20} height={20} aria-hidden="true" className="brand-mark">
@@ -132,6 +137,7 @@ export function TopBar({
         </svg>
         {update?.available && <span className="bell-dot bell-dot--update" />}
       </button>
+      {frameless && <WindowControls />}
     </header>
   );
 }

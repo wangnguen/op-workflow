@@ -1,6 +1,7 @@
 // The only module that talks to Tauri. Outside Tauri (plain browser) it serves mock data.
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   mockAppInfo,
   mockBoard,
@@ -440,6 +441,30 @@ export function errorCode(e: unknown): string | undefined {
 
 /** True when running in a browser with mock data instead of the Tauri shell. */
 export const isMockMode = (): boolean => !isTauri();
+
+export const minimizeWindow = (): Promise<void> => getCurrentWindow().minimize();
+export const toggleMaximizeWindow = (): Promise<void> => getCurrentWindow().toggleMaximize();
+// Use the real close request so the Rust window event handles the saved close preference.
+export const requestWindowClose = (): Promise<void> => getCurrentWindow().close();
+
+export function onWindowMaximized(onChange: (maximized: boolean) => void): () => void {
+  const appWindow = getCurrentWindow();
+  let alive = true;
+  let request = 0;
+  const refresh = () => {
+    if (!alive) return;
+    const current = ++request;
+    void appWindow.isMaximized().then((maximized) => {
+      if (alive && current === request) onChange(maximized);
+    }).catch(() => undefined);
+  };
+  const listening = appWindow.onResized(refresh);
+  void listening.then(refresh, refresh);
+  return () => {
+    alive = false;
+    void listening.then((unlisten) => unlisten()).catch(() => undefined);
+  };
+}
 
 /** UI refresh period for snapshots. */
 export const POLL_MS = 1500;
