@@ -26,6 +26,22 @@ fn main() {
         }
         return;
     }
+    // A task's session run the way the VS Code extension runs it (PLAN.md §12, phiên làm lõi
+    // A2): `op-workflow-desktop --session-probe [<folder>]`, by default `<data dir>/session-probe`.
+    // Uses Haiku, about $0.10.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(at) = args.iter().position(|a| a == "--session-probe") {
+        let folder = args
+            .get(at + 1)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(opw_orchestrator::session_probe::default_folder);
+        let report = opw_orchestrator::session_probe::run(&folder);
+        println!("{report}");
+        if let Some(path) = opw_orchestrator::session_probe::save(&report) {
+            println!("saved: {}", path.display());
+        }
+        return;
+    }
     // Live data check without opening a window: `op-workflow-desktop --live-check`.
     if std::env::args().any(|a| a == "--live-check") {
         println!(

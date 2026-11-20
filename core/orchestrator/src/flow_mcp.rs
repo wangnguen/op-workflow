@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 use opw_domain::view::Provider;
 use opw_domain::workflow::StepKind;
 
-const NAME: &str = "op_workflow";
+pub(crate) const NAME: &str = "op_workflow";
 pub(crate) const TOKEN_ENV: &str = "OPW_STEP_MCP_TOKEN";
 const TOOL_PREFIX: &str = "mcp__op_workflow";
 const PROTOCOLS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];

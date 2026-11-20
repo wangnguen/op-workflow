@@ -24,6 +24,7 @@ pub mod os;
 pub mod pushcheck;
 pub mod quotagate;
 pub mod selftest;
+pub mod session_probe;
 pub mod start;
 pub mod steps;
 mod task_repo;

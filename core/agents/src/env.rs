@@ -10,9 +10,10 @@
 //! `CLAUDE_CODE_GIT_BASH_PATH` must reach the child unchanged.
 
 /// Variables that belong to a parent Claude Code session and are removed from children.
-pub const SESSION_ENV: [&str; 17] = [
+pub const SESSION_ENV: [&str; 18] = [
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_CHILD_NOTES_DIR",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_SESSION_ATTENDED",
     "CLAUDE_CODE_ENTRYPOINT",
