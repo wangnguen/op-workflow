@@ -17,7 +17,6 @@ import {
   setNotify,
   setHarnessDir,
   setRepoChecks,
-  forgetRepoPair,
   setOnClose,
   setQuotaProbe,
   setTasksDir,
@@ -770,26 +769,6 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                       ))}
                     </Group>
                     <p className="set-note">{t.repoChecksHint}</p>
-                    <Group title={t.repoPairs}>
-                      {view && (view.repoPairs ?? []).length === 0 && (
-                        <div className="set-row">
-                          <span className="dim">{t.repoPairsEmpty}</span>
-                        </div>
-                      )}
-                      {(view?.repoPairs ?? []).map((pair) => (
-                        <Row
-                          key={`${pair.project}|${pair.issueRepo}|${pair.origin}`}
-                          id={`pair:${pair.issueRepo}`}
-                          label={`${pair.issueRepo} → ${pair.origin}`}
-                          hint={pair.project}
-                        >
-                          <button className="btn btn--ghost btn--sm" disabled={busy} onClick={() => void saveView(() => forgetRepoPair(pair))}>
-                            {t.repoPairForget}
-                          </button>
-                        </Row>
-                      ))}
-                    </Group>
-                    <p className="set-note">{t.repoPairsHint}</p>
                     <Row id="config" label={t.editConfig}>
                       <button className="btn btn--sm" disabled={isMockMode()} onClick={() => void openConfig()}>
                         {t.openConfig}

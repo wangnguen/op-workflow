@@ -111,11 +111,6 @@ export const vi = {
     repoChecksAuto: "app tự dò",
     repoChecksCount: (n: number) => `${n} lệnh`,
     repoChecksEdit: "Sửa",
-    repoPairs: "Repo phụ đã nhớ",
-    repoPairsHint:
-      "Khi bạn duyệt plan làm ở một repo khác repo trong link issue, app nhớ cặp đó để lần Phân tích sau biết. Đây chỉ là gợi ý cho AI, không chặn task nào.",
-    repoPairsEmpty: "Chưa có cặp nào.",
-    repoPairForget: "Bỏ",
     harnessLibsHint:
       "Mỗi repo một thư viện riêng, nằm ngoài repo và ngoài %TEMP%. Bước Harness đọc README.md của thư viện để dùng lại harness cũ, và lưu harness mới dùng lại được vào đây. Không repo nào đọc thư viện của repo khác.",
     harnessLibsEmpty: "Chưa có repo nào: thư viện hiện ra sau lần Bắt đầu làm việc đầu tiên.",
@@ -437,7 +432,7 @@ export const vi = {
     repoPick: "Chọn repo…",
     repoSuggested: "gợi ý từ link issue trong mô tả task",
     repoNotIssue: (issueRepos: string[], origin?: string) =>
-      `Issue thuộc ${issueRepos.join(", ")}; repo này ${origin ? `có origin ${origin}` : "không có origin"}. Vẫn bắt đầu được: bước Phân tích sẽ xem đây có đúng chỗ sửa không và nói lý do.`,
+      `${origin ? `Origin của repo này (${origin})` : "Repo này không có origin nên"} không khớp link issue (${issueRepos.join(", ")}). Có repo liên quan thì nhắn AI trong chat.`,
     repoRemembered: "đã dùng cho project này",
     repoNone: (dirs: string) => `Không thấy repo git nào trong ${dirs}. Dán đường dẫn repo vào ô bên dưới.`,
     repoOther: "Repo ở chỗ khác",
@@ -492,13 +487,6 @@ export const vi = {
     stopHint: "Dừng tiến trình AI của bước này. Sau đó gõ hướng dẫn rồi Chạy tiếp (AI làm tiếp trong phiên đó), hoặc Chạy lại từ đầu.",
     retry: "Thử lại",
     retryFresh: "Chạy lại từ đầu",
-    /** the brief or the plan changed after the plan was approved */
-    planChanged: {
-      reanalyze: "Phân tích lại",
-      reanalyzeHint: "AI nhận plan cũ và phần thay đổi để chỉ sửa phần bị ảnh hưởng.",
-      keep: "Giữ plan, chạy tiếp",
-      keepHint: "Duyệt brief và plan hiện tại, rồi tiếp tục tại bước hoặc lựa chọn đang chờ.",
-    },
     /** "Trao đổi với AI" under the strip of a failed step */
     talk: {
       title: "Trao đổi với AI",
@@ -515,8 +503,6 @@ export const vi = {
       goOnHint: "AI làm tiếp trong đúng phiên của bước, đọc thêm lời bạn gõ (để trống thì làm theo những gì đã bàn).",
       goOnGone: "Bước này không còn phiên để tiếp. Dùng Chạy lại từ đầu: lần chạy mới nhận cả nội dung trao đổi.",
     },
-    useCurrentRepo: "Dùng repo hiện tại",
-    useCurrentRepoHint: "Repo hiện tại đúng là repo của task: app ghi lại thư mục và origin này rồi chạy lại bước.",
     /** a Claude step reached its cost cap */
     budget: {
       retryFreshHint: "Mở phiên mới và chạy lại bước này với giới hạn hiện tại.",
@@ -758,16 +744,6 @@ export const vi = {
     briefSaved: "Đã lưu brief",
     noPlan: "Chưa có plan: chạy bước Phân tích trước.",
     planGate: "Đọc plan rồi chọn: AI viết code, góp ý để phân tích lại, hoặc tự code.",
-    planGateQuestions: (n: number) => `Đọc plan, trả lời ${n} câu hỏi của AI ở cuối (hoặc để AI tự quyết), rồi mới duyệt được.`,
-    questions: {
-      title: "Câu hỏi của AI",
-      left: (n: number) => (n === 0 ? "đã trả lời hết" : `còn ${n} câu chưa trả lời`),
-      other: "Câu trả lời khác…",
-      save: "Lưu",
-      aiDecides: "AI tự quyết",
-      aiDecidesHint: "Để AI tự chọn khi viết code; AI ghi lại đã chọn gì trong tóm tắt",
-      approveBlocked: (n: number) => `Trả lời ${n} câu hỏi (hoặc chọn AI tự quyết) trước khi duyệt`,
-    },
     optional: {
       title: "Bước tuỳ chọn của task",
       note: "Bật / tắt được tới khi luồng chưa tới bước đó. Test trình duyệt: app bật app theo lệnh bên dưới và mở một cửa sổ Chrome riêng; cần đăng nhập thì AI dừng lại hỏi bạn.",
@@ -1332,7 +1308,6 @@ export const agentLabel: Record<AgentKind, string> = {
 
 export const gateLabel: Record<GateKind, string> = {
   planReview: "Duyệt plan",
-  planChanged: "Brief đã đổi, chờ bạn",
   findings: "Chọn lỗi cần sửa",
   afterFix: "Review chéo lại?",
   agentQuestion: "AI đang hỏi",

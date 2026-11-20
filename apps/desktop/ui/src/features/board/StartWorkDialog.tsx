@@ -398,7 +398,7 @@ export function StartWorkDialog({ task, inProgress, onClose, onStarted }: Props)
                     {!picked.suggested && picked.remembered && <span className="chip">{t.repoRemembered}</span>}
                   </small>
                 )}
-                {/* another repo than the issue's is allowed: Phân tích checks it is the right place */}
+                {/* another repo than the issue's is allowed: say so, related repos can be named in the chat */}
                 {picked && !picked.suggested && (opts.issueRepos?.length ?? 0) > 0 && (
                   <small className="dim repo-not-issue">{t.repoNotIssue(opts.issueRepos ?? [], picked.remote)}</small>
                 )}

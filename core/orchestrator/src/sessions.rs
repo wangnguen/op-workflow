@@ -25,7 +25,7 @@ use opw_domain::session::{
 };
 use opw_domain::view::{ApiError, QuotaSnapshot};
 use opw_storage::{SessionRow, Store};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::flow_mcp::{self, ActiveStep, SessionStep};
@@ -159,7 +159,20 @@ struct Entry {
     mcp: Option<flow_mcp::Run>,
     /// The `/` commands the running CLI announced.
     commands: Vec<String>,
+    /// Lines from the app in this chat (not sent to the AI), kept apart from the transcript.
+    notes: Vec<AppNote>,
 }
+
+/// A line from the app in a session's chat: shown after the first `after` items of the
+/// conversation (counting items dropped from the front), never sent to the AI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppNote {
+    after: usize,
+    text: String,
+}
+
+/// kv kind of a task session's app notes (key = session id).
+const NOTES_KV: &str = "session-notes";
 
 /// A message waiting to be sent (until the folder trust question is answered).
 struct Queued {
@@ -204,6 +217,7 @@ impl Entry {
             step_model: None,
             mcp: None,
             commands: Vec::new(),
+            notes: Vec::new(),
         }
     }
 
@@ -268,16 +282,39 @@ impl Entry {
         }
     }
 
+    /// The chat items from the `from`-th item of the log on, with the app's notes in their
+    /// places, and where they start in the list the UI holds.
+    fn items_from(&self, from: usize) -> (usize, Vec<opw_domain::view::ChatItem>) {
+        let dropped = self.log.dropped();
+        let items = self.log.items();
+        let from = from.min(items.len());
+        let before = self.notes.iter().filter(|n| n.after < dropped + from).count();
+        let mut out = Vec::new();
+        for (i, item) in items.iter().enumerate().skip(from) {
+            out.extend(self.notes_at(dropped + i));
+            out.push(self.chat_item(item.clone()));
+        }
+        // notes after the last item, and those of items no longer held
+        out.extend(
+            self.notes
+                .iter()
+                .filter(|n| n.after >= dropped + items.len())
+                .map(|n| note_item(&n.text)),
+        );
+        (from + before, out)
+    }
+
+    fn notes_at(&self, after: usize) -> impl Iterator<Item = opw_domain::view::ChatItem> + '_ {
+        self.notes
+            .iter()
+            .filter(move |n| n.after == after)
+            .map(|n| note_item(&n.text))
+    }
+
     fn chat(&self, held: Option<&Held>) -> SessionChat {
         SessionChat {
             session: self.view(held),
-            items: self
-                .log
-                .items()
-                .iter()
-                .cloned()
-                .map(|i| self.chat_item(i))
-                .collect(),
+            items: self.items_from(0).1,
             dropped: u32::try_from(self.log.dropped()).unwrap_or(u32::MAX),
             partial: self.partial.clone(),
             asks: self.asks.iter().map(|p| p.view.clone()).collect(),
@@ -510,6 +547,20 @@ fn title_from_tail(path: &Path) -> Option<String> {
                 .filter(|t| !t.is_empty())
                 .map(str::to_owned)
         })
+}
+
+/// A line from the app as a chat item.
+fn note_item(text: &str) -> opw_domain::view::ChatItem {
+    opw_domain::view::ChatItem {
+        kind: opw_domain::view::ChatKind::Note,
+        step: None,
+        text: text.to_owned(),
+        tool: None,
+        output: None,
+        output_cut: 0,
+        failed: false,
+        denied: None,
+    }
 }
 
 fn first_line(text: &str, max: usize) -> String {
@@ -945,15 +996,12 @@ impl Sessions {
         };
         let len = e.log.items().len();
         let from = e.log.take_changed().unwrap_or(len).min(len);
+        let (from, items) = e.items_from(from);
         let patch = SessionPatch {
             id: id.to_owned(),
             seq: e.seq,
             from: u32::try_from(from).unwrap_or(u32::MAX),
-            items: e.log.items()[from..]
-                .iter()
-                .cloned()
-                .map(|i| e.chat_item(i))
-                .collect(),
+            items,
             dropped: u32::try_from(e.log.dropped()).unwrap_or(u32::MAX),
             partial: e.partial.clone(),
             asks: e.asks.iter().map(|p| p.view.clone()).collect(),
@@ -984,11 +1032,11 @@ impl Sessions {
             task.and_then(|t| t.branch),
         );
         if let Some(wp_id) = entry.row.wp_id {
-            entry.step_labels = self
-                .store()
-                .kv_get(wp_id, "session-step-labels", &id)
-                .ok()
-                .flatten()
+            let read = |kind: &str| self.store().kv_get(wp_id, kind, &id).ok().flatten();
+            entry.step_labels = read("session-step-labels")
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+            entry.notes = read(NOTES_KV)
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or_default();
         }
@@ -1038,6 +1086,29 @@ impl Sessions {
         let arc = self.insert(row);
         let e = lock(&arc);
         Ok(e.view(None))
+    }
+
+    /// A line from the app at the end of a task session's chat (not sent to the AI): the brief
+    /// changed, the task moved to another repo. Kept with the task, so reading the transcript
+    /// again keeps it.
+    pub fn note(&self, id: &str, text: &str) -> Result<(), ApiError> {
+        let arc = self.entry(id)?;
+        let mut e = lock(&arc);
+        let wp_id = e
+            .row
+            .wp_id
+            .ok_or_else(|| err("session.task", "Phiên này không thuộc task nào"))?;
+        let after = e.log.dropped() + e.log.items().len();
+        e.notes.push(AppNote {
+            after,
+            text: text.trim().to_owned(),
+        });
+        let json = serde_json::to_string(&e.notes).map_err(|x| err("storage", x.to_string()))?;
+        self.store()
+            .kv_set(wp_id, NOTES_KV, id, &json, &now())
+            .map_err(|x| err("storage", x.to_string()))?;
+        self.emit(id, &mut e);
+        Ok(())
     }
 
     /// The newest session of a task, if it has one.
@@ -2309,6 +2380,56 @@ mod tests {
             suggestions: kind_req["permission_suggestions"].clone(),
             tool_use_id: kind_req["tool_use_id"].as_str().map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn app_notes_sit_between_the_messages_they_followed() {
+        let row = SessionRow {
+            id: "s-1".into(),
+            wp_id: Some(1),
+            repo: "C:/r".into(),
+            kind: "main".into(),
+            title: String::new(),
+            mode: None,
+            model: None,
+            cost_usd: 0.0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let mut e = Entry::new(row, None, None);
+        let say = |e: &mut Entry, text: &str| {
+            e.log
+                .apply(&json!({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}));
+        };
+        say(&mut e, "một");
+        e.notes.push(AppNote {
+            after: 1,
+            text: "Brief đổi".into(),
+        });
+        say(&mut e, "hai");
+        let texts = |items: &[opw_domain::view::ChatItem]| {
+            items
+                .iter()
+                .map(|i| format!("{:?}:{}", i.kind, i.text))
+                .collect::<Vec<_>>()
+        };
+        let (from, items) = e.items_from(0);
+        assert_eq!(from, 0);
+        assert_eq!(texts(&items), ["Text:một", "Note:Brief đổi", "Text:hai"]);
+        // a patch from the second message carries the note that sits before it: the list the UI
+        // rebuilds (first `from` items kept) is the same
+        let (from, items) = e.items_from(1);
+        assert_eq!(
+            (from, texts(&items)),
+            (1, vec!["Note:Brief đổi".to_owned(), "Text:hai".to_owned()])
+        );
+        // a note added after the last message comes with a patch from the end
+        e.notes.push(AppNote {
+            after: 2,
+            text: "Repo đổi".into(),
+        });
+        let (from, items) = e.items_from(2);
+        assert_eq!((from, texts(&items)), (3, vec!["Note:Repo đổi".to_owned()]));
     }
 
     #[test]

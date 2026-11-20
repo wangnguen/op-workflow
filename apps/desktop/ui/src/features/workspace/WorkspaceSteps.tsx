@@ -92,7 +92,7 @@ export function WorkspaceSteps({
   const occupied = session?.terminal || session?.state === "outside" ||
     session?.state === "running" || session?.state === "waiting";
   const gateTab = flow.gate === "findings" || flow.gate === "afterFix" ? "findings"
-    : flow.gate === "planReview" || flow.gate === "planChanged" ? "plan" : "progress";
+    : flow.gate === "planReview" ? "plan" : "progress";
   const message = error ?? flow.error?.message;
 
   return (

@@ -16,7 +16,6 @@ import {
   mockSetTasksDir,
   mockSetHarnessDir,
   mockSetRepoChecks,
-  mockForgetRepoPair,
   mockSetOnClose,
   mockSetQuotaProbe,
   mockSetStepChoice,
@@ -107,7 +106,6 @@ import type {
   TaskText,
   TasksDirChange,
   UpdateView,
-  RepoPair,
 } from "./types";
 
 async function call<K extends keyof Commands>(
@@ -348,9 +346,6 @@ export const setHarnessDir = (repo: string, dir?: string): Promise<SettingsView>
 /** Settings → Repo → Lệnh kiểm tra of one repo (empty = guessed per package). */
 export const setRepoChecks = (repo: string, commands: string[]): Promise<SettingsView> =>
   call("set_repo_checks", () => mockSetRepoChecks(repo, commands), { repo, commands });
-/** Settings → Repo: forget one remembered issue repo → checkout pair. */
-export const forgetRepoPair = (pair: RepoPair): Promise<SettingsView> =>
-  call("forget_repo_pair", () => mockForgetRepoPair(pair), { pair });
 /** Continues a finished run's AI session in a console window in the task's repo. */
 export const openResume = (wpId: number, runId: number): Promise<null> =>
   call("open_resume", () => null, { wpId, runId });

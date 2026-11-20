@@ -22,7 +22,6 @@ import type {
   Provider,
   ProviderLink,
   QuotaSnapshot,
-  RepoPair,
   RepoState,
   SessionStatus,
   SettingsView,
@@ -606,26 +605,17 @@ export function mockSettings(): SettingsView {
     onClose: mockClose.choice,
     harnessLibs: mockHarnessLibs(),
     repoChecks: mockRepos.map((repo) => ({ repo, commands: mockChecks.get(repo) ?? [] })),
-    repoPairs: [...mockPairs],
   };
 }
 
 const mockRepos = ["~/Desktop/acme-web", "~/Desktop/acme-api", "~/Desktop/acme-mobile"];
 const mockChecks = new Map<string, string[]>([["~/Desktop/acme-web", ["npx tsc --noEmit -p web", "npx eslint {files}"]]]);
-const mockPairs: RepoPair[] = [{ project: "Web Platform", issueRepo: "github.com/acme/web-core", origin: "github.com/acme/acme-web" }];
 
 /** Browser preview: Settings → Repo → Lệnh kiểm tra, in memory only. */
 export function mockSetRepoChecks(repo: string, commands: string[]): SettingsView {
   const list = commands.map((c) => c.trim()).filter(Boolean);
   if (list.length) mockChecks.set(repo, list);
   else mockChecks.delete(repo);
-  return mockSettings();
-}
-
-/** Browser preview: Settings → Repo → forget a remembered pair, in memory only. */
-export function mockForgetRepoPair(pair: RepoPair): SettingsView {
-  const i = mockPairs.findIndex((p) => p.project === pair.project && p.issueRepo === pair.issueRepo && p.origin === pair.origin);
-  if (i >= 0) mockPairs.splice(i, 1);
   return mockSettings();
 }
 

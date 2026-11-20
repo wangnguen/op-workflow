@@ -90,6 +90,10 @@ add(
       kind: "text",
       text: "Nguyên nhân: `order.repository.ts:42` lọc `orgId = user.orgId`, mà user chưa có tổ chức thì `orgId` là `null`, nên câu truy vấn không ra dòng nào.\n\nĐề xuất: khi `orgId` rỗng thì lọc theo `userId`.",
     },
+    {
+      kind: "note",
+      text: "Brief đổi sau khi bạn duyệt plan: thêm 1 comment trên OpenProject. Muốn AI xem lại thì nhắn trong chat hoặc chạy lại Phân tích.",
+    },
   ],
 );
 add(
@@ -185,6 +189,15 @@ export function mockSessionNew(req: NewSession): SessionView {
 }
 
 export const mockSessionChat = (id: string): SessionChat => chatOf(get(id));
+
+/** A line from the app in the chat of the task's session (not sent to the AI); no session for
+ *  the task = nothing. */
+export function mockSessionNote(wpId: number, text: string): void {
+  const s = [...sessions.values()].find((x) => x.view.kind === "main" && x.view.wpId === wpId);
+  if (!s) return;
+  s.items.push({ kind: "note", text });
+  push(s, s.items.length - 1);
+}
 
 const ANSWER =
   "Mình đã xem chỗ này. Hàm `listOrders` nhận `orgId` có thể rỗng, nên mình thêm nhánh lọc theo `userId` khi `orgId` không có, và một test cho trường hợp đó.";

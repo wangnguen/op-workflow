@@ -1,13 +1,14 @@
 import { vi } from "../../i18n/vi";
 import type { ChatItem } from "../../ipc/types";
 import { Markdown } from "../../shared/Markdown";
+import { Icon } from "../../shared/ui/Icon";
 import { outputHead } from "../task/runs";
 
 const t = vi.flow.chat;
 
 /** One item of a chat: what the app or the user sent, what the AI wrote, a tool call (its result
- *  folded), a marker (stopped, compacted, the run's end) or an error. Shared by the task window's
- *  Chat tab and the Workspace chat. */
+ *  folded), a marker (stopped, compacted, the run's end), an error or a line from the app (not
+ *  sent to the AI). Shared by the task window's Chat tab and the Workspace chat. */
 export function ChatItemView({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "prompt":
@@ -50,6 +51,13 @@ export function ChatItemView({ item }: { item: ChatItem }) {
       );
     case "error":
       return <p className="note note--error chat-item">{item.text}</p>;
+    case "note":
+      return (
+        <p className="chat-note">
+          <Icon name="info" size={12} />
+          <span>{item.text}</span>
+        </p>
+      );
   }
 }
 

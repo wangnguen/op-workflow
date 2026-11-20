@@ -34,15 +34,14 @@ import { CopyPush } from "./CopyPush";
 import { DiffTab } from "./DiffTab";
 import { StartOver } from "./StartOver";
 import { FinishDialog } from "./FinishDialog";
-import { BudgetChoices, PlanChangedChoices } from "./GateChoices";
+import { BudgetChoices } from "./GateChoices";
 import { TalkPanel } from "./TalkPanel";
 import { Markdown } from "../../shared/Markdown";
 import { modelText } from "../../shared/models";
 import { Icon } from "../../shared/ui/Icon";
 import { SegmentedControl } from "../../shared/ui/SegmentedControl";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
-import { OptionalSteps, PlanQuestions } from "./PlanExtras";
-import { unanswered } from "./planQuestions";
+import { OptionalSteps } from "./PlanExtras";
 import { ProgressTab } from "./ProgressTab";
 import { lastEnded } from "./runs";
 import {
@@ -450,8 +449,7 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
     const kind = d.gate.kind;
     // the user pressed Dừng: not an error, the step waits for them
     const stopped = kind === "error" && d.error?.code === "step.stopped";
-    const planChanged = kind === "planChanged";
-    const failed = kind === "error" && !stopped && !planChanged;
+    const failed = kind === "error" && !stopped;
     icon = <StatusIcon state={failed ? "failed" : "waitingUser"} size={15} />;
     tone = failed ? "error" : "gate";
     text = (
@@ -467,9 +465,7 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
         {d.quotaNote && <QuotaLine note={d.quotaNote} />}
       </>
     );
-    if (planChanged) {
-      actions = <PlanChangedChoices disabled={disabled} onAction={onAction} />;
-    } else if (kind === "error" && d.error?.code === "step.budget") {
+    if (kind === "error" && d.error?.code === "step.budget") {
       actions = <BudgetChoices disabled={disabled} canGoOn={d.canGoOn === true} budget={d.continuationBudgetUsd} onAction={onAction} />;
     } else if (stopped) {
       // the guide box and "Chạy tiếp" are in "Trao đổi với AI" below the strip
@@ -485,11 +481,6 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
           {d.error?.provider && d.error.code === "agent.signedOut" && (
             <button className="btn btn--sm" disabled={disabled} onClick={() => onLogin(d.error?.provider ?? "claude")}>
               {t.login}
-            </button>
-          )}
-          {d.error?.code === "repo.changed" && (
-            <button className="btn btn--sm" disabled={disabled} title={t.useCurrentRepoHint} onClick={() => onAction({ type: "useCurrentRepo" })}>
-              {t.useCurrentRepo}
             </button>
           )}
           <button className="btn btn--primary btn--sm" disabled={disabled} onClick={() => onAction({ type: "retry" })}>
@@ -509,8 +500,8 @@ function StatusStrip({ detail: d, tab, busy, onError, onAction, onLogin, onShow,
           </button>
           <button
             className="btn btn--primary btn--sm"
-            disabled={disabled || unanswered(d.questions) > 0}
-            title={unanswered(d.questions) > 0 ? t.questions.approveBlocked(unanswered(d.questions)) : t.approveHint}
+            disabled={disabled}
+            title={t.approveHint}
             onClick={() => onAction({ type: "approvePlan" })}
           >
             <Icon name="check" size={12} />
@@ -785,17 +776,15 @@ function PlanTab({ detail: d, busy, feedbackOpen, setFeedbackOpen, onAction }: P
   const [feedback, setFeedback] = useState("");
   if (!d.plan) return <p className="dim">{t.noPlan}</p>;
   const atGate = d.gate?.kind === "planReview";
-  const left = unanswered(d.questions);
   return (
     <div className="task-pane">
       {atGate && (
         <p className="note note--warn">
           <Icon name="alert" size={13} />
-          {left > 0 ? t.planGateQuestions(left) : t.planGate}
+          {t.planGate}
         </p>
       )}
       <Markdown text={d.plan} className="task-md" />
-      {atGate && <PlanQuestions detail={d} onAction={onAction} />}
       <OptionalSteps detail={d} onAction={onAction} />
       {atGate && feedbackOpen && (
         <div className="task-feedback">

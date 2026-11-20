@@ -279,14 +279,6 @@ pub fn findings_from_text(text: &str) -> Option<Vec<RawFinding>> {
     NO_FINDINGS.is_match(text).then(Vec::new)
 }
 
-/// A question the analysis asks the user, as the AI wrote it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawQuestion {
-    pub text: String,
-    /// Answers the AI suggests.
-    pub options: Vec<String>,
-}
-
 /// What the analysis advises for an optional step: `step` is `harness` or `browserTest`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawProposal {
@@ -321,11 +313,10 @@ pub struct RawDevCommand {
 pub struct PlanAnswer {
     /// The markdown plan without the json block.
     pub plan: String,
-    pub questions: Vec<RawQuestion>,
     pub proposals: Vec<RawProposal>,
 }
 
-/// Keys of the analysis json block.
+/// Keys of the analysis json block (`questions` only in blocks of older analyses).
 const PLAN_KEYS: [&str; 3] = ["questions", "harness", "browserTest"];
 
 /// Fenced blocks with the line numbers of their opening and closing fences (closing = the line
@@ -416,74 +407,8 @@ fn proposal(v: &Value, key: &'static str) -> Option<RawProposal> {
     })
 }
 
-fn questions_from_json(v: &Value) -> Vec<RawQuestion> {
-    let Some(items) = v.get("questions").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|q| {
-            let (text, options) = match q {
-                Value::String(s) => (s.trim().to_owned(), Vec::new()),
-                Value::Object(_) => (
-                    ["text", "question"]
-                        .iter()
-                        .map(|k| string_at(q, k))
-                        .find(|s| !s.is_empty())
-                        .unwrap_or_default(),
-                    q.get("options")
-                        .and_then(Value::as_array)
-                        .map(|o| {
-                            o.iter()
-                                .filter_map(Value::as_str)
-                                .map(|s| s.trim().to_owned())
-                                .filter(|s| !s.is_empty())
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                ),
-                _ => return None,
-            };
-            (!text.is_empty()).then_some(RawQuestion { text, options })
-        })
-        .collect()
-}
-
-static QUESTION_HEADING: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^\s*#{1,6}\s.*(câu hỏi|questions?)").expect("valid regex"));
-/// `- `, `* `, `> `, `2. `, `3) ` at the start of a line.
-static LIST_MARK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(?:[-*>]\s+|\d+[.)]\s+)+").expect("valid regex"));
-
-/// Fallback when there is no json block: lines ending in `?` under a heading that names
-/// questions ("## Rủi ro và câu hỏi"), up to the next heading.
-fn questions_from_markdown(plan: &str) -> Vec<RawQuestion> {
-    let mut out = Vec::new();
-    let mut inside = false;
-    for line in plan.lines() {
-        let t = line.trim();
-        if t.starts_with('#') {
-            inside = QUESTION_HEADING.is_match(line);
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        let text = LIST_MARK.replace(t, "");
-        let text = text.trim().trim_matches('*').trim();
-        if text.ends_with('?') || text.ends_with('？') {
-            out.push(RawQuestion {
-                text: text.to_owned(),
-                options: Vec::new(),
-            });
-        }
-    }
-    out
-}
-
-/// Split an analysis answer: the last fenced json block with `questions` / `harness` /
-/// `browserTest` is taken out of the plan and read; without one, questions come from the
-/// plan's question section and there are no proposals.
+/// Split an analysis answer: the last fenced json block with `harness` / `browserTest` advice
+/// is taken out of the plan and read; without one the whole answer is the plan.
 pub fn plan_answer(text: &str) -> PlanAnswer {
     let lines: Vec<&str> = text.lines().collect();
     let block = fenced_spans(&lines).into_iter().rev().find_map(|(open, close)| {
@@ -495,10 +420,8 @@ pub fn plan_answer(text: &str) -> PlanAnswer {
             .then_some((open, close, v))
     });
     let Some((open, close, v)) = block else {
-        let plan = text.trim().to_owned();
         return PlanAnswer {
-            questions: questions_from_markdown(&plan),
-            plan,
+            plan: text.trim().to_owned(),
             proposals: Vec::new(),
         };
     };
@@ -508,13 +431,7 @@ pub fn plan_answer(text: &str) -> PlanAnswer {
         kept.pop();
     }
     let plan = kept.join("\n").trim().to_owned();
-    let questions = if v.get("questions").is_some() {
-        questions_from_json(&v)
-    } else {
-        questions_from_markdown(&plan)
-    };
     PlanAnswer {
-        questions,
         proposals: ["harness", "browserTest"]
             .into_iter()
             .filter_map(|k| proposal(&v, k))
@@ -605,15 +522,13 @@ mod tests {
     }
 
     #[test]
-    fn plan_json_block_gives_questions_and_proposals_and_leaves_the_plan() {
+    fn plan_json_block_gives_proposals_and_leaves_the_plan() {
         let text = "## Nguyên nhân\nx\n\n## Rủi ro\n- r\n\n```json\n{\"questions\":[{\"text\":\"Giữ API cũ?\",\"options\":[\"Có\",\" \",\"Không\"]},\"Đổi tên?\",{\"text\":\"\"}],\
                     \"harness\":{\"recommend\":true,\"reason\":\"logic thuần\",\"checks\":[\"tính tổng\",\"rỗng\"]},\
                     \"browserTest\":{\"recommend\":false,\"reason\":\"không có UI\",\"scenario\":\"\"}}\n```\n";
         let a = plan_answer(text);
+        // (a block of an older analysis, with questions, still leaves the plan)
         assert_eq!(a.plan, "## Nguyên nhân\nx\n\n## Rủi ro\n- r");
-        assert_eq!(a.questions.len(), 2);
-        assert_eq!(a.questions[0].options, vec!["Có", "Không"]);
-        assert_eq!(a.questions[1].text, "Đổi tên?");
         assert_eq!(a.proposals.len(), 2);
         assert_eq!(a.proposals[0].step, "harness");
         assert!(a.proposals[0].recommend);
@@ -651,20 +566,16 @@ mod tests {
     }
 
     #[test]
-    fn plan_questions_fall_back_to_the_question_section() {
-        let text = "## Nguyên nhân\nVì sao?\n## Rủi ro và câu hỏi\n- Rủi ro: chậm.\n- **Có cần giữ API cũ?**\n2. Dùng lib nào?\n## Khác\nx?";
+    fn a_plan_without_the_advice_block_is_the_whole_answer() {
+        let text = "## Nguyên nhân\nVì sao?\n## Rủi ro\n- **Có cần giữ API cũ?**";
         let a = plan_answer(text);
         assert_eq!(a.plan, text);
-        let qs: Vec<&str> = a.questions.iter().map(|q| q.text.as_str()).collect();
-        assert_eq!(qs, vec!["Có cần giữ API cũ?", "Dùng lib nào?"]);
         assert!(a.proposals.is_empty());
-        // a json block without questions: the markdown ones count
-        let mixed = format!("{text}\n```json\n{{\"harness\": false}}\n```");
-        let a = plan_answer(&mixed);
-        assert_eq!(a.questions.len(), 2);
+        let advice = format!("{text}\n```json\n{{\"harness\": false}}\n```");
+        let a = plan_answer(&advice);
+        assert_eq!(a.plan, text);
         assert_eq!(a.proposals.len(), 1);
         assert!(!a.proposals[0].recommend);
-        assert_eq!(plan_answer("## Rủi ro\nkhông").questions, vec![]);
     }
 
     #[test]

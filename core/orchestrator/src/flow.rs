@@ -39,9 +39,9 @@ use opw_domain::finding::{Severity, fingerprint};
 use opw_domain::view::{
     AgentKind, AgentQuestionView, AgentView, AlertKind, ApiError, CarryOn, ChatItem, ChatKind, ChatView,
     Decision, DevCommand, DevServer, FindingDecision, FindingView, FlowAction, FlowError, FlowStatus,
-    GateKind, GateView, LogLine, PlanQuestion, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote,
-    RunState, RunSummary, RunView, SessionStatus, StepProposal, StepRef, StepView, TalkTurn, TaskColumn,
-    TaskDetail, TestCase, TestView, ToolEvent,
+    GateKind, GateView, LogLine, Provider, PushBlock, PushView, QuotaSnapshot, ReviewNote, RunState,
+    RunSummary, RunView, SessionStatus, StepProposal, StepRef, StepView, TalkTurn, TaskColumn, TaskDetail,
+    TestCase, TestView, ToolEvent,
 };
 use opw_domain::workflow::{AfterFix, Phase, StepKind, StepState, Workflow, WorkflowEvent};
 use opw_storage::{FindingRow, StepRunEnd, StepRunRow, Store, TaskRow};
@@ -74,8 +74,6 @@ const NO_HARNESS_REASON: &str =
     "Phân tích chưa xác định được ca kiểm tra độc lập có kết quả mong đợi rõ ràng.";
 /// Times Claude may fix what Kiểm tra reports before the step stops for the user.
 const CHECK_FIX_ROUNDS: usize = 2;
-/// What a question left to the AI says in plan.md.
-const AI_DECIDES: &str = "AI tự quyết";
 
 // ---------- launching AI processes ----------
 
@@ -184,9 +182,6 @@ struct Saved {
     /// Exact brief last written by Cập nhật brief, to distinguish edits inside its comments.
     #[serde(skip_serializing_if = "Option::is_none")]
     refreshed_brief: Option<String>,
-    /// A question over the existing phase; keeping the plan restores that exact decision.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    plan_change: Option<String>,
     /// When the phase last changed.
     since: Option<String>,
     /// A process was running when this was saved.
@@ -195,8 +190,6 @@ struct Saved {
     finished: bool,
     /// What the user wrote with "Làm tiếp → quay lại Viết code"; goes into the next Viết code.
     note: Option<String>,
-    /// The latest analysis's questions with the user's answers.
-    questions: Vec<PlanQuestion>,
     /// The latest analysis's advice on Harness / Test trình duyệt.
     proposals: Vec<StepProposal>,
     /// Optional steps the user turned on or off by hand: a new analysis no longer changes them.
@@ -321,18 +314,56 @@ const TALK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Log lines of the failed step the AI sees.
 const TALK_LOG_LINES: usize = 15;
 
-/// The conversation about a failed step goes to that step's next run, unless that run goes on in
-/// the very session the conversation happened in ("Chạy tiếp" after talking in the step's own
+/// "Chạy tiếp": the conversation about a failed step goes to that step's next run, unless that
+/// run goes on in the very session the conversation happened in (after talking in the step's own
 /// Claude session).
-fn carry_talk(saved: &mut Saved, step: StepKind, go_on: bool) {
+fn carry_talk(saved: &mut Saved, step: StepKind) {
     let Some(talk) = saved.talk.take() else { return };
-    if talk.step != Some(step) || talk.turns.is_empty() || (go_on && talk.in_step) {
+    if talk.step != Some(step) || talk.turns.is_empty() || talk.in_step {
         return;
     }
     saved.talk_carry = Some(TalkCarry {
         step,
         text: talk_transcript(&talk.turns),
     });
+}
+
+/// Làm lại từ đầu (and a task whose repo changed): what the user set for this task stays (the
+/// steps it runs, Tự chạy, the issue, the dev server); everything the earlier attempt produced
+/// starts over and no finding stays picked for fixing. The caller opens the new session.
+fn start_over(entry: &mut Entry, ctx: &TaskCtx, store: &Mutex<Store>) {
+    let old = std::mem::take(&mut entry.saved);
+    let mut saved = new_saved();
+    for step in StepKind::ALL.into_iter().skip(1) {
+        let on = old.workflow.enabled(step);
+        if on != saved.workflow.enabled(step) {
+            let _ = saved.workflow.set_enabled(step, on);
+        }
+    }
+    saved.workspace = old.workspace;
+    saved.auto = old.auto;
+    saved.issue = old.issue;
+    saved.dev_server = old.dev_server;
+    saved.picked = old.picked;
+    entry.saved = saved;
+    if let Ok(store) = store.lock() {
+        for mut f in store.findings(ctx.row.wp_id).unwrap_or_default() {
+            if f.chosen && !settled(&f.state) {
+                f.chosen = false;
+                let _ = store.upsert_finding(&f);
+            }
+        }
+    }
+}
+
+/// The error `execute` ends with when the task's checkout is not the one it started in: the app
+/// starts the task over in a new session there instead of running the step.
+const REPO_MOVED: &str = "repo.moved";
+
+/// Thử lại / Chạy lại từ đầu start clean: what was said about the failure stays out of the run.
+fn forget_talk(saved: &mut Saved) {
+    saved.talk = None;
+    saved.talk_carry = None;
 }
 
 fn talk_transcript(turns: &[TalkTurn]) -> String {
@@ -1307,12 +1338,9 @@ impl Flow {
             auto: ctx.auto(&entry.saved),
             running,
             session_step: entry.run.as_ref().is_some_and(|r| r.session_step),
-            gate: if entry.saved.plan_change.is_some() {
-                Some(GateKind::PlanChanged)
-            } else if let Phase::Gate(gate) = entry.saved.workflow.phase() {
-                Some(gate)
-            } else {
-                None
+            gate: match entry.saved.workflow.phase() {
+                Phase::Gate(gate) => Some(gate),
+                _ => None,
             },
             error: entry.saved.error.clone(),
             steps: StepKind::ALL
@@ -1358,27 +1386,25 @@ impl Flow {
         self.observe_plan(ctx);
     }
 
-    /// Reconcile file edits and refreshed comments without consuming the pending workflow decision.
+    /// The brief or plan changed after the plan was approved (an edit, refreshed comments): say
+    /// so once in the task's chat and ring the bell. Nothing waits for an answer.
     pub fn observe_plan(&self, ctx: &TaskCtx) {
         if !self.inner.require_mcp {
             return;
         }
-        let alert = {
+        let message = {
             let mut tasks = self.inner.lock_tasks();
             let Some(entry) = tasks.get_mut(&ctx.row.wp_id) else {
                 return;
             };
-            let previous = entry.saved.plan_change.clone();
-            let changed = notice_plan_change(entry, ctx);
-            if previous != entry.saved.plan_change {
+            let message = notice_plan_change(entry, ctx);
+            if message.is_some() {
                 self.inner.persist(ctx.row.wp_id, entry);
             }
-            changed.then(|| plan_change_alert(ctx, entry.saved.plan_change.as_deref().unwrap_or_default()))
+            message
         };
-        if let Some(alert) = alert {
-            if let Some(sink) = self.inner.alert_sink.lock().ok().and_then(|s| s.clone()) {
-                sink(alert);
-            }
+        if let Some(message) = message {
+            self.inner.tell(ctx, &message, plan_change_alert(ctx, &message));
         }
     }
 
@@ -1953,33 +1979,21 @@ impl Flow {
         let state = match status {
             FlowStatus::Running => StepState::Running,
             FlowStatus::Ready => StepState::Pending,
-            FlowStatus::Gate
-                if entry.saved.plan_change.is_none() && wf.phase() == Phase::Gate(GateKind::Error) =>
-            {
-                StepState::Failed
-            }
+            FlowStatus::Gate if wf.phase() == Phase::Gate(GateKind::Error) => StepState::Failed,
             FlowStatus::Gate => StepState::WaitingUser,
             FlowStatus::AwaitingPush | FlowStatus::Done => StepState::Done,
             FlowStatus::NotStarted => StepState::Pending,
         };
-        let gate = if entry.saved.plan_change.is_some() {
-            Some(GateKind::PlanChanged)
-        } else {
-            match wf.phase() {
-                Phase::Gate(kind) => Some(kind),
-                _ => None,
-            }
+        let gate = match wf.phase() {
+            Phase::Gate(kind) => Some(kind),
+            _ => None,
         };
-        let note = if let Some(message) = &entry.saved.plan_change {
-            Some(short(message))
-        } else {
-            match (status, &entry.saved.error) {
-                (FlowStatus::Gate, Some(e)) if gate == Some(GateKind::Error) => Some(short(&e.message)),
-                (FlowStatus::Gate, _) => {
-                    gate.map(|g| gate_message(g, entry, &self.inner.findings(ctx.row.wp_id)))
-                }
-                _ => None,
+        let note = match (status, &entry.saved.error) {
+            (FlowStatus::Gate, Some(e)) if gate == Some(GateKind::Error) => Some(short(&e.message)),
+            (FlowStatus::Gate, _) => {
+                gate.map(|g| gate_message(g, entry, &self.inner.findings(ctx.row.wp_id)))
             }
+            _ => None,
         };
         let cost: f64 = runs.iter().filter_map(|r| r.cost_usd).sum();
         Some(CardFlow {
@@ -2096,12 +2110,7 @@ impl Flow {
             current: current_step(entry),
             steps: step_views(entry, &runs, &ctx.row.updated_at),
             gate: gate_view(entry, &findings),
-            error: entry
-                .saved
-                .plan_change
-                .as_ref()
-                .map(|message| flow_error("plan.briefChanged", message.clone()))
-                .or_else(|| entry.saved.error.clone()),
+            error: entry.saved.error.clone(),
             continuation_budget_usd: entry
                 .saved
                 .error
@@ -2135,7 +2144,6 @@ impl Flow {
             auto_advance: ctx.auto(&entry.saved),
             brief: ctx.read(BRIEF_FILE),
             plan: ctx.read(PLAN_FILE),
-            questions: entry.saved.questions.clone(),
             proposals: entry.saved.proposals.clone(),
             dev_server: dev_server_of(ctx, &entry.saved).map(|(d, _)| d),
             dev_server_from_repo: dev_server_of(ctx, &entry.saved).is_some_and(|(_, repo)| repo),
@@ -2472,7 +2480,7 @@ fn prompt_of(job: &Job) -> String {
 
 /// "plan: 3 file sẽ sửa, 2 câu hỏi, đề xuất Harness" from the sections `prompts::analyze` asks
 /// for, the questions and the steps the AI advises.
-fn plan_note(plan: &str, questions: usize, proposals: &[StepProposal]) -> String {
+fn plan_note(plan: &str, proposals: &[StepProposal]) -> String {
     let section = |title: &str| -> Vec<&str> {
         let mut lines = plan
             .lines()
@@ -2488,9 +2496,6 @@ fn plan_note(plan: &str, questions: usize, proposals: &[StepProposal]) -> String
     let mut parts = Vec::new();
     if files > 0 {
         parts.push(format!("{files} file sẽ sửa"));
-    }
-    if questions > 0 {
-        parts.push(format!("{questions} câu hỏi"));
     }
     let advised: Vec<&str> = proposals
         .iter()
@@ -2578,17 +2583,6 @@ fn plan_stamp(ctx: &TaskCtx) -> Option<String> {
     Some(plan_digest(ctx, &ctx.read(BRIEF_FILE)?, &ctx.read(PLAN_FILE)?))
 }
 
-fn require_current_plan(saved: &Saved, ctx: &TaskCtx) -> Result<(), FlowError> {
-    // A Workspace flow can begin at any step. There is no approved plan to invalidate yet.
-    if saved.workspace && saved.verified_plan.is_none() {
-        return Ok(());
-    }
-    if saved.verified_plan.is_some() && saved.verified_plan == plan_stamp(ctx) {
-        return Ok(());
-    }
-    Err(flow_error("plan.briefChanged", plan_change_message(saved, ctx)))
-}
-
 fn remember_plan(saved: &mut Saved, ctx: &TaskCtx) -> Result<(), FlowError> {
     let brief = ctx
         .read(BRIEF_FILE)
@@ -2601,7 +2595,6 @@ fn remember_plan(saved: &mut Saved, ctx: &TaskCtx) -> Result<(), FlowError> {
     saved.approved_brief = Some(brief);
     saved.approved_plan = Some(plan);
     saved.refreshed_brief = None;
-    saved.plan_change = None;
     Ok(())
 }
 
@@ -2625,7 +2618,7 @@ fn plan_change_message(saved: &Saved, ctx: &TaskCtx) -> String {
         || saved.approved_plan != ctx.read(PLAN_FILE)
         || (before != fresh
             && saved.refreshed_brief.as_ref().map(|b| comments(b)).as_deref() != Some(fresh.as_str()));
-    let mut message = String::from("Brief đã đổi sau khi bạn duyệt plan.");
+    let mut message = String::from("Brief đổi sau khi bạn duyệt plan.");
     if before != fresh && !added.is_empty() {
         message.push_str("\nComment mới hoặc đã cập nhật trong brief:\n");
         message.push_str(&added.join("\n### "));
@@ -2633,11 +2626,18 @@ fn plan_change_message(saved: &Saved, ctx: &TaskCtx) -> String {
     if manual || before == fresh {
         message.push_str("\nBrief / plan được sửa tay.");
     }
+    message.push('\n');
+    message.push_str(PLAN_CHANGE_HINT);
     message
 }
 
-/// Called only while idle, including immediately after a successful running step.
-fn notice_plan_change(entry: &mut Entry, ctx: &TaskCtx) -> bool {
+/// How a change of the brief after approval is handled: by the user, in the chat.
+const PLAN_CHANGE_HINT: &str = "Muốn AI xem lại thì nhắn trong chat hoặc chạy lại Phân tích.";
+
+/// Called only while idle, including right after a step: what to tell the user when the brief
+/// or plan changed since the plan was approved. Once per change: the contents now become the
+/// approved ones.
+fn notice_plan_change(entry: &mut Entry, ctx: &TaskCtx) -> Option<String> {
     if entry.run.is_some()
         || entry.saved.finished
         || entry.saved.verified_plan.is_none()
@@ -2646,85 +2646,35 @@ fn notice_plan_change(entry: &mut Entry, ctx: &TaskCtx) -> bool {
             Phase::NotStarted | Phase::Running(StepKind::Analyze) | Phase::Gate(GateKind::PlanReview)
         )
     {
-        return false;
+        return None;
     }
-    if require_current_plan(&entry.saved, ctx).is_ok() {
-        return false;
+    let stamp = plan_stamp(ctx);
+    if entry.saved.verified_plan == stamp {
+        return None;
     }
     let message = plan_change_message(&entry.saved, ctx);
-    let first = entry.saved.plan_change.is_none();
-    entry.saved.plan_change = Some(message);
-    if first {
-        push_log(
-            entry,
-            current_step(entry),
-            "info",
-            "Brief đã đổi sau khi bạn duyệt plan: chờ bạn chọn cách tiếp tục",
-        );
-    }
-    first
+    entry.saved.verified_plan = stamp;
+    entry.saved.approved_brief = ctx.read(BRIEF_FILE);
+    entry.saved.approved_plan = ctx.read(PLAN_FILE);
+    entry.saved.refreshed_brief = None;
+    push_log(
+        entry,
+        current_step(entry),
+        "info",
+        "Brief đổi sau khi bạn duyệt plan: đã báo trong chat của phiên",
+    );
+    Some(message)
 }
 
 fn plan_change_alert(ctx: &TaskCtx, message: &str) -> FlowAlert {
     FlowAlert {
         wp_id: ctx.row.wp_id,
         task_id: ctx.row.display_id.clone(),
-        kind: AlertKind::Gate,
-        title: format!("{} · Brief đã đổi, chờ bạn", ctx.row.display_id),
+        kind: AlertKind::Comment,
+        title: format!("{} · Brief đổi sau khi duyệt plan", ctx.row.display_id),
         body: message.to_owned(),
         tab: "brief",
     }
-}
-
-fn validate_analysis(plan: &str, output: &str) -> Result<(), FlowError> {
-    const SECTIONS: [&str; 6] = [
-        "Nguyên nhân",
-        "Phương án",
-        "Đề xuất",
-        "File sẽ sửa",
-        "Kế hoạch test",
-        "Rủi ro",
-    ];
-    let mut sections = HashSet::new();
-    let mut section = None;
-    for line in plan.lines().map(str::trim) {
-        if let Some(title) = line.strip_prefix("## ") {
-            section = Some(title);
-        } else if !line.is_empty() {
-            if let Some(title) = section {
-                sections.insert(title);
-            }
-        }
-    }
-    let missing: Vec<_> = SECTIONS
-        .into_iter()
-        .filter(|name| !sections.contains(name))
-        .collect();
-    if !missing.is_empty() {
-        return Err(flow_error(
-            "mcp.planIncomplete",
-            format!(
-                "Plan thiếu nội dung ở các mục {}. Xem kết quả trong Chat rồi bấm Thử lại.",
-                missing.join(", ")
-            ),
-        ));
-    }
-    let final_block = text::fenced_blocks(output).pop();
-    let valid = final_block.is_some_and(|block| {
-        block.lang.eq_ignore_ascii_case("json")
-            && serde_json::from_str::<serde_json::Value>(&block.body).is_ok_and(|data| {
-                data.get("questions").is_some_and(serde_json::Value::is_array)
-                    && data.get("harness").is_some_and(serde_json::Value::is_object)
-                    && data.get("browserTest").is_some_and(serde_json::Value::is_object)
-            })
-    });
-    if !valid {
-        return Err(flow_error(
-            "mcp.planIncomplete",
-            "Plan thiếu khối JSON hợp lệ cho câu hỏi, Harness và Test trình duyệt. Xem Chat rồi bấm Thử lại.",
-        ));
-    }
-    Ok(())
 }
 
 /// Apply a button to the saved state. Returns `true` when a step should start now.
@@ -2744,26 +2694,6 @@ fn apply_action(
             "AI đang trả lời trong khung Trao đổi với AI: chờ xong hoặc bấm Dừng.",
         ));
     }
-    if entry.saved.plan_change.is_some()
-        && !matches!(
-            action,
-            FlowAction::KeepPlan
-                | FlowAction::Reopen {
-                    step: Some(StepKind::Analyze),
-                    ..
-                }
-                | FlowAction::SetAuto { .. }
-                | FlowAction::SetWorkspaceFlow { .. }
-                | FlowAction::SetWorkspaceStep { .. }
-                | FlowAction::StartOver
-                | FlowAction::Stop
-        )
-    {
-        return Err(ApiError::new(
-            "plan.briefChanged",
-            "Brief đã đổi: chọn Phân tích lại hoặc Giữ plan, chạy tiếp.",
-        ));
-    }
     let event = |entry: &mut Entry, e: WorkflowEvent| -> Result<(), ApiError> {
         entry
             .saved
@@ -2774,19 +2704,6 @@ fn apply_action(
         Ok(())
     };
     match action {
-        FlowAction::KeepPlan => {
-            if running || entry.saved.plan_change.is_none() {
-                return Err(not_now("giữ plan"));
-            }
-            remember_plan(&mut entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
-            push_log(
-                entry,
-                current_step(entry),
-                "info",
-                "Bạn giữ plan sau khi brief đổi",
-            );
-            Ok(matches!(phase, Phase::Running(_)))
-        }
         FlowAction::Run => {
             if running {
                 return Err(ApiError::new("step.running", "Bước này đang chạy"));
@@ -2803,7 +2720,7 @@ fn apply_action(
                     entry.saved.error = None;
                     entry.saved.stopped = None;
                     entry.saved.go_on = None;
-                    carry_talk(&mut entry.saved, step, false);
+                    forget_talk(&mut entry.saved);
                     Ok(true)
                 }
                 _ => Err(not_now("chạy bước tiếp")),
@@ -2824,7 +2741,7 @@ fn apply_action(
             entry.saved.error = None;
             entry.saved.stopped = None;
             entry.saved.go_on = None;
-            carry_talk(&mut entry.saved, step, false);
+            forget_talk(&mut entry.saved);
             let text = if stopped {
                 format!("Chạy lại {} từ đầu", step_label(step))
             } else {
@@ -2860,7 +2777,7 @@ fn apply_action(
             }
             event(entry, E::Retry(stopped.step))?;
             entry.saved.error = None;
-            carry_talk(&mut entry.saved, stopped.step, true);
+            carry_talk(&mut entry.saved, stopped.step);
             let note = note.trim().to_owned();
             let text = if note.is_empty() {
                 format!("Chạy tiếp {} trong phiên cũ", step_label(stopped.step))
@@ -2891,81 +2808,12 @@ fn apply_action(
         }
         // `Flow::act` runs it on its own thread; it never reaches here
         FlowAction::Talk { .. } => Err(not_now("trao đổi với AI")),
-        FlowAction::UseCurrentRepo => {
-            let changed = phase == Phase::Gate(GateKind::Error)
-                && entry
-                    .saved
-                    .error
-                    .as_ref()
-                    .is_some_and(|e| e.code == "repo.changed");
-            let step = entry
-                .saved
-                .workflow
-                .failed_step()
-                .filter(|_| changed && !running)
-                .ok_or_else(|| not_now("dùng repo hiện tại"))?;
-            let repo = ctx
-                .repo()
-                .filter(|r| r.is_dir())
-                .ok_or_else(|| ApiError::new("repo.missing", "Không thấy thư mục repo của task"))?;
-            let store = store
-                .lock()
-                .map_err(|_| ApiError::new("storage", "Dữ liệu cục bộ đang bị khoá"))?;
-            let old = store
-                .kv_get(ctx.row.wp_id, crate::task_repo::KEY, "")
-                .map_err(|e| ApiError::new("storage", e.to_string()))?
-                .and_then(|v| serde_json::from_str::<crate::task_repo::Binding>(&v).ok());
-            let brief = ctx.read(BRIEF_FILE).unwrap_or_default();
-            let now_bound = match old {
-                Some(old) => old.rebind(&repo)?,
-                None => crate::task_repo::Binding::read(
-                    &Git::new(&repo),
-                    crate::task_repo::legacy_issues(&brief),
-                )?,
-            };
-            let json =
-                serde_json::to_string(&now_bound).map_err(|e| ApiError::new("storage", e.to_string()))?;
-            store
-                .kv_set(ctx.row.wp_id, crate::task_repo::KEY, "", &json, &now())
-                .map_err(|e| ApiError::new("storage", e.to_string()))?;
-            drop(store);
-            event(entry, E::Retry(step))?;
-            entry.saved.error = None;
-            entry.saved.stopped = None;
-            entry.saved.go_on = None;
-            carry_talk(&mut entry.saved, step, false);
-            let origin = now_bound.remote().unwrap_or("không có origin").to_owned();
-            push_log(
-                entry,
-                Some(step),
-                "info",
-                &format!(
-                    "Bạn dùng repo hiện tại cho task (origin {origin}), chạy lại {}",
-                    step_label(step)
-                ),
-            );
-            Ok(true)
-        }
         FlowAction::ApprovePlan => {
-            let plan = ctx
-                .read(PLAN_FILE)
-                .filter(|p| !p.trim().is_empty())
-                .ok_or_else(|| ApiError::new("plan.missing", "Chưa có plan.md để duyệt"))?;
+            if ctx.read(PLAN_FILE).is_none_or(|p| p.trim().is_empty()) {
+                return Err(ApiError::new("plan.missing", "Chưa có plan.md để duyệt"));
+            }
             if phase != Phase::Gate(GateKind::PlanReview) {
                 return Err(not_now("duyệt plan"));
-            }
-            let open = entry.saved.questions.iter().filter(|q| !q.answered()).count();
-            if open > 0 {
-                return Err(ApiError::new(
-                    "plan.questions",
-                    format!(
-                        "Còn {open} câu hỏi chưa trả lời: trả lời hoặc chọn \"{AI_DECIDES}\" trước khi duyệt"
-                    ),
-                ));
-            }
-            if !entry.saved.questions.is_empty() {
-                write_task_file(ctx, PLAN_FILE, &plan_with_answers(&plan, &entry.saved.questions))
-                    .map_err(|e| ApiError::new(e.code, e.message))?;
             }
             if require_mcp {
                 remember_plan(&mut entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
@@ -2994,32 +2842,6 @@ fn apply_action(
                 "Bạn góp ý plan: phân tích lại",
             );
             Ok(true)
-        }
-        FlowAction::AnswerQuestion {
-            id,
-            answer,
-            ai_decides,
-        } => {
-            if phase != Phase::Gate(GateKind::PlanReview) {
-                return Err(not_now("trả lời câu hỏi của plan"));
-            }
-            let q = entry
-                .saved
-                .questions
-                .iter_mut()
-                .find(|q| q.id == *id)
-                .ok_or_else(|| ApiError::new("plan.question", "Không thấy câu hỏi này nữa"))?;
-            q.ai_decides = *ai_decides;
-            q.answer = if *ai_decides {
-                None
-            } else {
-                answer
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|a| !a.is_empty())
-                    .map(str::to_owned)
-            };
-            Ok(false)
         }
         FlowAction::DropHarness => {
             let kept = entry
@@ -3183,30 +3005,7 @@ fn apply_action(
             if running {
                 return Err(ApiError::new("step.running", "Bước này đang chạy"));
             }
-            let old = std::mem::take(&mut entry.saved);
-            let mut saved = new_saved();
-            // what the user set for this task stays: the steps it runs, Tự chạy, the issue, the
-            // dev server; everything the earlier attempt produced starts over
-            for step in StepKind::ALL.into_iter().skip(1) {
-                let on = old.workflow.enabled(step);
-                if on != saved.workflow.enabled(step) {
-                    let _ = saved.workflow.set_enabled(step, on);
-                }
-            }
-            saved.workspace = old.workspace;
-            saved.auto = old.auto;
-            saved.issue = old.issue;
-            saved.dev_server = old.dev_server;
-            saved.picked = old.picked;
-            entry.saved = saved;
-            if let Ok(store) = store.lock() {
-                for mut f in store.findings(ctx.row.wp_id).unwrap_or_default() {
-                    if f.chosen && !settled(&f.state) {
-                        f.chosen = false;
-                        let _ = store.upsert_finding(&f);
-                    }
-                }
-            }
+            start_over(entry, ctx, store);
             push_log(
                 entry,
                 None,
@@ -3333,9 +3132,6 @@ fn apply_action(
                     "Task chưa được xác nhận sẵn sàng bàn giao. Hoàn thành các bước đang chờ trước.",
                 ));
             }
-            if require_mcp {
-                require_current_plan(&entry.saved, ctx).map_err(|e| ApiError::new(e.code, e.message))?;
-            }
             entry.saved.finished = true;
             entry.saved.since = Some(now());
             let text = match (phase == Phase::AwaitingPush, *forced) {
@@ -3356,7 +3152,6 @@ fn apply_action(
             if phase == Phase::NotStarted {
                 return Err(not_now("làm tiếp"));
             }
-            let reanalyze_changed = entry.saved.plan_change.is_some() && *step == Some(StepKind::Analyze);
             if let Some(step) = *step {
                 event(entry, E::Reopen(step))?;
                 // the Sửa lỗi count starts over with the review loop
@@ -3364,8 +3159,7 @@ fn apply_action(
                     entry.saved.fixes = 0;
                 }
                 if step == StepKind::Analyze {
-                    entry.saved.feedback = entry.saved.plan_change.take().map(|change|
-                        format!("Brief có comment mới hoặc thay đổi sau khi duyệt plan. Chỉ sửa phần bị ảnh hưởng.\n{change}"));
+                    entry.saved.feedback = None;
                     entry.saved.verified_plan = None;
                 }
                 // asked for by hand: Review chốt runs even on code Tự review already saw
@@ -3395,52 +3189,13 @@ fn apply_action(
                 None => text,
             };
             push_log(entry, *step, "info", &text);
-            Ok(reanalyze_changed)
+            Ok(false)
         }
         FlowAction::SetAuto { on } => {
             entry.saved.auto = Some(*on);
             Ok(false)
         }
     }
-}
-
-/// plan.md with the user's answers as its last section (an older answers section is replaced).
-fn plan_with_answers(plan: &str, questions: &[PlanQuestion]) -> String {
-    let body = match plan.find(prompts::ANSWERS_HEADING) {
-        Some(at) => &plan[..at],
-        None => plan,
-    };
-    let body = body.trim_end();
-    if questions.is_empty() {
-        return format!("{body}\n");
-    }
-    let mut out = format!("{body}\n\n{}\n", prompts::ANSWERS_HEADING);
-    for q in questions {
-        let answer = if q.ai_decides {
-            AI_DECIDES
-        } else {
-            q.answer.as_deref().map_or("", str::trim)
-        };
-        out.push_str(&format!("\n- {}\n  → {answer}\n", q.text.trim()));
-    }
-    out
-}
-
-/// The analysis's questions; an earlier answer is kept when the same question comes back.
-fn new_questions(raw: Vec<text::RawQuestion>, before: &[PlanQuestion]) -> Vec<PlanQuestion> {
-    raw.into_iter()
-        .enumerate()
-        .map(|(i, q)| {
-            let old = before.iter().find(|b| b.text.trim() == q.text.trim());
-            PlanQuestion {
-                id: format!("q{}", i + 1),
-                text: q.text,
-                options: q.options,
-                answer: old.and_then(|o| o.answer.clone()),
-                ai_decides: old.is_some_and(|o| o.ai_decides),
-            }
-        })
-        .collect()
 }
 
 fn push_log(entry: &mut Entry, step: Option<StepKind>, kind: &str, text: &str) {
@@ -3464,9 +3219,6 @@ fn stop_alert(ctx: &TaskCtx, step: StepKind, entry: &Entry, text: &str) -> Optio
         .is_some_and(|e| e.code == "step.stopped")
     {
         return None;
-    }
-    if let Some(message) = &entry.saved.plan_change {
-        return Some(plan_change_alert(ctx, message));
     }
     let task_id = ctx.row.display_id.clone();
     let title_of = |what: &str| format!("{task_id} · {what}");
@@ -3551,9 +3303,6 @@ fn status_of(entry: &Entry) -> FlowStatus {
     }
     if entry.run.is_some() {
         return FlowStatus::Running;
-    }
-    if entry.saved.plan_change.is_some() {
-        return FlowStatus::Gate;
     }
     match entry.saved.workflow.phase() {
         Phase::NotStarted => FlowStatus::NotStarted,
@@ -3660,14 +3409,8 @@ fn rounds_note(round: u8) -> String {
 fn gate_message(kind: GateKind, entry: &Entry, findings: &[FindingRow]) -> String {
     let wf = &entry.saved.workflow;
     match kind {
-        GateKind::PlanChanged => entry.saved.plan_change.clone().unwrap_or_default(),
         GateKind::PlanReview => {
-            let open = entry.saved.questions.iter().filter(|q| !q.answered()).count();
-            if open > 0 {
-                format!("Plan đã xong, AI hỏi {open} câu: trả lời (hoặc để AI tự quyết) rồi duyệt.")
-            } else {
-                "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.".into()
-            }
+            "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.".into()
         }
         GateKind::Findings => {
             let review = wf.gate_review().unwrap_or(StepKind::FinalReview);
@@ -3705,17 +3448,6 @@ fn gate_message(kind: GateKind, entry: &Entry, findings: &[FindingRow]) -> Strin
 }
 
 fn gate_view(entry: &Entry, findings: &[FindingRow]) -> Option<GateView> {
-    if entry.run.is_none() {
-        if let Some(message) = &entry.saved.plan_change {
-            return Some(GateView {
-                kind: GateKind::PlanChanged,
-                since: entry.saved.since.clone().unwrap_or_default(),
-                message: message.clone(),
-                review: None,
-                next: current_step(entry),
-            });
-        }
-    }
     if entry.run.is_some() {
         return None;
     }
@@ -3863,6 +3595,19 @@ impl Inner {
 
     fn sessions(&self) -> Option<Sessions> {
         self.sessions.lock().ok()?.clone()
+    }
+
+    /// A line from the app in the task's chat, when it has a session (never sent to the AI), and
+    /// the bell. Call it without the task lock.
+    fn tell(&self, ctx: &TaskCtx, line: &str, alert: FlowAlert) {
+        if let Some(sessions) = self.sessions() {
+            if let Some(id) = sessions.task_session(ctx.row.wp_id) {
+                let _ = sessions.note(&id, line);
+            }
+        }
+        if let Some(sink) = self.alert_sink.lock().ok().and_then(|s| s.clone()) {
+            sink(alert);
+        }
     }
 
     /// The task has code to check or review: Viết code ran, the user coded by hand, or git sees
@@ -4076,6 +3821,7 @@ impl Inner {
         // `note` goes on the run's row (Tiến trình), `text` into the log
         let mut note = String::new();
         let asked = matches!(&result, Ok(done) if matches!(done.event, WorkflowEvent::AgentAsked(_)));
+        let mut moved: Option<String> = None;
         let (kind, text) = match result {
             Ok(done) => match entry.saved.workflow.apply(done.event) {
                 // the AI stopped to ask: the step is not over, it waits for the user
@@ -4111,9 +3857,16 @@ impl Inner {
                     ("error", text)
                 }
             },
-            Err(err) if err.code == "plan.briefChanged" => {
-                entry.saved.plan_change = Some(err.message.clone());
-                ("info", err.message)
+            // the checkout changed under the task: start over in a new session there
+            Err(err) if err.code == REPO_MOVED => {
+                start_over(entry, ctx, &self.store);
+                let line = format!(
+                    "Repo của task đã đổi ({}): app mở phiên mới ở repo hiện tại, bắt đầu lại từ Phân tích. \
+                     Phiên cũ vẫn còn trong danh sách để xem.",
+                    err.message
+                );
+                moved = Some(line.clone());
+                ("info", line)
             }
             Err(mut err) => {
                 let _ = entry.saved.workflow.apply(WorkflowEvent::StepFailed(step));
@@ -4166,9 +3919,12 @@ impl Inner {
                 .harness
                 .as_ref()
                 .is_some_and(|h| h.reviewed && !h.run.is_empty());
-        let changed = self.require_mcp && notice_plan_change(entry, ctx);
-        let go_on = entry.saved.plan_change.is_none()
-            && kind == "ok"
+        let changed = if self.require_mcp {
+            notice_plan_change(entry, ctx)
+        } else {
+            None
+        };
+        let go_on = kind == "ok"
             && match entry.saved.workflow.phase() {
                 Phase::Running(StepKind::Checks) => !entry.saved.workspace || ctx.auto(&entry.saved),
                 // after a fix of what the harness found, the app runs it again: no tokens either
@@ -4205,8 +3961,7 @@ impl Inner {
             }
             _ => None,
         };
-        let mut alert =
-            changed.then(|| plan_change_alert(ctx, entry.saved.plan_change.as_deref().unwrap_or_default()));
+        let mut alert = None;
         let mut go_on = go_on;
         match quota_stop {
             Some((true, said, next, provider)) => {
@@ -4247,12 +4002,33 @@ impl Inner {
             }
             None => {}
         }
-        if alert.is_none() {
+        if alert.is_none() && moved.is_none() {
             alert = (!go_on).then(|| stop_alert(ctx, step, entry, &text)).flatten();
         }
         self.persist(wp_id, entry);
         let next = go_on.then(|| self.claim_in(&mut tasks, ctx));
         drop(tasks);
+        if let Some(line) = moved {
+            if let (Some(sessions), Some(repo)) = (self.sessions(), ctx.row.repo.as_deref()) {
+                let _ = sessions.create(Some(wp_id), repo);
+            }
+            self.code_seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&wp_id);
+            let alert = FlowAlert {
+                wp_id,
+                task_id: ctx.row.display_id.clone(),
+                kind: AlertKind::Gate,
+                title: format!("{} · Repo đổi: phiên mới", ctx.row.display_id),
+                body: line.clone(),
+                tab: "progress",
+            };
+            self.tell(ctx, &line, alert);
+        }
+        if let Some(message) = changed {
+            self.tell(ctx, &message, plan_change_alert(ctx, &message));
+        }
         if let Some(alert) = alert {
             let sink = self.alert_sink.lock().ok().and_then(|s| s.clone());
             if let Some(sink) = sink {
@@ -4533,7 +4309,6 @@ impl Inner {
             "base": ctx.row.base,
             "step": claim.step,
             "purpose": "executeStep",
-            "repoCheck": (claim.step == StepKind::Analyze).then(|| self.repo_check(ctx)).flatten(),
             "brief": ctx.read(BRIEF_FILE),
             "approvedPlan": plan,
             "checksActuallyRun": checks,
@@ -5054,23 +4829,6 @@ impl Inner {
         Some(carry.text)
     }
 
-    /// The checkout the task was bound to at Bắt đầu.
-    fn binding(&self, wp_id: u64) -> Option<crate::task_repo::Binding> {
-        let value = self
-            .lock_store()
-            .ok()?
-            .kv_get(wp_id, crate::task_repo::KEY, "")
-            .ok()??;
-        serde_json::from_str(&value).ok()
-    }
-
-    /// What Phân tích is told when the checkout is not plainly the issue's repo.
-    fn repo_check(&self, ctx: &TaskCtx) -> Option<String> {
-        let b = self.binding(ctx.row.wp_id).filter(|b| b.needs_check())?;
-        let remembered = crate::task_repo::remembered(&ctx.config, &ctx.row.project, &b);
-        Some(prompts::repo_check(&b.issue_repos, b.remote(), &remembered))
-    }
-
     /// One answer of "Trao đổi với AI". Read only: Claude with Read/Grep/Glob, Codex in its
     /// read-only sandbox; the repo is compared before and after. `Err` = why there is no answer.
     fn talk_turn(&self, ctx: &TaskCtx, stop: &AtomicBool) -> Result<TalkAnswer, String> {
@@ -5420,7 +5178,7 @@ fn review_event(step: StepKind, findings: &[FindingRow], raw: &[RawFinding]) -> 
     (WorkflowEvent::ReviewFinished { open }, note)
 }
 
-/// Check the repo, run the step, check the repo again.
+/// Check the repo, run the step, check git again.
 fn execute(inner: &Inner, ctx: &TaskCtx, claim: &Claim) -> Result<Done, FlowError> {
     let step = claim.step;
     let repo = ctx.repo().filter(|p| p.is_dir()).ok_or_else(|| {
@@ -5429,7 +5187,7 @@ fn execute(inner: &Inner, ctx: &TaskCtx, claim: &Claim) -> Result<Done, FlowErro
             "Không thấy thư mục repo của task (đã xoá hoặc đổi chỗ?)",
         )
     })?;
-    let binding = if inner.require_mcp {
+    if inner.require_mcp {
         let stored = inner
             .lock_store()
             .map_err(|e| flow_error(&e.code, e.message))?
@@ -5453,18 +5211,18 @@ fn execute(inner: &Inner, ctx: &TaskCtx, claim: &Claim) -> Result<Done, FlowErro
                 binding
             }
         };
-        binding
-            .recheck(&repo)
-            .map_err(|e| flow_error(&e.code, e.message))?;
-        if step != StepKind::Analyze {
+        // the folder or origin changed under the task: bind it to the checkout as it is now; the
+        // step does not run with a plan made for the old one
+        if let Some((now_bound, what)) = binding.moved(&repo).map_err(|e| flow_error(&e.code, e.message))? {
+            let json = serde_json::to_string(&now_bound).map_err(|e| flow_error("storage", e.to_string()))?;
             inner
-                .with_saved(ctx.row.wp_id, |s| require_current_plan(s, ctx))
-                .transpose()?;
+                .lock_store()
+                .map_err(|e| flow_error(&e.code, e.message))?
+                .kv_set(ctx.row.wp_id, crate::task_repo::KEY, "", &json, &now())
+                .map_err(|e| flow_error("storage", e.to_string()))?;
+            return Err(flow_error(REPO_MOVED, what));
         }
-        Some(binding)
-    } else {
-        None
-    };
+    }
     let git = Git::new(&repo);
     if let Some(branch) = ctx.row.branch.as_deref() {
         let current = git
@@ -5482,11 +5240,6 @@ fn execute(inner: &Inner, ctx: &TaskCtx, claim: &Claim) -> Result<Done, FlowErro
     let before = git_snap(&repo).map_err(|e| flow_error("repo.git", e))?;
     let result = run_step(inner, ctx, claim, &repo);
     // a surprise in git matters more than how the step itself ended
-    if let Some(binding) = &binding {
-        binding
-            .recheck(&repo)
-            .map_err(|e| flow_error(&e.code, e.message))?;
-    }
     let after = git_snap(&repo);
     if inner.require_mcp && after.is_err() {
         return Err(flow_error(
@@ -6769,28 +6522,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
         StepKind::Analyze => {
             let previous_plan = ctx.read(PLAN_FILE);
             let previous = feedback.as_deref().zip(previous_plan.as_deref());
-            // answers to the previous plan's questions carry over into the new analysis
-            let before = inner
-                .with_saved(wp_id, |s| s.questions.clone())
-                .unwrap_or_default();
-            let answers: Vec<(String, String)> = before
-                .iter()
-                .filter(|q| q.answered())
-                .map(|q| {
-                    let a = if q.ai_decides {
-                        AI_DECIDES.to_owned()
-                    } else {
-                        q.answer.clone().unwrap_or_default()
-                    };
-                    (q.text.clone(), a)
-                })
-                .collect();
-            let answers: Vec<(&str, &str)> = answers.iter().map(|(q, a)| (q.as_str(), a.as_str())).collect();
-            let mut prompt = prompts::analyze(&brief, previous, &answers);
-            // a checkout that is not plainly the issue's repo: the AI decides if it is the place
-            if let Some(note) = inner.repo_check(ctx) {
-                prompt.push_str(&note);
-            }
+            let mut prompt = prompts::analyze(&brief, previous);
             // notes from earlier work on the repo: where it runs, how it is tested
             let memory = browsertest::claude_projects().and_then(|p| browsertest::repo_memory(&p, repo));
             let dirs: Vec<String> = memory.iter().map(|m| m.to_string_lossy().into_owned()).collect();
@@ -6828,12 +6560,8 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     ),
                 ));
             }
-            if inner.require_mcp && !r.manual {
-                validate_analysis(&answer.plan, &r.text)?;
-            }
             write_task_file(ctx, PLAN_FILE, &answer.plan)?;
             set_session(&r.session);
-            let questions = new_questions(answer.questions, &before);
             let mut proposals: Vec<StepProposal> = answer
                 .proposals
                 .into_iter()
@@ -6886,7 +6614,7 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                     dev_server: None,
                 });
             }
-            let note = plan_note(&answer.plan, questions.len(), &proposals);
+            let note = plan_note(&answer.plan, &proposals);
             inner.with_saved(wp_id, |s| {
                 if let Some(h) = s.harness.as_mut() {
                     h.run.clear();
@@ -6897,7 +6625,6 @@ fn run_step(inner: &Inner, ctx: &TaskCtx, claim: &Claim, repo: &Path) -> Result<
                         s.workflow.set_uses(p.step, p.recommend);
                     }
                 }
-                s.questions = questions;
                 s.proposals = proposals;
             });
             Ok(Done {
@@ -8804,7 +8531,7 @@ mod tests {
     }
 
     #[test]
-    fn talking_about_a_codex_step_starts_fresh_read_only_and_a_retry_hears_the_talk() {
+    fn talking_about_a_codex_step_starts_fresh_read_only_and_a_retry_starts_clean() {
         let Some(s) = setup() else { return };
         let mut config = Config::default();
         config.steps.analyze.agent = Some("codex".into());
@@ -8865,7 +8592,7 @@ mod tests {
         );
         std::fs::remove_file(s.repo.join("talk-note.txt")).unwrap();
 
-        // Chạy lại từ đầu: the new run hears the conversation, once
+        // Chạy lại từ đầu starts clean: the conversation stays out of the new run
         let d = run(&flow, &ctx, FlowAction::Retry);
         assert_eq!(
             d.gate.as_ref().map(|g| g.kind),
@@ -8876,16 +8603,13 @@ mod tests {
         assert!(d.talk.is_empty());
         let retry = fake.jobs.lock().unwrap().last().unwrap().clone();
         let prompt = retry.stdin.as_deref().unwrap();
-        assert!(!is_talk(&retry) && prompt.contains("<earlier_conversation>"));
-        assert!(prompt.contains("Có cần đổi cách làm không?") && prompt.contains("thiếu quyền"));
-        assert!(
-            flow.inner.take_talk_carry(1, StepKind::Analyze).is_none(),
-            "used once"
-        );
+        assert!(!is_talk(&retry) && !prompt.contains("<earlier_conversation>"));
+        assert!(!prompt.contains("Có cần đổi cách làm không?"));
+        assert!(flow.inner.take_talk_carry(1, StepKind::Analyze).is_none());
     }
 
     #[test]
-    fn a_checkout_of_another_repo_is_judged_by_the_analysis_and_a_moved_origin_can_be_taken() {
+    fn a_checkout_of_another_repo_runs_and_a_moved_origin_starts_the_task_over() {
         let Some(s) = setup() else { return };
         git(
             &s.repo,
@@ -8898,15 +8622,6 @@ mod tests {
         );
         let mut config = Config::default();
         config.steps.verify_mcp = false;
-        config
-            .projects
-            .entry("Web".into())
-            .or_default()
-            .repo_aliases
-            .insert(
-                "github.com/example/main".into(),
-                vec!["github.com/example/secondary".into()],
-            );
         let ctx = s.ctx(1, &config);
         let binding =
             crate::task_repo::Binding::read(&Git::new(&s.repo), "https://github.com/example/main/issues/7")
@@ -8935,11 +8650,10 @@ mod tests {
                         ],
                     );
                 }
+                // a plan without the advice block is a plan
                 out(&result_line(concat!(
-                    "## Nguyên nhân\nRepo: đúng chỗ, bản phụ của repo chính; a.ts:1\n## Phương án\nA\n",
-                    "## Đề xuất\nA\n## File sẽ sửa\na.ts\n## Kế hoạch test\nKiểm tra A\n## Rủi ro\na.ts:1\n\n",
-                    "```json\n{\"questions\":[],\"harness\":{\"recommend\":false,\"reason\":\"Đã có test\"},",
-                    "\"browserTest\":{\"recommend\":false}}\n```"
+                    "## Nguyên nhân\nbản phụ của repo chính; a.ts:1\n## Phương án\nA\n",
+                    "## Đề xuất\nA\n## File sẽ sửa\na.ts\n## Kế hoạch test\nKiểm tra A\n## Rủi ro\na.ts:1\n",
                 )));
                 ok()
             }),
@@ -8949,30 +8663,42 @@ mod tests {
         let flow = Flow::new(s.store.clone(), fake.clone(), None);
         flow.set_app_starter(Arc::new(FakeStarter::default()));
         flow.started(&ctx, None).unwrap();
+        // the checkout is not the issue's repo: the analysis runs, nothing tells it to judge that
         let d = run(&flow, &ctx, FlowAction::Run);
         let prompt = fake.jobs.lock().unwrap()[0].stdin.clone().unwrap();
-        assert!(prompt.contains("Repository check") && prompt.contains("`github.com/example/main`"));
-        assert!(
-            prompt.contains("`github.com/example/secondary`") && prompt.contains("approved earlier plans")
-        );
-        let err = d.error.unwrap();
-        assert_eq!(err.code, "repo.changed");
-        assert!(
-            err.message.contains("github.com/example/moved"),
-            "{}",
-            err.message
-        );
-
-        let d = run(&flow, &ctx, FlowAction::UseCurrentRepo);
+        assert!(!prompt.contains("Repository check"));
         assert_eq!(
             d.gate.as_ref().map(|g| g.kind),
             Some(GateKind::PlanReview),
             "{:?}",
             d.error
         );
-        assert!(d.log.iter().any(|l| l.text.contains("Bạn dùng repo hiện tại")));
-        let bound = flow.inner.binding(1).unwrap();
-        assert_eq!(bound.remote(), Some("github.com/example/moved"));
+        // the origin moved during that run: the next step does not run with the old plan, the
+        // task starts over from Phân tích bound to the checkout as it is now
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(fake.jobs.lock().unwrap().len(), 1, "Viết code did not run");
+        assert_eq!(d.error, None);
+        assert_eq!(d.current, Some(StepKind::Analyze));
+        assert_eq!(d.status, FlowStatus::Ready);
+        assert!(
+            d.log
+                .iter()
+                .any(|l| l.text.contains("Repo của task đã đổi")
+                    && l.text.contains("github.com/example/moved")),
+            "{:?}",
+            d.log
+        );
+        let bound: crate::task_repo::Binding = serde_json::from_str(
+            &s.store
+                .lock()
+                .unwrap()
+                .kv_get(1, crate::task_repo::KEY, "")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let json = serde_json::to_value(&bound).unwrap();
+        assert_eq!(json["remote"], "github.com/example/moved");
         assert_eq!(bound.issue_repos, ["github.com/example/main"]);
     }
 
@@ -10743,19 +10469,17 @@ mod tests {
     }
 
     #[test]
-    fn plan_questions_and_step_advice_wait_for_the_user() {
+    fn step_advice_turns_optional_steps_on_until_the_user_picks() {
         let Some(s) = setup() else { return };
         let analyses = AtomicUsize::new(0);
         let (flow, fake) = flow_with(&s, false, move |job, _stop, out| {
             if kind(job) == "analyze" {
                 let n = analyses.fetch_add(1, Ordering::SeqCst);
                 let json = if n == 0 {
-                    r#"{"questions":[{"text":"Giữ API cũ?","options":["Có","Không"]},{"text":"Thêm log?"}],
-                       "harness":{"recommend":false,"reason":"ít logic"},
+                    r#"{"harness":{"recommend":false,"reason":"ít logic"},
                        "browserTest":{"recommend":true,"reason":"đổi màn hình","scenario":["mở trang","bấm Lưu"]}}"#
                 } else {
-                    r#"{"questions":[{"text":"Giữ API cũ?"}],
-                       "harness":{"recommend":true,"reason":"có hàm tính","checks":"tổng rỗng"},
+                    r#"{"harness":{"recommend":true,"reason":"có hàm tính","checks":"tổng rỗng"},
                        "browserTest":{"recommend":true,"reason":"đổi màn hình"}}"#
                 };
                 out(&result_line(&format!(
@@ -10769,17 +10493,12 @@ mod tests {
         flow.started(&ctx, None).unwrap();
         let d = run(&flow, &ctx, FlowAction::Run);
         assert_eq!(d.plan.as_deref(), Some("## Nguyên nhân\nx\n## Rủi ro\nthấp\n"));
-        assert_eq!(d.questions.len(), 2);
-        assert_eq!(d.questions[0].options, vec!["Có", "Không"]);
         assert_eq!(d.proposals.len(), 2);
         assert_eq!(d.proposals[1].checks, "- mở trang\n- bấm Lưu");
         // the AI's advice decides until the user switches a step
         assert_eq!(d.uses, vec![StepKind::BrowserTest]);
         let analyze = d.runs.iter().find(|r| r.step == StepKind::Analyze).unwrap();
-        assert_eq!(
-            analyze.note.as_deref(),
-            Some("plan: 2 câu hỏi, đề xuất Test trình duyệt")
-        );
+        assert_eq!(analyze.note.as_deref(), Some("plan: đề xuất Test trình duyệt"));
 
         let set = |step, on| FlowAction::SetUses { step, on };
         assert_eq!(
@@ -10789,22 +10508,8 @@ mod tests {
             "flow.uses"
         );
         flow.act(ctx.clone(), set(StepKind::BrowserTest, false)).unwrap();
-        let ai = FlowAction::AnswerQuestion {
-            id: "q1".into(),
-            answer: None,
-            ai_decides: true,
-        };
-        flow.act(ctx.clone(), ai).unwrap();
-        let missing = FlowAction::AnswerQuestion {
-            id: "q9".into(),
-            answer: Some("x".into()),
-            ai_decides: false,
-        };
-        assert_eq!(flow.act(ctx.clone(), missing).unwrap_err().code, "plan.question");
-        let err = flow.act(ctx.clone(), FlowAction::ApprovePlan).unwrap_err();
-        assert!(err.message.contains("Còn 1 câu hỏi"), "{}", err.message);
 
-        // asking for changes: the answers go into the new analysis and stay on the same question
+        // asking for changes: the new analysis hears the feedback
         let d = run(
             &flow,
             &ctx,
@@ -10814,13 +10519,8 @@ mod tests {
         );
         let jobs = fake.jobs.lock().unwrap().clone();
         let again = jobs[1].stdin.as_deref().unwrap();
-        assert!(
-            again.contains("<answers>\n- Giữ API cũ?\n  → AI tự quyết\n</answers>"),
-            "{again}"
-        );
-        assert!(!again.contains("Thêm log?\n  →"));
-        assert_eq!(d.questions.len(), 1);
-        assert!(d.questions[0].ai_decides);
+        assert!(again.contains("<feedback>\nngắn hơn\n</feedback>"), "{again}");
+        assert!(!again.contains("<answers>"));
         // the user's "off" holds; Harness follows the new advice
         assert_eq!(d.uses, vec![StepKind::Harness]);
 
@@ -10832,12 +10532,7 @@ mod tests {
             "{:?}",
             d.error
         );
-        assert!(
-            d.plan
-                .as_deref()
-                .unwrap()
-                .ends_with("- Giữ API cũ?\n  → AI tự quyết\n")
-        );
+        assert!(!d.plan.as_deref().unwrap().contains("## Câu hỏi và trả lời"));
         assert_eq!(
             flow.act(ctx.clone(), set(StepKind::Harness, false))
                 .unwrap_err()
@@ -10876,34 +10571,18 @@ mod tests {
         assert_eq!(flow.chat(&ctx, None).unwrap_err().code, "run.missing");
 
         let d = run(&flow, &ctx, FlowAction::Run);
-        // the plan asks one question (markdown, no json block): approving waits for the answer
-        let [q] = &d.questions[..] else {
-            panic!("{:?}", d.questions)
-        };
-        assert_eq!((q.id.as_str(), q.text.as_str()), ("q1", "Có cần migrate không?"));
+        // a plan with no advice block (a question left in it does not hold the gate)
         assert!(d.uses.is_empty());
         assert_eq!(d.proposals.len(), 1);
         assert!(!d.proposals[0].recommend && !d.proposals[0].reason.is_empty());
-        let err = flow.act(ctx.clone(), FlowAction::ApprovePlan).unwrap_err();
-        assert_eq!(err.code, "plan.questions");
-        let answer = |text: &str| FlowAction::AnswerQuestion {
-            id: "q1".into(),
-            answer: Some(text.into()),
-            ai_decides: false,
-        };
-        flow.act(ctx.clone(), answer("  ")).unwrap();
-        assert!(!flow.detail(&ctx).questions[0].answered());
-        flow.act(ctx.clone(), answer("Không, giữ schema")).unwrap();
         let d = run(&flow, &ctx, FlowAction::ApprovePlan);
         assert_eq!(d.current, Some(StepKind::ReviewLocal), "{:?}", d.error);
-        // the answer is in plan.md and reaches Viết code through it
-        let plan = d.plan.as_deref().unwrap();
-        assert!(plan.ends_with("## Câu hỏi và trả lời\n\n- Có cần migrate không?\n  → Không, giữ schema\n"));
+        assert!(!d.plan.as_deref().unwrap().contains("## Câu hỏi và trả lời"));
         let [analyze, implement] = &d.runs[..] else {
             panic!("{:?}", d.runs)
         };
         assert_eq!((analyze.step, analyze.state), (StepKind::Analyze, RunState::Done));
-        assert_eq!(analyze.note.as_deref(), Some("plan: 2 file sẽ sửa, 1 câu hỏi"));
+        assert_eq!(analyze.note.as_deref(), Some("plan: 2 file sẽ sửa"));
         assert!(analyze.has_chat);
         assert_eq!(analyze.resume.as_deref(), Some("claude --resume s-1"));
         assert_eq!(analyze.cost_usd, Some(0.25));
@@ -10927,7 +10606,6 @@ mod tests {
         let code = jobs[1].stdin.as_deref().unwrap();
         assert!(code.contains("allowed in this repository: `Bash(npx tsc *)`"));
         assert!(code.contains("Do not chain commands"));
-        assert!(code.contains("Follow them") && code.contains("→ Không, giữ schema"));
 
         // the latest run's chat: the prompt first, the refused command marked
         let chat = flow.chat(&ctx, None).unwrap();
@@ -11022,7 +10700,7 @@ mod tests {
         );
         assert_eq!(resume_command(StepKind::Fix, AgentKind::Claude, None), None);
         assert_eq!(
-            plan_note("## Nguyên nhân\nkhông có danh sách", 0, &[]),
+            plan_note("## Nguyên nhân\nkhông có danh sách", &[]),
             "đã viết plan.md"
         );
         let advice = [
@@ -11041,37 +10719,7 @@ mod tests {
                 dev_server: None,
             },
         ];
-        assert_eq!(plan_note("x", 2, &advice), "plan: 2 câu hỏi, đề xuất Harness");
-        // the answers section is replaced, not added twice
-        let q = |text: &str, answer: Option<&str>, ai: bool| PlanQuestion {
-            id: "q1".into(),
-            text: text.into(),
-            options: vec![],
-            answer: answer.map(str::to_owned),
-            ai_decides: ai,
-        };
-        let once = plan_with_answers("## Rủi ro\nx\n", &[q("A?", Some(" Có "), false)]);
-        assert_eq!(once, "## Rủi ro\nx\n\n## Câu hỏi và trả lời\n\n- A?\n  → Có\n");
-        let twice = plan_with_answers(&once, &[q("A?", None, true)]);
-        assert_eq!(
-            twice,
-            "## Rủi ro\nx\n\n## Câu hỏi và trả lời\n\n- A?\n  → AI tự quyết\n"
-        );
-        let kept = new_questions(
-            vec![
-                text::RawQuestion {
-                    text: "B?".into(),
-                    options: vec![],
-                },
-                text::RawQuestion {
-                    text: " A? ".into(),
-                    options: vec![],
-                },
-            ],
-            &[q("A?", None, true)],
-        );
-        assert_eq!((kept[0].id.as_str(), kept[0].answered()), ("q1", false));
-        assert_eq!((kept[1].id.as_str(), kept[1].ai_decides), ("q2", true));
+        assert_eq!(plan_note("x", &advice), "plan: đề xuất Harness");
         let job = Job {
             agent: Provider::Claude,
             args: claude::review_local_args("main", 1.0, Some("s-1"), None),

@@ -1,11 +1,11 @@
 //! The repository a task works in. Bắt đầu never refuses a checkout because its origin differs
-//! from the issue links (a secondary repo, a fork, another repo entirely): the AI of Phân tích
-//! decides whether it is the right place, and the user can talk it over at the gate. The only
-//! hard stop is a folder or origin that changed under a started task.
+//! from the issue links (a secondary repo, a fork, another repo entirely): related repos are
+//! talked over in the session's chat. When the folder or origin changes under a started task, the
+//! app binds the task to the checkout as it is now and opens a new session there.
 
 use std::path::Path;
 
-use opw_config::{Config, same_path};
+use opw_config::same_path;
 use opw_domain::view::ApiError;
 use opw_tracker::extract_issue_links;
 use opw_vcs::{Git, remote_slug};
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const KEY: &str = "task.repoBinding";
 
-/// The checkout a task was started in, checked again before and after every step.
+/// The checkout a task was started in, checked again before every step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Binding {
@@ -41,55 +41,29 @@ impl Binding {
         })
     }
 
-    pub fn remote(&self) -> Option<&str> {
-        self.remote.as_deref()
-    }
-
-    /// The folder and origin are still the ones the task started with.
-    pub fn recheck(&self, repo: &Path) -> Result<(), ApiError> {
+    /// The checkout as it is now when its folder or origin is no longer the one the task
+    /// started with, and a line saying what changed; `None` when nothing did.
+    pub fn moved(&self, repo: &Path) -> Result<Option<(Self, String)>, ApiError> {
         let current = self.rebind(repo)?;
         if same_path(&self.root, &current.root) && self.remote == current.remote {
-            return Ok(());
+            return Ok(None);
         }
         let origin = |r: &Option<String>| r.clone().unwrap_or_else(|| "không có origin".into());
-        Err(ApiError::new(
-            "repo.changed",
-            format!(
-                "Thư mục hoặc origin của repo đã đổi từ lúc bắt đầu task (lúc đầu {} · {}, giờ {} · {}). \
-                 Repo hiện tại đúng thì bấm Dùng repo hiện tại; không thì trả repo về như cũ rồi Thử lại.",
-                self.root,
-                origin(&self.remote),
-                current.root,
-                origin(&current.remote),
-            ),
-        ))
+        let what = format!(
+            "lúc đầu {} · {}, giờ {} · {}",
+            self.root,
+            origin(&self.remote),
+            current.root,
+            origin(&current.remote),
+        );
+        Ok(Some((current, what)))
     }
 
-    /// The same task bound to the checkout as it is now ("Dùng repo hiện tại").
+    /// The same task bound to the checkout as it is now.
     pub fn rebind(&self, repo: &Path) -> Result<Self, ApiError> {
         let mut now = Self::read(&Git::new(repo), "")?;
         now.issue_repos.clone_from(&self.issue_repos);
         Ok(now)
-    }
-
-    /// The origin is not one of the issue repos (or the task names none): the analysis checks
-    /// that this checkout is the right place.
-    pub fn needs_check(&self) -> bool {
-        self.remote
-            .as_ref()
-            .is_none_or(|remote| !self.issue_repos.contains(remote))
-    }
-
-    /// Pairs to remember once the user approves a plan made in this checkout.
-    pub fn pairs(&self) -> Vec<(String, String)> {
-        match &self.remote {
-            Some(remote) if self.needs_check() => self
-                .issue_repos
-                .iter()
-                .map(|issue| (issue.clone(), remote.clone()))
-                .collect(),
-            _ => Vec::new(),
-        }
     }
 }
 
@@ -103,27 +77,6 @@ pub(crate) fn issue_repos(text: &str) -> Vec<String> {
         }
     }
     out
-}
-
-/// Issue repos the user already worked on in a checkout with this origin (from earlier tasks
-/// of the project).
-pub(crate) fn remembered(config: &Config, project: &str, b: &Binding) -> Vec<String> {
-    let Some(remote) = b.remote() else {
-        return Vec::new();
-    };
-    config
-        .projects
-        .get(project)
-        .into_iter()
-        .flat_map(|p| &p.repo_aliases)
-        .filter(|(_, origins)| origins.iter().any(|o| slug(o).as_deref() == Some(remote)))
-        .filter_map(|(issue, _)| slug(issue))
-        .collect()
-}
-
-fn slug(entry: &str) -> Option<String> {
-    let entry = entry.trim();
-    remote_slug(entry).or_else(|| remote_slug(&format!("https://{entry}")))
 }
 
 /// Backwards compatibility for tasks opened before repository bindings were stored. Read only

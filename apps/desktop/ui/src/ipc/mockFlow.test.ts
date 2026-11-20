@@ -7,10 +7,12 @@ import {
   mockPauseTask,
   mockPlaceCard,
   mockPushCheck,
+  mockSaveBrief,
   mockStarted,
   mockTaskDetail,
   resetMockFlows,
 } from "./mockFlow";
+import { mockSessionChat, mockWorkspace } from "./mockWorkspace";
 import type { StepKind, StepState, TaskCard, TaskDetail } from "./types";
 
 const inbox: TaskCard = { id: "WP-9", wpId: 9, title: "t", project: "p", nxStatus: "Open", column: "inbox", newComments: 0 };
@@ -27,11 +29,6 @@ function finishStep(wpId: number): TaskDetail {
   return mockTaskDetail(wpId);
 }
 
-/** The plan gate waits for the analysis's questions: leave them all to the AI. */
-function answerAll(wpId: number): void {
-  for (const q of mockTaskDetail(wpId).questions) mockFlowAction(wpId, { type: "answerQuestion", id: q.id, aiDecides: true });
-}
-
 const stateOf = (d: TaskDetail, kind: StepKind): StepState | undefined => d.steps.find((s) => s.kind === kind)?.state;
 
 describe("12-step flow in the preview", () => {
@@ -43,7 +40,6 @@ describe("12-step flow in the preview", () => {
     const plan = finishStep(9);
     expect(plan.quotaNote).toMatchObject({ step: "implement", provider: "claude", window: "sevenDay", usedPct: 96, stop: true });
     const reset = Date.parse(plan.quotaNote!.resetsAt!);
-    answerAll(9);
     mockFlowAction(9, { type: "setAuto", on: true });
     mockFlowAction(9, { type: "approvePlan" });
     const paused = finishStep(9);
@@ -67,7 +63,6 @@ describe("12-step flow in the preview", () => {
     mockFlowAction(9, { type: "run" });
     expect(mockTaskDetail(9).quotaNote).toBeUndefined();
     finishStep(9);
-    answerAll(9);
     mockFlowAction(9, { type: "setAuto", on: true });
     mockFlowAction(9, { type: "approvePlan" });
     expect(finishStep(9).status).toBe("running");
@@ -81,7 +76,6 @@ describe("12-step flow in the preview", () => {
     mockStarted(9, "t");
     mockFlowAction(9, { type: "run" });
     expect(finishStep(9).gate?.kind).toBe("planReview");
-    answerAll(9);
     mockFlowAction(9, { type: "approvePlan" });
 
     // Viết code → Kiểm tra runs at once (the app's commands) → Harness (advised by the analysis)
@@ -139,7 +133,6 @@ describe("12-step flow in the preview", () => {
     mockStarted(9, "t");
     mockFlowAction(9, { type: "run" });
     finishStep(9);
-    answerAll(9);
     // no harness for this one: straight to Tự review
     mockFlowAction(9, { type: "setUses", step: "harness", on: false });
     mockFlowAction(9, { type: "approvePlan" });
@@ -174,6 +167,42 @@ describe("12-step flow in the preview", () => {
     expect(stateOf(d, "fix")).toBe("skipped");
     expect(stateOf(d, "fixCross")).toBe("skipped");
     expect(stateOf(d, "pushSummary")).toBe("done");
+  });
+
+  it("runs a plan that came without advice: the optional steps stay off", () => {
+    vi.useFakeTimers();
+    // the finished demo tasks have a plan but no advice on the optional steps
+    const [card] = mockDoneCards();
+    const d = mockFlowAction(card!.wpId, { type: "reopen", step: "implement" });
+    expect([d.plan !== undefined, d.proposals, d.uses]).toEqual([true, [], []]);
+    mockFlowAction(card!.wpId, { type: "run" });
+    const next = finishStep(card!.wpId);
+    expect([next.status, next.current, stateOf(next, "harness")]).toEqual(["ready", "reviewLocal", "skipped"]);
+  });
+
+  it("goes on when the brief changes after the plan is approved, with a note in the task's session", () => {
+    vi.useFakeTimers();
+    // the demo task waits at the plan gate and has a session in the Workspace preview
+    const wpId = 187716;
+    const session = mockWorkspace().sessions.find((s) => s.kind === "main" && s.wpId === wpId)!;
+    const notes = () => mockSessionChat(session.id).items.filter((i) => i.kind === "note");
+    const before = notes().length;
+    const atGate = mockTaskDetail(wpId);
+    expect(atGate.gate?.kind).toBe("planReview");
+    // before the plan is approved, a brief edit is just an edit
+    mockSaveBrief(wpId, `${atGate.brief}\nGhi chú trước khi duyệt`);
+    expect(notes()).toHaveLength(before);
+
+    mockFlowAction(wpId, { type: "approvePlan" });
+    const brief = `${mockTaskDetail(wpId).brief}\nYêu cầu mới`;
+    const saved = mockSaveBrief(wpId, brief);
+    expect([saved.status, saved.current, saved.gate, saved.error]).toEqual(["running", "implement", undefined, undefined]);
+    expect(notes()).toHaveLength(before + 1);
+    expect(notes().at(-1)?.text).toMatch(/^Brief đổi sau khi bạn duyệt plan/);
+    // saving the same text again adds nothing
+    mockSaveBrief(wpId, brief);
+    expect(notes()).toHaveLength(before + 1);
+    expect(finishStep(wpId).status).toBe("ready");
   });
 });
 

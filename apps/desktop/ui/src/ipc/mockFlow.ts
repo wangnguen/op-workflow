@@ -14,11 +14,9 @@ import type {
   DevServer,
   FlowAction,
   FlowError,
-  FlowStatus,
   GateKind,
   GateView,
   LogLine,
-  PlanQuestion,
   PushCheck,
   PushView,
   RunSummary,
@@ -36,6 +34,7 @@ import type {
 } from "./types";
 import { FIX_STEPS, OPTIONAL_STEPS, STEP_ORDER } from "../shared/steps";
 import { mockNewComments } from "./mockTask";
+import { mockSessionNote } from "./mockWorkspace";
 
 /** How long a mock step "runs". */
 export const MOCK_STEP_MS = 2600;
@@ -137,13 +136,7 @@ Phương án 1, kèm log cảnh báo để còn thấy dữ liệu hỏng.
 ## Rủi ro
 - Trang mobile có thể đang dựa vào lỗi 500 này để hiện màn "chưa có org".`;
 
-/** What the analysis asks (its json block), as the engine reads it. */
-const QUESTIONS: Omit<PlanQuestion, "id">[] = [
-  { text: "Trang mobile có dựa vào lỗi 500 này để hiện màn \"chưa có org\" không?", options: ["Có, giữ 500 cho mobile", "Không, trả danh sách rỗng cho cả hai"] },
-  { text: "Có cần ghi log cảnh báo khi user không có org không?", options: ["Có, mức warn", "Không cần"] },
-];
-
-/** The analysis's advice on the optional steps. */
+/** The analysis's advice on the optional steps (only a hint; a plan may come without it). */
 const PROPOSALS: StepProposal[] = [
   {
     step: "harness",
@@ -159,10 +152,6 @@ const PROPOSALS: StepProposal[] = [
     devServer: { url: "http://localhost:5173", commands: [{ command: "pnpm --filter web dev", dir: "", wait: "" }] },
   },
 ];
-
-const ANSWERS_HEADING = "## Câu hỏi và trả lời";
-const AI_DECIDES = "AI tự quyết";
-const answered = (q: PlanQuestion) => q.aiDecides === true || (q.answer ?? "").trim() !== "";
 
 const PUSH = `### Commit message
 \`\`\`text
@@ -298,8 +287,6 @@ interface Flow {
   auto: boolean;
   brief: string;
   plan?: string;
-  approvedBrief?: string;
-  planChange?: string;
   /** "Trao đổi với AI" at the error gate */
   talk?: TalkTurn[];
   push?: PushView;
@@ -330,8 +317,7 @@ interface Flow {
   fixes: number;
   /** findings the running Sửa lỗi took */
   taking?: number;
-  /** the analysis's questions with the answers so far */
-  questions: PlanQuestion[];
+  /** the analysis's advice on the optional steps; empty = none */
   proposals: StepProposal[];
   /** optional steps the task runs; `picked` = switched by the user (the AI's advice no longer changes them) */
   uses: StepKind[];
@@ -432,7 +418,6 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo", seeded
       allow: [],
       checks: 0,
       fixes: 0,
-      questions: [],
       proposals: [],
       uses: [],
       picked: [],
@@ -445,7 +430,7 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo", seeded
       analyzed(f);
       toGate(f, "planReview", "analyze");
       f.started = iso(Date.now() - 12 * 60_000);
-      seedRun(f, "analyze", 9, 50, "plan: 2 file sẽ sửa, 2 câu hỏi, đề xuất Harness");
+      seedRun(f, "analyze", 9, 50, "plan: 2 file sẽ sửa, đề xuất Harness");
     }
     if (seeded && wpId === DEMO_PUSH_WP) {
       // the demo card in "Chờ bạn push": every step done, the push summary written
@@ -462,7 +447,7 @@ function flowOf(wpId: number, taskId = `WP-${wpId}`, title = "Task demo", seeded
       f.phase = "awaitingPush";
       f.round = 1;
       f.started = iso(Date.now() - 55 * 60_000);
-      seedRun(f, "analyze", 52, 50, "plan: 2 file sẽ sửa, 1 câu hỏi");
+      seedRun(f, "analyze", 52, 50, "plan: 2 file sẽ sửa");
       seedRun(f, "implement", 48, 54, "2 file thay đổi (+38 −6), 1 lệnh bị chặn").denials.push({
         tool: "Bash",
         input: DENIED,
@@ -606,29 +591,16 @@ function findingsGate(f: Flow, review: Review): void {
   toGate(f, "findings", review);
 }
 
-/** Analyze wrote its plan: questions (an earlier answer stays on the same question) and the
- *  advice, which turns a step on or off unless the user switched it. */
+/** Analyze wrote its plan and its advice, which turns a step on or off unless the user switched
+ *  it (no advice for a step = the step stays as it is). */
 function analyzed(f: Flow): void {
   f.plan = PLAN;
-  f.questions = QUESTIONS.map((q, i) => {
-    const old = f.questions.find((o) => o.text === q.text);
-    return { ...q, id: `q${i + 1}`, answer: old?.answer, aiDecides: old?.aiDecides };
-  });
   f.proposals = PROPOSALS.map((p) => ({ ...p }));
   for (const p of f.proposals) {
     if (f.picked.includes(p.step) || f.states[p.step] !== "pending") continue;
     f.uses = f.uses.filter((s) => s !== p.step);
     if (p.recommend) f.uses.push(p.step);
   }
-}
-
-/** plan.md with the answers as its last section (an older one is replaced). */
-function planWithAnswers(plan: string, questions: PlanQuestion[]): string {
-  const at = plan.indexOf(ANSWERS_HEADING);
-  const body = (at >= 0 ? plan.slice(0, at) : plan).trimEnd();
-  if (questions.length === 0) return body;
-  const lines = questions.map((q) => `- ${q.text}\n  → ${q.aiDecides ? AI_DECIDES : (q.answer ?? "").trim()}`);
-  return `${body}\n\n${ANSWERS_HEADING}\n\n${lines.join("\n")}`;
 }
 
 /** A whole round already behind the task: steps done, the optional ones and `unneeded` passed. */
@@ -760,7 +732,7 @@ function complete(f: Flow): void {
       f.states.analyze = "waitingUser";
       toGate(f, "planReview", "analyze");
       const advised = f.proposals.filter((p) => p.recommend).map((p) => LABEL[p.step]);
-      done(`plan: 2 file sẽ sửa, ${f.questions.length} câu hỏi${advised.length ? `, đề xuất ${advised.join(" + ")}` : ""}`);
+      done(`plan: 2 file sẽ sửa${advised.length ? `, đề xuất ${advised.join(" + ")}` : ""}`);
       return;
     }
     case "implement": {
@@ -901,7 +873,6 @@ function browserView(runs: number): TestView {
 
 /** Advance time: finish a run that is over, start the next step when auto-advance is on. */
 function tick(f: Flow): void {
-  if (f.planChange && f.phase !== "running") return;
   if (f.quotaWaiting && f.phase === "ready" && f.quotaUntil !== undefined && Date.now() >= f.quotaUntil) {
     f.quotaWaiting = false;
     log(f, "info", "Hạn mức đã reset");
@@ -943,15 +914,7 @@ function steps(f: Flow): StepView[] {
   });
 }
 
-function status(f: Flow): FlowStatus {
-  if (f.planChange && f.phase !== "running") return "gate";
-  return f.phase;
-}
-
-const unanswered = (f: Flow) => f.questions.filter((q) => !answered(q)).length;
-
 function gateView(f: Flow): GateView | undefined {
-  if (f.planChange && f.phase !== "running") return { kind: "planChanged", since: f.gateSince, message: f.planChange };
   if (f.phase !== "gate" || !f.gate) return undefined;
   const open = f.findings.filter((x) => x.state === "open").length;
   const picked = f.findings.filter(toFix).length;
@@ -959,10 +922,7 @@ function gateView(f: Flow): GateView | undefined {
   const next = skipTarget(f);
   const ask = f.round === 0 ? "Chạy Review chéo (vòng 1)?" : `Chạy Review chéo lại (vòng ${f.round + 1})?`;
   const message: Record<GateKind, string> = {
-    planChanged: f.planChange ?? "Brief đã đổi sau khi bạn duyệt plan.",
-    planReview: unanswered(f)
-      ? `Plan đã xong, AI hỏi ${unanswered(f)} câu: trả lời (hoặc để AI tự quyết) rồi duyệt.`
-      : "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.",
+    planReview: "Plan đã xong: duyệt để AI viết code, góp ý để phân tích lại, hoặc tự code.",
     findings: `${LABEL[f.fixFor ?? "finalReview"]} báo lỗi: ${open} lỗi đang mở, đã chọn ${picked} cho AI sửa. Chọn lỗi cần sửa, hoặc sang ${next ? LABEL[next] : "bước sau"} mà không sửa.${rounds}`,
     afterFix: `Sửa lỗi xong. ${ask}${rounds}`,
     selfCode: 'Bạn đang tự code trên nhánh này. Xong thì bấm "Tôi code xong" để app review.',
@@ -1013,16 +973,15 @@ export function mockTaskDetail(wpId: number): TaskDetail {
     branch: branchOf(f),
     base: "origin/development",
     parked: paused.has(wpId),
-    status: status(f),
+    status: f.phase,
     current: f.current,
     steps: steps(f),
     gate: gateView(f),
-    error: f.planChange && f.phase !== "running" ? { code: "plan.briefChanged", message: f.planChange } : f.error,
+    error: f.error,
     round: f.round,
     autoAdvance: f.auto,
     brief: f.brief,
     plan: f.plan,
-    questions: f.questions.map((q) => ({ ...q })),
     proposals: f.proposals.map((p) => ({ ...p })),
     uses: OPTIONAL_STEPS.filter((s) => f.uses.includes(s)),
     devServer: f.devServer ? { ...f.devServer } : undefined,
@@ -1072,17 +1031,7 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
   const f = flowOf(wpId);
   tick(f);
   const running = f.phase === "running";
-  if (f.planChange && !["keepPlan", "reopen", "setAuto", "stop"].includes(action.type)) {
-    throw fail("plan.briefChanged", "Brief đã đổi: chọn Phân tích lại hoặc Giữ plan, chạy tiếp.");
-  }
   switch (action.type) {
-    case "keepPlan":
-      if (running || !f.planChange) throw fail("flow.notNow", "Lúc này chưa giữ plan được");
-      f.approvedBrief = f.brief;
-      f.planChange = undefined;
-      log(f, "info", "Bạn giữ plan sau khi brief đổi");
-      if (f.phase === "ready") startRun(f);
-      break;
     case "run":
       if (running) throw fail("step.running", "Bước này đang chạy");
       if (f.phase === "gate" && f.gate === "error" && f.current) {
@@ -1124,16 +1073,6 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       if (agentOf(f.current) === "claude") f.stopped = f.current;
       break;
     }
-    case "useCurrentRepo":
-      if (f.gate !== "error" || f.error?.code !== "repo.changed" || !f.current) {
-        throw fail("flow.notNow", "Lúc này chưa dùng repo hiện tại được");
-      }
-      f.error = undefined;
-      f.talk = undefined;
-      f.phase = "ready";
-      log(f, "info", `Bạn dùng repo hiện tại cho task, chạy lại ${LABEL[f.current]}`, f.current);
-      startRun(f);
-      break;
     case "goOn": {
       if (f.gate !== "error" || !f.current || f.stopped !== f.current) {
         throw fail("flow.notNow", "Lúc này chưa chạy tiếp (chỉ sau khi bạn bấm Dừng một bước AI) được");
@@ -1166,11 +1105,6 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       break;
     case "approvePlan":
       if (f.gate !== "planReview") throw fail("flow.notNow", "Lúc này chưa duyệt plan được");
-      if (unanswered(f) > 0) {
-        throw fail("plan.questions", `Còn ${unanswered(f)} câu hỏi chưa trả lời: trả lời hoặc chọn "${AI_DECIDES}" trước khi duyệt`);
-      }
-      if (f.plan) f.plan = planWithAnswers(f.plan, f.questions);
-      f.approvedBrief = f.brief;
       f.states.analyze = "done";
       log(f, "ok", "Bạn duyệt plan: AI viết code", "analyze");
       goTo(f, "implement");
@@ -1183,14 +1117,6 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       goTo(f, "analyze");
       startRun(f);
       break;
-    case "answerQuestion": {
-      if (f.gate !== "planReview" || f.phase !== "gate") throw fail("flow.notNow", "Lúc này chưa trả lời câu hỏi của plan được");
-      const q = f.questions.find((x) => x.id === action.id);
-      if (!q) throw fail("plan.question", "Không thấy câu hỏi này nữa");
-      q.aiDecides = action.aiDecides === true || undefined;
-      q.answer = q.aiDecides ? undefined : action.answer?.trim() || undefined;
-      break;
-    }
     case "setDevServer": {
       const url = action.url.trim();
       if (url && !/^https?:\/\/[^/\s:]+(:\d+)?(\/\S*)?$/i.test(url)) {
@@ -1244,7 +1170,6 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
     }
     case "selfCode":
       if (f.gate !== "planReview") throw fail("flow.notNow", "Lúc này chưa chọn tự code được");
-      f.approvedBrief = f.brief;
       f.states.analyze = "done";
       f.states.implement = "waitingUser";
       toGate(f, "selfCode", "implement");
@@ -1348,9 +1273,6 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
     case "reopen": {
       if (running) throw fail("step.running", "Bước này đang chạy");
       const step = action.step;
-      const reanalyzeChanged = f.planChange !== undefined && step === "analyze";
-      if (f.planChange && step !== "analyze") throw fail("plan.briefChanged", "Chọn Phân tích lại hoặc Giữ plan, chạy tiếp.");
-      if (step === "analyze") { f.approvedBrief = undefined; f.planChange = undefined; }
       if (step && (step === "intake" || f.states[step] === "pending")) {
         throw fail("flow.invalid", `Task chưa tới bước ${LABEL[step]} nên chưa chạy lại từ đó được`);
       }
@@ -1378,7 +1300,6 @@ export function mockFlowAction(wpId: number, action: FlowAction): TaskDetail {
       }
       const text = step ? `Làm tiếp: chạy lại từ ${LABEL[step]}` : `Làm tiếp ở ${LABEL[f.current ?? "pushSummary"]}`;
       log(f, "info", note ? `${text}, kèm ghi chú: ${note}` : text, step);
-      if (reanalyzeChanged) startRun(f);
       break;
     }
     case "setAuto":
@@ -1478,10 +1399,12 @@ export function mockAllowBash(wpId: number, rule: string): TaskDetail {
 export function mockSaveBrief(wpId: number, text: string): TaskDetail {
   if (!text.trim()) throw fail("brief.empty", "Brief trống");
   const f = flowOf(wpId);
-  f.brief = text;
-  if (f.approvedBrief !== undefined && f.approvedBrief !== text && f.phase !== "done") {
-    f.planChange = "Brief đã đổi sau khi bạn duyệt plan.\nBrief / plan được sửa tay.";
+  // like the engine: a brief changed after the plan was approved stops nothing; the task's
+  // session only gets a line from the app
+  if (text !== f.brief && f.states.analyze === "done" && f.phase !== "done") {
+    mockSessionNote(wpId, "Brief đổi sau khi bạn duyệt plan: bạn sửa tay brief. Muốn AI xem lại thì nhắn trong chat hoặc chạy lại Phân tích.");
   }
+  f.brief = text;
   return mockTaskDetail(wpId);
 }
 

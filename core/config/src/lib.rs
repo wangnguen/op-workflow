@@ -113,10 +113,6 @@ impl Default for HandoffConfig {
 pub struct ProjectConfig {
     pub repos: Vec<String>,
     pub branch: Option<String>,
-    /// Issue repo (host/owner/repo) -> origins of checkouts where its issues were worked on (a
-    /// secondary repo, a fork, a mirror). Remembered when the user approves a plan made in such a
-    /// checkout; the next analysis is told about it. A hint, never a rule that blocks a task.
-    pub repo_aliases: BTreeMap<String, Vec<String>>,
 }
 
 impl ProjectConfig {
@@ -543,49 +539,6 @@ pub fn save_repo_checks(path: &Path, repo: &str, commands: &[String]) -> ConfigR
     })
 }
 
-/// Remember that issues of `issue_repo` (host/owner/repo) were worked on in a checkout whose
-/// origin is `origin` (`projects.<project>.repoAliases`). Only a hint for the next analysis,
-/// never a rule. Returns whether the pair is new.
-pub fn remember_repo_alias(path: &Path, project: &str, issue_repo: &str, origin: &str) -> ConfigResult<bool> {
-    let mut added = false;
-    edit_file(path, |root| {
-        let aliases = object_at(object_at(object_at(root, "projects"), project), "repoAliases");
-        let slot = aliases
-            .entry(issue_repo.to_owned())
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if !slot.is_array() {
-            *slot = Value::Array(Vec::new());
-        }
-        if let Value::Array(list) = slot {
-            if !list
-                .iter()
-                .any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case(origin)))
-            {
-                list.push(Value::String(origin.to_owned()));
-                added = true;
-            }
-        }
-    })?;
-    Ok(added)
-}
-
-/// Forget one remembered pair (Settings → Repo); an issue repo left with no checkout goes too.
-pub fn forget_repo_alias(path: &Path, project: &str, issue_repo: &str, origin: &str) -> ConfigResult<()> {
-    edit_file(path, |root| {
-        let aliases = object_at(object_at(object_at(root, "projects"), project), "repoAliases");
-        let empty = match aliases.get_mut(issue_repo) {
-            Some(Value::Array(list)) => {
-                list.retain(|v| !v.as_str().is_some_and(|s| s.eq_ignore_ascii_case(origin)));
-                list.is_empty()
-            }
-            _ => false,
-        };
-        if empty {
-            aliases.remove(issue_repo);
-        }
-    })
-}
-
 /// Write `repos.<repo>.devServer` (the repo's key as written in config, else `repo`); `None`
 /// removes it. Other keys stay untouched.
 pub fn save_dev_server(
@@ -852,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_checks_and_remembered_repo_pairs_are_written_from_the_app() {
+    fn repo_checks_are_written_from_the_app() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         std::fs::write(
@@ -874,25 +827,6 @@ mod tests {
         assert!(
             Config::load(&path).unwrap().repos["~/Desktop/web"]
                 .checks
-                .is_empty()
-        );
-
-        assert!(remember_repo_alias(&path, "Web", "github.com/acme/main", "github.com/acme/web").unwrap());
-        assert!(!remember_repo_alias(&path, "Web", "github.com/acme/main", "GitHub.com/acme/web").unwrap());
-        let cfg = Config::load(&path).unwrap();
-        assert_eq!(
-            cfg.projects["Web"].repo_aliases["github.com/acme/main"],
-            ["github.com/acme/web"]
-        );
-        assert_eq!(
-            cfg.projects["Web"].repos,
-            ["~/Desktop/web"],
-            "other project keys stay"
-        );
-        forget_repo_alias(&path, "Web", "github.com/acme/main", "github.com/acme/web").unwrap();
-        assert!(
-            Config::load(&path).unwrap().projects["Web"]
-                .repo_aliases
                 .is_empty()
         );
     }

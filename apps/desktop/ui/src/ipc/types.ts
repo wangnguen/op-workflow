@@ -31,7 +31,7 @@ export type TaskColumn = "inbox" | "active" | "awaitingPush" | "done";
 
 /** `findings`: a review reported findings, the user picks what the AI fixes. `afterFix`: a Sửa
  *  lỗi finished, "Review chéo lại?". */
-export type GateKind = "planReview" | "planChanged" | "findings" | "afterFix" | "agentQuestion" | "error" | "selfCode";
+export type GateKind = "planReview" | "findings" | "afterFix" | "agentQuestion" | "error" | "selfCode";
 
 /** The answer at the after-fix gate: Codex reviews again, go on (the final review; again after
  *  its own fix), or pick more findings of the review that was fixed. */
@@ -236,8 +236,6 @@ export interface SettingsView {
   harnessLibs?: HarnessLib[];
   /** Kiểm tra commands of every known repo (empty = guessed per package) */
   repoChecks?: RepoChecks[];
-  /** issue repo → checkout pairs remembered from approved plans (hints for Phân tích) */
-  repoPairs?: RepoPair[];
 }
 
 /** Kiểm tra commands of one repo (Settings → Repo). */
@@ -245,13 +243,6 @@ export interface RepoChecks {
   /** the repo as written in config */
   repo: string;
   commands: string[];
-}
-
-/** Issues of `issueRepo` were worked on in a checkout whose origin is `origin`. */
-export interface RepoPair {
-  project: string;
-  issueRepo: string;
-  origin: string;
 }
 
 /** Models and effort levels the Claude / Codex CLIs on this machine offer (`step_models`). */
@@ -853,7 +844,16 @@ export interface RuleOption {
   allowed: boolean;
 }
 
-export type ChatKind = "prompt" | "user" | "text" | "thinking" | "tool" | "end" | "error";
+export type ChatKind =
+  | "prompt"
+  | "user"
+  | "text"
+  | "thinking"
+  | "tool"
+  | "end"
+  | "error"
+  /** a line from the app in a session's chat (not sent to the AI) */
+  | "note";
 
 /** One item of the Chat tab. */
 export interface ChatItem {
@@ -879,19 +879,6 @@ export interface ChatView {
   dropped: number;
   /** the raw output is gone (logs are kept 14 days) */
   missing: boolean;
-}
-
-/** Everything the task window shows. */
-/** A question the analysis asks before coding. */
-export interface PlanQuestion {
-  /** q1, q2, … */
-  id: string;
-  text: string;
-  /** answers the AI suggests (the user may write another) */
-  options?: string[];
-  answer?: string;
-  /** "AI tự quyết" */
-  aiDecides?: boolean;
 }
 
 /** The analysis's advice for an optional step of this task. */
@@ -934,6 +921,7 @@ export interface AgentQuestionView {
   browserOpen: boolean;
 }
 
+/** Everything the task window shows. */
 export interface TaskDetail {
   wpId: number;
   taskId: string;
@@ -958,8 +946,6 @@ export interface TaskDetail {
   autoAdvance: boolean;
   brief?: string;
   plan?: string;
-  /** the analysis's questions and the answers so far (Duyệt waits until each one is answered) */
-  questions: PlanQuestion[];
   /** the analysis's advice on Harness and Test trình duyệt */
   proposals: StepProposal[];
   /** optional steps this task runs (Harness, Test trình duyệt) */
@@ -1037,9 +1023,7 @@ export interface TalkTurn {
 }
 
 export type FlowAction =
-  | { type: "keepPlan" }
   | { type: "talk"; text: string }
-  | { type: "useCurrentRepo" }
   | { type: "run" }
   | { type: "stop" }
   | { type: "retry" }
@@ -1048,8 +1032,6 @@ export type FlowAction =
   | { type: "approvePlan" }
   | { type: "rejectPlan"; feedback: string }
   | { type: "selfCode" }
-  /** plan gate: answer one question (`answer`), or leave it to the AI; neither = not answered */
-  | { type: "answerQuestion"; id: string; answer?: string; aiDecides?: boolean }
   /** turn Harness / Test trình duyệt on or off for this task, before the flow gets there */
   | { type: "setUses"; step: StepKind; on: boolean }
   | { type: "setWorkspaceFlow"; on: boolean }
@@ -1309,7 +1291,6 @@ export interface Commands {
   set_on_close: SettingsView;
   set_harness_dir: SettingsView;
   set_repo_checks: SettingsView;
-  forget_repo_pair: SettingsView;
   open_task_path: null;
   workspace_snapshot: WorkspaceSnapshot;
   workspace_repos: string[];
@@ -1375,7 +1356,6 @@ export interface CommandArgs {
   set_on_close: { choice: CloseChoice };
   set_harness_dir: { repo: string; dir?: string };
   set_repo_checks: { repo: string; commands: string[] };
-  forget_repo_pair: { pair: RepoPair };
   open_task_path: { wpId: number; path: string };
   session_new: { request: NewSession };
   session_chat: { id: string };

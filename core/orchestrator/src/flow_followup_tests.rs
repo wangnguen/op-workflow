@@ -161,7 +161,7 @@ fn no_mcp_flow(s: &Setup, script: impl ScriptFn + 'static) -> (Flow, Arc<Fake>, 
 }
 
 #[test]
-fn disabled_mcp_keeps_plan_repo_and_finish_guards_and_applies_next_run() {
+fn disabled_mcp_keeps_the_finish_guard_a_moved_repo_starts_over_and_the_next_run_reads_the_switch() {
     for provider in ["claude", "codex"] {
         let Some(s) = setup() else { return };
         let (flow, fake, mut ctx) = no_mcp_flow(&s, |job, _, out| {
@@ -202,33 +202,16 @@ fn disabled_mcp_keeps_plan_repo_and_finish_guards_and_applies_next_run() {
                 "https://github.com/example/other.git",
             ],
         );
-        assert_eq!(
-            run(&flow, &ctx, FlowAction::ApprovePlan).error.unwrap().code,
-            "repo.changed"
-        );
+        // the origin moved: Viết code does not run with that plan, the task starts over
+        let d = run(&flow, &ctx, FlowAction::ApprovePlan);
+        assert_eq!(d.error, None);
+        assert_eq!((d.current, d.status), (Some(StepKind::Analyze), FlowStatus::Ready));
+        assert!(d.log.iter().any(|l| l.text.contains("Repo của task đã đổi")));
         assert_eq!(fake.jobs.lock().unwrap().len(), 1);
-        git(
-            &s.repo,
-            &[
-                "remote",
-                "set-url",
-                "origin",
-                "https://github.com/example/sample.git",
-            ],
-        );
-        std::fs::write(ctx.file(BRIEF_FILE), "Changed by hand").unwrap();
-        assert_eq!(flow.detail(&ctx).error.unwrap().code, "plan.briefChanged");
-        // Reanalysis keeps the old plan; the next run reads the new MCP setting.
+        // the next run reads the new MCP setting
         ctx.config.steps.verify_mcp = true;
-        let d = run(
-            &flow,
-            &ctx,
-            FlowAction::Reopen {
-                step: Some(StepKind::Analyze),
-                note: None,
-            },
-        );
-        assert_eq!(d.gate.unwrap().kind, GateKind::PlanReview);
+        let d = run(&flow, &ctx, FlowAction::Run);
+        assert_eq!(d.gate.unwrap().kind, GateKind::PlanReview, "{:?}", d.error);
         let jobs = fake.jobs.lock().unwrap();
         assert_eq!(jobs.len(), 2);
         assert!(jobs.last().unwrap().mcp_token.is_some());
@@ -236,11 +219,11 @@ fn disabled_mcp_keeps_plan_repo_and_finish_guards_and_applies_next_run() {
 }
 
 #[test]
-fn brief_changed_during_implementation_keeps_success_and_waits_before_next_step() {
+fn brief_changed_during_implementation_is_told_once_and_nothing_waits() {
     let Some(s) = setup() else { return };
     let brief_path = s.tasks.join("WP-1").join(BRIEF_FILE);
     let calls = AtomicUsize::new(0);
-    let (flow, fake, mut ctx) = no_mcp_flow(&s, move |job, _, out| {
+    let (flow, fake, ctx) = no_mcp_flow(&s, move |job, _, out| {
         let n = calls.fetch_add(1, Ordering::SeqCst);
         if n == 1 {
             std::fs::write(&brief_path, "Changed during implementation").unwrap();
@@ -252,10 +235,9 @@ fn brief_changed_during_implementation_keeps_success_and_waits_before_next_step(
     let alerts = Arc::new(Mutex::new(Vec::new()));
     let sink = alerts.clone();
     flow.set_alert_sink(move |a| sink.lock().unwrap().push(a));
-    ctx.config.steps.auto_advance = true;
     run(&flow, &ctx, FlowAction::Run);
     let d = run(&flow, &ctx, FlowAction::ApprovePlan);
-    assert_eq!(d.error.unwrap().code, "plan.briefChanged");
+    assert_eq!(d.error, None);
     assert_eq!(
         d.steps
             .iter()
@@ -264,34 +246,30 @@ fn brief_changed_during_implementation_keeps_success_and_waits_before_next_step(
             .state,
         StepState::Done
     );
-    assert_eq!(
-        fake.jobs.lock().unwrap().len(),
-        2,
-        "No next AI step while the question is open"
-    );
-    assert!(
+    assert_eq!(fake.jobs.lock().unwrap().len(), 2);
+    assert!(d.runs.last().unwrap().state == RunState::Done);
+    assert!(d.log.iter().any(|l| l.text.contains("đã báo trong chat")));
+    let told = |alerts: &Mutex<Vec<FlowAlert>>| {
         alerts
             .lock()
             .unwrap()
             .iter()
-            .any(|a| a.kind == AlertKind::Gate && a.title.contains("Brief đã đổi"))
-    );
-    assert!(d.runs.last().unwrap().state == RunState::Done);
-    ctx.config.steps.auto_advance = false;
-    let d = run(&flow, &ctx, FlowAction::KeepPlan);
-    assert!(d.error.is_none());
-    assert!(d.log.iter().any(|l| l.text == "Bạn giữ plan sau khi brief đổi"));
+            .filter(|a| a.title.contains("Brief đổi sau khi duyệt plan"))
+            .count()
+    };
+    assert_eq!(told(&alerts), 1);
+    // once per change: reading the task again says nothing more, and no gate holds it
+    let d = flow.detail(&ctx);
+    assert_eq!(told(&alerts), 1);
+    assert!(d.gate.is_none() && d.error.is_none());
+    assert_eq!(d.status, FlowStatus::Ready);
 }
 
 #[test]
-fn refreshed_comments_ask_immediately_keep_preserves_gate_and_reanalyze_has_old_plan() {
+fn refreshed_comments_are_told_without_a_gate_and_a_new_analysis_starts_clean() {
     let Some(s) = setup() else { return };
     let (flow, fake, ctx) = no_mcp_flow(&s, |job, _, out| {
-        let prompt = prompt_of(job);
-        if prompt.contains("<previous_plan>") {
-            assert!(prompt.contains("Brief có comment mới"));
-            assert!(prompt.contains("New requirement"));
-        }
+        assert!(!prompt_of(job).contains("<previous_plan>"));
         out(&result_line(if kind(job) == "analyze" {
             COMPLETE_PLAN
         } else {
@@ -299,6 +277,9 @@ fn refreshed_comments_ask_immediately_keep_preserves_gate_and_reanalyze_has_old_
         }));
         ok()
     });
+    let alerts = Arc::new(Mutex::new(Vec::new()));
+    let sink = alerts.clone();
+    flow.set_alert_sink(move |a| sink.lock().unwrap().push(a));
     run(&flow, &ctx, FlowAction::Run);
     run(&flow, &ctx, FlowAction::SelfCode);
     let brief = ctx.read(BRIEF_FILE).unwrap();
@@ -308,24 +289,33 @@ fn refreshed_comments_ask_immediately_keep_preserves_gate_and_reanalyze_has_old_
     )
     .unwrap();
     flow.brief_refreshed(&ctx);
-    drop(flow);
-    let flow = Flow::new(s.store.clone(), fake.clone(), None);
+    let told = || -> Vec<String> {
+        alerts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.title.contains("Brief đổi sau khi duyệt plan"))
+            .map(|a| a.body.clone())
+            .collect()
+    };
+    let said = told();
+    let [message] = &said[..] else { panic!("{said:?}") };
+    assert!(message.contains("New requirement") && !message.contains("sửa tay"));
+    assert!(message.contains("nhắn trong chat"));
+    // the task stays where it was
     let d = flow.detail(&ctx);
-    assert_eq!(d.gate.as_ref().unwrap().kind, GateKind::PlanChanged);
-    let message = d.gate.unwrap().message;
-    assert!(message.contains("New requirement"));
-    assert!(!message.contains("sửa tay"));
+    assert_eq!(d.gate.as_ref().unwrap().kind, GateKind::SelfCode);
     assert_eq!(flow.card(&ctx).unwrap().step.state, StepState::WaitingUser);
-    let d = run(&flow, &ctx, FlowAction::KeepPlan);
-    assert_eq!(d.gate.unwrap().kind, GateKind::SelfCode);
-    assert_eq!(fake.jobs.lock().unwrap().len(), 1);
+    assert_eq!(told().len(), 1);
     std::fs::write(
         ctx.file(PLAN_FILE),
         format!("{}\nManual addition", ctx.read(PLAN_FILE).unwrap()),
     )
     .unwrap();
-    assert!(flow.detail(&ctx).error.unwrap().message.contains("sửa tay"));
-    let d = run(
+    flow.detail(&ctx);
+    assert!(told()[1].contains("sửa tay"));
+    // Phân tích again starts from the brief, without the earlier plan
+    run(
         &flow,
         &ctx,
         FlowAction::Reopen {
@@ -333,6 +323,7 @@ fn refreshed_comments_ask_immediately_keep_preserves_gate_and_reanalyze_has_old_
             note: None,
         },
     );
+    let d = run(&flow, &ctx, FlowAction::Run);
     assert_eq!(d.gate.unwrap().kind, GateKind::PlanReview);
     assert_eq!(fake.jobs.lock().unwrap().len(), 2);
 }
@@ -422,7 +413,7 @@ fn automatic_next_step_reads_the_changed_mcp_switch_from_settings() {
 }
 
 #[test]
-fn disabled_mcp_keeps_post_run_repo_checks_and_selected_findings_guard() {
+fn an_origin_moved_during_a_run_waits_for_the_next_step_and_selected_findings_block_handoff() {
     let Some(s) = setup() else { return };
     let (flow, fake, ctx) = no_mcp_flow(&s, |job, _, out| {
         git(
@@ -437,8 +428,9 @@ fn disabled_mcp_keeps_post_run_repo_checks_and_selected_findings_guard() {
         out(&result_line(COMPLETE_PLAN));
         ok()
     });
+    // the step that ran is kept; the next one sees the moved origin before it runs
     let d = run(&flow, &ctx, FlowAction::Run);
-    assert_eq!(d.error.unwrap().code, "repo.changed");
+    assert_eq!(d.gate.unwrap().kind, GateKind::PlanReview, "{:?}", d.error);
     let finding = FindingRow {
         wp_id: 1,
         fingerprint: "selected".into(),
@@ -518,16 +510,15 @@ fn budget_continuation_of_a_custom_push_command_uses_the_saved_session() {
 }
 
 #[test]
-fn disabled_mcp_still_rejects_incomplete_analysis_and_failed_checks_after_a_fix() {
+fn a_plan_in_any_shape_reaches_the_gate_and_failed_checks_still_fail_a_fix() {
     let Some(s) = setup() else { return };
     let (flow, _, mut ctx) = no_mcp_flow(&s, |_, _, out| {
-        out(&result_line("Incomplete plan"));
+        out(&result_line("Plan without the usual sections"));
         ok()
     });
-    assert_eq!(
-        run(&flow, &ctx, FlowAction::Run).error.unwrap().code,
-        "mcp.planIncomplete"
-    );
+    let d = run(&flow, &ctx, FlowAction::Run);
+    assert_eq!(d.gate.unwrap().kind, GateKind::PlanReview, "{:?}", d.error);
+    assert_eq!(d.plan.as_deref().map(str::trim), Some("Plan without the usual sections"));
     ctx.config.repos.insert(
         s.repo.to_string_lossy().into_owned(),
         RepoConfig {

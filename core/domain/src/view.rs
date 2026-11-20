@@ -53,8 +53,6 @@ pub enum TaskColumn {
 #[serde(rename_all = "camelCase")]
 pub enum GateKind {
     PlanReview,
-    /// Brief/plan changed after approval; the saved workflow decision stays pending.
-    PlanChanged,
     /// A review reported findings: the user picks which ones the AI fixes. Saved tasks from
     /// before call it `mediumTriage` (the final review's medium findings only).
     #[serde(alias = "mediumTriage")]
@@ -360,9 +358,6 @@ pub struct SettingsView {
     /// Kiểm tra commands of every known repo.
     #[serde(default)]
     pub repo_checks: Vec<RepoChecks>,
-    /// Issue repo → checkout pairs remembered from approved plans.
-    #[serde(default)]
-    pub repo_pairs: Vec<RepoPair>,
 }
 
 fn verify_mcp_default() -> bool {
@@ -574,16 +569,6 @@ pub struct RepoChecks {
     /// The repo as written in config (`~/Desktop/web`).
     pub repo: String,
     pub commands: Vec<String>,
-}
-
-/// Issues of `issue_repo` were worked on in a checkout whose origin is `origin` (remembered when
-/// a plan made there was approved). A hint for the next analysis, not a rule.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RepoPair {
-    pub project: String,
-    pub issue_repo: String,
-    pub origin: String,
 }
 
 /// One message of "Trao đổi với AI".
@@ -1178,30 +1163,6 @@ pub struct RunView {
     pub command: Option<String>,
 }
 
-/// A question the analysis asks the user; the plan gate waits until each one is answered or
-/// left to the AI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanQuestion {
-    /// `q1`, `q2`, … in the order the AI asked.
-    pub id: String,
-    pub text: String,
-    /// Answers the AI suggests (the user may write another one).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub options: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub answer: Option<String>,
-    /// "AI tự quyết": the user leaves it to the AI.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub ai_decides: bool,
-}
-
-impl PlanQuestion {
-    pub fn answered(&self) -> bool {
-        self.ai_decides || self.answer.as_deref().is_some_and(|a| !a.trim().is_empty())
-    }
-}
-
 /// What the analysis proposes for an optional step (Harness, Test trình duyệt) of this task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1402,6 +1363,9 @@ pub enum ChatKind {
     /// The run ended; `tool` holds the CLI's result kind (`success`, `error_max_turns`, …).
     End,
     Error,
+    /// A line from the app in a session's chat (not sent to the AI): the brief changed, the
+    /// task moved to another repo.
+    Note,
 }
 
 /// One item of the Chat tab.
@@ -1495,9 +1459,6 @@ pub struct TaskDetail {
     pub brief: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
-    /// The analysis's questions and the user's answers (the plan gate waits for all of them).
-    #[serde(default)]
-    pub questions: Vec<PlanQuestion>,
     /// The analysis's advice on Harness and Test trình duyệt.
     #[serde(default)]
     pub proposals: Vec<StepProposal>,
@@ -1603,15 +1564,10 @@ pub struct TestCase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum FlowAction {
-    /// Brief changed after the plan was approved: keep the plan and go on.
-    KeepPlan,
     /// Error gate: ask the AI about the failure (read only); its answer joins `TaskDetail.talk`.
     Talk {
         text: String,
     },
-    /// The task's repo folder or origin changed since Bắt đầu: bind the task to it as it is now
-    /// and run the step again.
-    UseCurrentRepo,
     /// Run the current step (the one shown as ready).
     Run,
     /// Stop the running step; it can be retried.
@@ -1632,15 +1588,6 @@ pub enum FlowAction {
     },
     /// Plan gate: the user codes by hand.
     SelfCode,
-    /// Plan gate: answer one of the analysis's questions (`answer`), or leave it to the AI.
-    #[serde(rename_all = "camelCase")]
-    AnswerQuestion {
-        id: String,
-        #[serde(default)]
-        answer: Option<String>,
-        #[serde(default)]
-        ai_decides: bool,
-    },
     /// Turn an optional step (Harness, Test trình duyệt) on or off for this task, until the flow
     /// gets there.
     SetUses {
@@ -1959,26 +1906,6 @@ mod tests {
             }
         );
         let a: FlowAction =
-            serde_json::from_value(json!({"type": "answerQuestion", "id": "q1", "answer": "Có"})).unwrap();
-        assert_eq!(
-            a,
-            FlowAction::AnswerQuestion {
-                id: "q1".into(),
-                answer: Some("Có".into()),
-                ai_decides: false
-            }
-        );
-        let a: FlowAction =
-            serde_json::from_value(json!({"type": "answerQuestion", "id": "q2", "aiDecides": true})).unwrap();
-        assert_eq!(
-            a,
-            FlowAction::AnswerQuestion {
-                id: "q2".into(),
-                answer: None,
-                ai_decides: true
-            }
-        );
-        let a: FlowAction =
             serde_json::from_value(json!({"type": "setUses", "step": "harness", "on": false})).unwrap();
         assert_eq!(
             a,
@@ -1986,12 +1913,6 @@ mod tests {
                 step: StepKind::Harness,
                 on: false
             }
-        );
-        let q: PlanQuestion = serde_json::from_value(json!({"id": "q1", "text": "?"})).unwrap();
-        assert!(!q.answered());
-        assert_eq!(
-            serde_json::to_value(&q).unwrap(),
-            json!({"id": "q1", "text": "?"})
         );
         // the old button sends no `forced`; "Làm tiếp" may leave out the step and the note
         let a: FlowAction = serde_json::from_value(json!({"type": "finish"})).unwrap();
