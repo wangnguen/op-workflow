@@ -35,7 +35,25 @@ export const vi = {
     notificationsUnread: (n: number) => `Thông báo: ${n} chưa xem`,
     settings: "Cài đặt (token OpenProject, phiên bản)",
     update: (v: string) => `Bản mới v${v}`,
-    updateHint: "Mở trang tải bản mới trên GitHub",
+    updateDownloading: (v: string, pct?: number) => `Đang tải v${v}${pct === undefined ? "" : ` · ${pct}%`}`,
+    updateReady: (v: string) => `Cài bản v${v}`,
+    updateHint: "Bản mới: xem và cài ngay trong app",
+  },
+  update: {
+    title: (v: string, current: string) => `Bản mới v${v} (đang dùng v${current})`,
+    notYet: "Chưa tải bản này.",
+    downloading: (pct?: number) => (pct === undefined ? "Đang tải bản mới…" : `Đang tải bản mới… ${pct}%`),
+    ready: "Đã tải và kiểm tra xong (khớp SHA256SUMS của bản phát hành). Bấm cài là xong.",
+    failed: (why: string) => `Tải bản mới không được: ${why}`,
+    noInstaller: "Bản phát hành này không có file cài cho app tự tải. Mở trang phát hành để tải tay.",
+    download: "Tải bản mới",
+    retry: "Tải lại",
+    install: "Cài và mở lại app",
+    installing: "Đang mở trình cài…",
+    installAnyway: "Vẫn cài",
+    installHint:
+      "App đóng lại, trình cài chạy (chỉ có thanh tiến trình, không cần bấm gì) rồi tự mở lại app. Phiên và hội thoại vẫn còn.",
+    notes: "Xem ghi chú phát hành",
   },
   settings: {
     title: "Cài đặt",
@@ -72,7 +90,9 @@ export const vi = {
     versionChecked: "Kiểm tra lúc",
     versionCheck: "Kiểm tra bản mới",
     versionChecking: "Đang kiểm tra…",
-    versionDownload: "Mở trang tải",
+    autoDownload: "Tự tải bản mới",
+    autoDownloadHint:
+      "Có bản mới là app tải file cài về thư mục Downloads (kiểm tra SHA256 của bản phát hành), để cài chỉ cần một lần bấm. Tắt thì bấm Tải bản mới khi muốn.",
     pages: {
       connection: "OpenProject",
       repos: "Repo & branch",
@@ -678,6 +698,9 @@ export const vi = {
       more: (n: number) => `… còn ${n} ký tự`,
       denied: "Bị chặn",
       failed: "Lỗi",
+      subRunning: "Đang chạy nền",
+      subSteps: (n: number) => `Subagent làm ${n} bước`,
+      subStepsRunning: (n: number) => (n > 0 ? `Subagent đang làm · ${n} bước` : "Subagent đang bắt đầu…"),
       end: {
         success: "Kết thúc",
         error_max_turns: "Dừng: hết lượt",
@@ -964,6 +987,8 @@ export const vi = {
   },
   orbit: {
     legend: "Cách đọc bản đồ",
+    /** under a star of the app's own session without a task */
+    ownStar: "Phiên riêng",
     zoomIn: "Phóng to",
     zoomOut: "Thu nhỏ",
     recenter: "Về giữa",
@@ -973,19 +998,6 @@ export const vi = {
     systems: "Task đang làm",
     systemPick: "Đưa task này vào giữa bản đồ",
     /** the sun in the centre while no task is in progress */
-    sun: {
-      running: (n: number) => `${n} đang chạy`,
-      waiting: (n: number) => `${n} chờ bạn`,
-      today: (usd: string, tokens: string) => `${usd} · ${tokens}`,
-      title: (running: number, waiting: number, usd: string | undefined, tokens: string | undefined) =>
-        [
-          `Phiên đang chạy: ${running}`,
-          `Phiên chờ bạn trả lời: ${waiting}`,
-          usd && tokens ? `Hôm nay: ${usd}, ${tokens} token` : "",
-        ]
-          .filter(Boolean)
-          .join("\n"),
-    },
     resetLayout: "Xếp lại vị trí mặc định",
     round: (n: number) => `vòng ${n}`,
     compact: (n: number) => `compact ×${n}`,
@@ -1041,6 +1053,8 @@ export const vi = {
       openOnNx: "Mở trên OpenProject",
       openOnNxHint: "Mở task này trên OpenProject trong trình duyệt",
       distant: "Phiên ngoài app",
+      own: "Phiên riêng trong app (không gắn task)",
+      goOwnHint: "Mở chat của phiên này trong Workspace, gõ tiếp được ngay",
       noneSelected: "Bấm vào một vật thể trên bản đồ để xem chi tiết",
       newComments: "Comment mới",
       findings: "Findings",
@@ -1058,7 +1072,7 @@ export const vi = {
       ["meteor", "Sao băng", "comment mới trên OpenProject"],
       ["fuel", "Vành nhiên liệu", "quota Claude và Codex (5 giờ, tuần)"],
       ["nebula", "Tinh vân", "task trong Inbox khi chưa có task đang làm; màu theo độ ưu tiên trên OpenProject, ưu tiên càng cao càng đậm"],
-      ["distant", "Sao xa", "phiên mở ngoài app"],
+      ["distant", "Sao xa", "phiên riêng của app (màu nhấn) và phiên mở ngoài app"],
     ] as const,
   },
   workspace: {
@@ -1224,6 +1238,28 @@ export const vi = {
       create: "Tạo phiên",
       cancel: "Huỷ",
     },
+    background: {
+      chip: (n: number) => `${n} việc nền`,
+      chipHint: "Subagent và lệnh Claude đang chạy nền trong phiên: xem, dừng từng việc",
+      title: "Đang chạy nền",
+      kind: { agent: "Subagent", bash: "Lệnh nền" } as Record<string, string>,
+      toolUses: (n: number) => `${n} lần dùng tool`,
+      tokens: (n: string) => `${n} token`,
+      showSteps: "Xem các bước",
+      showStepsHint: "Cuộn tới subagent này trong chat và mở các bước nó đã làm",
+      showOutput: "Xem output",
+      hideOutput: "Ẩn output",
+      showOutputHint: "Hiện phần cuối output của lệnh, tự cập nhật",
+      stop: "Dừng",
+      stopHint: "Dừng riêng việc này; lượt đang chạy và các việc khác vẫn tiếp tục",
+      stopping: "Đang dừng…",
+      stopAll: "Dừng tất cả",
+      stopAllHint: "Dừng lượt đang chạy và mọi việc nền của phiên",
+      reading: "Đang đọc output…",
+      noOutputYet: "Lệnh chưa in gì.",
+      noOutputFile: "Chưa thấy file output của việc này.",
+      cut: (bytes: number) => `… bỏ ${Math.ceil(bytes / 1024)} KB đầu`,
+    },
     chat: {
       loading: "Đang đọc hội thoại…",
       draftTask: (id: string) =>
@@ -1235,10 +1271,18 @@ export const vi = {
       placeholderOutside: "Phiên đang mở ở nơi khác",
       send: "Gửi",
       stop: "Dừng",
-      stopHint: "Dừng lượt đang chạy; phiên vẫn mở, gõ tiếp được",
+      stopHint: "Dừng lượt đang chạy và các subagent chạy nền; phiên vẫn mở, gõ tiếp được",
+      stopping: "Đang dừng…",
+      stopHard: "Tắt hẳn",
+      stopHardHint:
+        "Claude chưa dừng xong. Bấm để tắt hẳn tiến trình của phiên (hội thoại vẫn còn; gõ tin mới là chạy lại).",
+      background: (what: string) => `Subagent đang chạy nền: ${what}`,
+      backgroundMore: (n: number) => `và ${n} việc nền khác`,
       openVscode: "Mở trong VS Code",
       openVscodeHint:
         "Chuyển phiên này sang VS Code: app thôi chạy nó, VS Code mở repo và mở đúng hội thoại này trong Claude Code. Trong lúc đó ở app chỉ xem được.",
+      openVscodeForce: "Dừng ở đây và mở trong VS Code",
+      openVscodeForceHint: "Dừng lượt đang chạy trong app rồi chuyển phiên sang VS Code; VS Code chạy tiếp từ chỗ đã lưu.",
       openRepo: "Mở repo trong VS Code",
       openRepoHint:
         "Mở thư mục repo trong VS Code (cửa sổ đang có của repo nếu đã mở) để xem code, chạy lệnh, chia sẻ cổng. Phiên vẫn chạy ở đây.",
@@ -1265,6 +1309,13 @@ export const vi = {
       liveHint: "Phiên đang chạy trong app: gõ là Claude nhận ngay",
       notLive: "Chưa chạy trong app",
       notLiveHint: "Phiên đang tắt. Gõ tin là app chạy lại đúng phiên này, hội thoại vẫn còn.",
+      modelLabel: "Model",
+      modelHint:
+        "Model Claude dùng trong phiên này. Đổi lúc nào cũng được: đang chạy thì đổi ngay từ lượt sau, lần mở lại phiên cũng dùng model này.",
+      modelCli: (label?: string) => (label ? `Mặc định (${label})` : "Mặc định"),
+      modelCliAbout: "Như khi bạn mở Claude Code: dùng model trong cài đặt của bạn.",
+      modelUnlisted: (m: string) => `${m} (CLI không còn liệt kê)`,
+      modelBackHint: "Về model mặc định có hiệu lực từ lần phiên chạy lại (Tắt phiên rồi gõ tiếp, hoặc ở phiên mới).",
       mode: "Quyền",
       modeHint: "Cách Claude xin phép trong phiên này. Đổi lúc nào cũng được; lần mở lại phiên cũng dùng mode này.",
       modeCli: "Theo cài đặt của bạn",

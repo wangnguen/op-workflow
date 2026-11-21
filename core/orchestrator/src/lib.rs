@@ -41,7 +41,7 @@ use std::time::Duration;
 use opw_config::{Config, secrets};
 use opw_context::BriefComment;
 use opw_domain::session::{
-    AskAnswer, NewSession, OutsideChat, OutsideSession, SessionChat, SessionState, SessionView,
+    AskAnswer, NewSession, OutsideChat, OutsideSession, SessionChat, SessionKind, SessionState, SessionView,
     WorkspaceSnapshot, WorkspaceTask,
 };
 use opw_domain::task::display_id;
@@ -265,7 +265,7 @@ impl AppService {
         if let (Some(flow), Some(sessions)) = (&flow, &sessions) {
             flow.set_sessions(sessions.clone());
         }
-        let updater = Updater::start(config.update.clone(), CORE_VERSION);
+        let updater = Updater::start(config.update.clone(), CORE_VERSION, data_dir.clone());
         let service = Self {
             config: Mutex::new(config),
             config_path,
@@ -695,7 +695,12 @@ impl AppService {
                     priority: state.priority(&wp.priority),
                 })
                 .collect(),
-            distant: self.outside_sessions().iter().map(distant).collect(),
+            distant: self
+                .own_free_sessions()
+                .iter()
+                .map(own_star)
+                .chain(self.outside_sessions().iter().map(distant))
+                .collect(),
             quota: live_quota(&state),
             notice: self.inbox_notice(&state),
         }
@@ -1895,6 +1900,9 @@ impl AppService {
                 published_at: None,
                 checked_at: None,
                 error: None,
+                can_install: false,
+                auto_download: false,
+                download: None,
             },
         }
     }
@@ -1905,6 +1913,50 @@ impl AppService {
             Some(u) => u.check_now(),
             None => self.update_status(),
         }
+    }
+
+    /// Download the newer version's installer now (or again after a failure), in the background.
+    pub fn download_update(&self) -> UpdateView {
+        match &self.updater {
+            Some(u) => u.download_now(),
+            None => self.update_status(),
+        }
+    }
+
+    /// Settings → Giới thiệu → "Tự tải bản mới" (`update.autoDownload`). Turned on with a newer
+    /// version known, its download starts now.
+    pub fn set_update_auto_download(&self, on: bool) -> Result<UpdateView, ApiError> {
+        let path = self
+            .config_path
+            .as_deref()
+            .ok_or_else(|| ApiError::new("config.missing", "Không tìm thấy đường dẫn config"))?;
+        opw_config::save_update_auto_download(path, on)
+            .map_err(|e| ApiError::new("config.write", e.to_string()))?;
+        self.reload_config();
+        Ok(match &self.updater {
+            Some(u) => u.set_auto_download(on),
+            None => self.update_status(),
+        })
+    }
+
+    /// "Cài bản mới": start the downloaded, checked installer. While AI work runs (sessions,
+    /// steps) only with `force`; the caller quits the app next, which stops that work the way
+    /// "Thoát hẳn" does.
+    pub fn install_update(&self, force: bool) -> Result<(), ApiError> {
+        let updater = self
+            .updater
+            .as_ref()
+            .ok_or_else(|| ApiError::new("update.off", "Bản này không tự cập nhật"))?;
+        let running = self.running_steps();
+        if running > 0 && !force {
+            return Err(ApiError::new(
+                "update.running",
+                format!(
+                    "Đang có {running} việc AI chạy (phiên hoặc bước). Cài bản mới sẽ dừng chúng như khi thoát app; hội thoại vẫn còn."
+                ),
+            ));
+        }
+        updater.run_installer()
     }
 
     pub fn open_release_page(&self) -> Result<(), ApiError> {
@@ -2279,6 +2331,19 @@ impl AppService {
         }
     }
 
+    /// The app's sessions without a task (Workspace → Phiên riêng), most recently used first,
+    /// at most [`OWN_STARS_MAX`]: the map shows them beside the tasks.
+    fn own_free_sessions(&self) -> Vec<SessionView> {
+        self.sessions
+            .as_ref()
+            .map(Sessions::list)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.kind == SessionKind::Free)
+            .take(OWN_STARS_MAX)
+            .collect()
+    }
+
     /// Claude sessions open outside the app (VS Code, a terminal); none when the user hid them.
     fn outside_sessions(&self) -> Vec<OutsideSession> {
         match &self.sessions {
@@ -2519,8 +2584,24 @@ impl AppService {
         self.sessions()?.stop(id)
     }
 
-    pub fn session_open_vscode(&self, id: &str) -> Result<(), ApiError> {
-        self.sessions()?.open_vscode(id)
+    pub fn session_stop_task(&self, id: &str, task_id: &str) -> Result<SessionView, ApiError> {
+        self.sessions()?.stop_task(id, task_id)
+    }
+
+    pub fn session_task_output(
+        &self,
+        id: &str,
+        task_id: &str,
+    ) -> Result<opw_domain::session::TaskOutput, ApiError> {
+        self.sessions()?.task_output(id, task_id)
+    }
+
+    pub fn session_set_model(&self, id: &str, model: Option<&str>) -> Result<SessionView, ApiError> {
+        self.sessions()?.set_model(id, model)
+    }
+
+    pub fn session_open_vscode(&self, id: &str, force: bool) -> Result<(), ApiError> {
+        self.sessions()?.open_vscode(id, force)
     }
 
     pub fn session_hide(&self, id: &str) -> Result<(), ApiError> {
@@ -2621,6 +2702,30 @@ fn nx_task_url(state: &LiveState, wp_id: u64) -> Option<String> {
         .then(|| format!("{}/work_packages/{wp_id}", state.base_url.trim_end_matches('/')))
 }
 
+/// How many of the app's own sessions without a task the map shows.
+const OWN_STARS_MAX: usize = 8;
+
+/// One of the app's sessions without a task as a far star, named after its folder.
+fn own_star(s: &SessionView) -> DistantSession {
+    let folder = std::path::Path::new(&s.repo)
+        .file_name()
+        .map_or_else(|| s.repo.clone(), |n| n.to_string_lossy().into_owned());
+    DistantSession {
+        id: s.id.clone(),
+        agent: AgentKind::Claude,
+        label: folder,
+        status: match s.state {
+            SessionState::Running => SessionStatus::Running,
+            SessionState::Waiting => SessionStatus::Waiting,
+            SessionState::Idle | SessionState::Outside => SessionStatus::Idle,
+        },
+        title: s.title.clone(),
+        cwd: s.repo.clone(),
+        open_in: s.outside.clone().unwrap_or_default(),
+        own: true,
+    }
+}
+
 /// A session opened outside the app as a far star on the map, named after its folder.
 fn distant(s: &OutsideSession) -> DistantSession {
     let folder = std::path::Path::new(&s.cwd)
@@ -2638,6 +2743,7 @@ fn distant(s: &OutsideSession) -> DistantSession {
         title: s.title.clone(),
         cwd: s.cwd.clone(),
         open_in: s.open_in.clone(),
+        own: false,
     }
 }
 

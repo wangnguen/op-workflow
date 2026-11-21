@@ -142,6 +142,7 @@ export function App() {
         onRefresh={refreshAll}
         onSettings={() => setSettingsOpen(true)}
         onOpenRelease={openRelease}
+        onUpdateChanged={update.refresh}
         frameless={!isMockMode()}
       />
       <main className="app-main">

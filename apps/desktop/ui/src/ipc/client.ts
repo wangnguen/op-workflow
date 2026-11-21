@@ -28,6 +28,9 @@ import {
   mockStartOptions,
   mockStartTask,
   mockUpdate,
+  mockDownloadUpdate,
+  mockInstallUpdate,
+  mockSetUpdateAutoDownload,
 } from "./mock";
 import {
   mockAllowBash,
@@ -64,6 +67,9 @@ import {
   mockSessionOpenVscode,
   mockSessionSend,
   mockSessionSetMode,
+  mockSessionSetModel,
+  mockSessionStopTask,
+  mockTaskOutput,
   mockSessionStop,
   mockWorkspace,
   mockWorkspaceRepos,
@@ -77,6 +83,7 @@ import type {
   SessionChat,
   SessionPatch,
   SessionView,
+  TaskOutput,
   TerminalAction,
   TerminalFrame,
   TerminalKind,
@@ -466,8 +473,18 @@ export const setSessionMode = (id: string, mode: string): Promise<SessionView> =
 export const stopSession = (id: string): Promise<SessionView> =>
   call("session_stop", () => mockSessionStop(id), { id });
 /** Gives the session to VS Code: the app stops it, opens the repo's window, then the session. */
-export const openSessionInVscode = (id: string): Promise<null> =>
-  call("session_open_vscode", () => mockSessionOpenVscode(id), { id });
+/** `force`: a turn running here is stopped first (asked when the app said session.running). */
+export const openSessionInVscode = (id: string, force = false): Promise<null> =>
+  call("session_open_vscode", () => mockSessionOpenVscode(id, force), { id, force });
+/** Stop one background task of the session (a subagent, a command run in the background). */
+export const stopSessionTask = (id: string, taskId: string): Promise<SessionView> =>
+  call("session_stop_task", () => mockSessionStopTask(id, taskId), { id, taskId });
+/** The end of what a background task wrote (a command's output). */
+export const getTaskOutput = (id: string, taskId: string): Promise<TaskOutput> =>
+  call("session_task_output", () => mockTaskOutput(id, taskId), { id, taskId });
+/** The session's model (`undefined` = the CLI's default): now if it runs, and on every start. */
+export const setSessionModel = (id: string, model: string | undefined): Promise<SessionView> =>
+  call("session_set_model", () => mockSessionSetModel(id, model), { id, model: model ?? null });
 /** Takes the session off the Workspace list (its transcript stays). */
 export const hideSession = (id: string): Promise<null> => call("session_hide", () => mockSessionHide(id), { id });
 /** What the session changed (a task's change since its base; a free session's uncommitted one). */
@@ -549,6 +566,14 @@ export function onSessionPatch(handler: (patch: SessionPatch) => void): () => vo
 export const getUpdateStatus = (): Promise<UpdateView> => call("update_status", mockUpdate);
 /** Asks GitHub Releases now. */
 export const checkUpdate = (): Promise<UpdateView> => call("check_update", mockUpdate);
+/** Download the newer version's installer now (again after a failure), in the background. */
+export const downloadUpdate = (): Promise<UpdateView> => call("download_update", mockDownloadUpdate);
+/** Run the downloaded installer and quit (it opens the app again). `force`: although AI work runs. */
+export const installUpdate = (force: boolean): Promise<null> =>
+  call("install_update", () => mockInstallUpdate(force), { force });
+/** Settings → Giới thiệu → Tự tải bản mới. */
+export const setUpdateAutoDownload = (on: boolean): Promise<UpdateView> =>
+  call("set_update_auto_download", () => mockSetUpdateAutoDownload(on), { on });
 export const openReleasePage = (): Promise<null> =>
   call("open_release_page", () => {
     window.open("https://github.com/wangnguen/op-workflow/releases", "_blank", "noopener");

@@ -117,18 +117,6 @@ export function SessionsView({ snapshot, board, workspace, now, onChanged, onOpe
     () => new Set((workspace?.sessions ?? []).filter((s) => s.state === "waiting" && s.taskId).map((s) => s.taskId ?? "")),
     [workspace],
   );
-  // the sun in the middle of the map: what runs now and today's spend
-  const summary = useMemo(() => {
-    const states = [
-      ...(workspace?.sessions ?? []).map((s) => s.state),
-      ...(workspace?.outside ?? []).map((o) => o.state),
-    ];
-    return {
-      running: states.filter((s) => s === "running").length,
-      waiting: states.filter((s) => s === "waiting").length,
-      today: board?.today,
-    };
-  }, [workspace, board]);
   /** Where the map's main button, a double click or a card's "Tới phiên" leads. */
   const go = (g: Go) => {
     switch (g.to) {
@@ -196,7 +184,6 @@ export function SessionsView({ snapshot, board, workspace, now, onChanged, onOpe
                 onOpenLink={(wpId) => openTaskLink(wpId).catch(fail)}
                 onGo={go}
                 waiting={waiting}
-                summary={summary}
               />
             </div>
             <div {...pane("board")}>

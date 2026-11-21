@@ -282,6 +282,9 @@ pub struct UpdateConfig {
     /// Count pre-releases as updates (every release so far is a pre-release).
     pub include_prerelease: bool,
     pub every_hours: u32,
+    /// Download a newer version's installer in the background as soon as it is found, so
+    /// installing is one click.
+    pub auto_download: bool,
 }
 
 impl Default for UpdateConfig {
@@ -291,6 +294,7 @@ impl Default for UpdateConfig {
             repo: "wangnguen/op-workflow".into(),
             include_prerelease: true,
             every_hours: 6,
+            auto_download: true,
         }
     }
 }
@@ -395,6 +399,13 @@ pub fn save_notify(path: &Path, kind: NotifyKind, on: bool) -> ConfigResult<()> 
     };
     edit_file(path, |root| {
         object_at(root, "notify").insert(key.into(), Value::Bool(on));
+    })
+}
+
+/// Write `update.autoDownload`, keeping every other key.
+pub fn save_update_auto_download(path: &Path, on: bool) -> ConfigResult<()> {
+    edit_file(path, |root| {
+        object_at(root, "update").insert("autoDownload".into(), Value::Bool(on));
     })
 }
 

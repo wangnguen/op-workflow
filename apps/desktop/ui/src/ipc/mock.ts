@@ -44,7 +44,7 @@ import type {
 import { AI_STEPS, OPTIONAL_STEPS, STEP_COUNT, STEP_ORDER, stepIndex } from "../shared/steps";
 import { mockDoneCards, mockFlowCard, mockFlowSystem, mockMoved, mockPlaceCard, mockRegisterFlow, mockStarted } from "./mockFlow";
 import { mockNewComments, mockNotify, mockUnreadAlerts } from "./mockTask";
-import { mockOutside, mockOutsideHidden, mockSetOutsideHidden } from "./mockWorkspace";
+import { mockOutside, mockOutsideHidden, mockSetOutsideHidden, mockWorkspace } from "./mockWorkspace";
 
 export const DEMO_FRAME_MS = 4000;
 /** One demo frame stands for this much "real" time in timestamps. */
@@ -274,9 +274,21 @@ const INBOX_VIEW: InboxItem[] = (() => {
   );
 })();
 
-/** The far stars: the mock sessions opened outside the app (mockWorkspace), or N made-up ones. */
+/** The far stars: the mock sessions without a task and those opened outside the app
+ *  (mockWorkspace), or N made-up ones. */
 function distant(): DistantSession[] {
-  const base: DistantSession[] = mockOutside().map((o) => ({
+  const own: DistantSession[] = mockWorkspace()
+    .sessions.filter((s) => s.kind === "free")
+    .map((s) => ({
+      id: s.id,
+      agent: "claude",
+      label: s.repo.split("/").pop() ?? s.repo,
+      status: s.state === "running" || s.state === "waiting" ? s.state : "idle",
+      title: s.title,
+      cwd: s.repo,
+      own: true,
+    }));
+  const outside: DistantSession[] = mockOutside().map((o) => ({
     id: o.id,
     agent: "claude",
     label: o.cwd.split("/").pop() ?? o.cwd,
@@ -285,8 +297,9 @@ function distant(): DistantSession[] {
     cwd: o.cwd,
     openIn: o.openIn,
   }));
+  const base = [...own, ...(mockOutsideHidden() ? [] : outside)];
   const n = urlCount("distant");
-  if (n === undefined || mockOutsideHidden()) return base;
+  if (n === undefined) return base;
   return Array.from({ length: n }, (_, i) => ({
     id: `ext-${i + 1}`,
     agent: "claude",
@@ -1054,7 +1067,14 @@ export function mockStartTask(req: StartRequest): StartResult {
   };
 }
 
+/** The preview's download: started by `mockDownloadUpdate`, done after a few seconds. */
+let mockDownloadAt: number | undefined;
+let mockAutoDownload = true;
+const MOCK_DOWNLOAD_MS = 4000;
+const MOCK_SIZE = 5_647_794;
+
 export function mockUpdate(): UpdateView {
+  const elapsed = mockDownloadAt === undefined ? undefined : Date.now() - mockDownloadAt;
   return {
     current: "0.4.1",
     enabled: true,
@@ -1063,6 +1083,35 @@ export function mockUpdate(): UpdateView {
     url: "https://github.com/wangnguen/op-workflow/releases",
     publishedAt: new Date(Date.now() - 2 * 86_400_000).toISOString(),
     checkedAt: new Date().toISOString(),
+    canInstall: true,
+    autoDownload: mockAutoDownload,
+    download:
+      elapsed === undefined
+        ? undefined
+        : elapsed < MOCK_DOWNLOAD_MS
+          ? { version: "0.5.0", state: "downloading", done: Math.round((MOCK_SIZE * elapsed) / MOCK_DOWNLOAD_MS), total: MOCK_SIZE }
+          : { version: "0.5.0", state: "ready", done: MOCK_SIZE, total: MOCK_SIZE, file: "C:/Users/dev/Downloads/op-workflow_0.5.0_x64-setup.exe" },
   };
+}
+
+export function mockDownloadUpdate(): UpdateView {
+  mockDownloadAt ??= Date.now();
+  return mockUpdate();
+}
+
+export function mockSetUpdateAutoDownload(on: boolean): UpdateView {
+  mockAutoDownload = on;
+  if (on) mockDownloadAt ??= Date.now();
+  return mockUpdate();
+}
+
+export function mockInstallUpdate(force: boolean): null {
+  if (!force) {
+    throw {
+      code: "update.running",
+      message: "Đang có 1 việc AI chạy (phiên hoặc bước). Cài bản mới sẽ dừng chúng như khi thoát app; hội thoại vẫn còn.",
+    };
+  }
+  return null;
 }
 export const mockBoard = (now: number): BoardSnapshot => boardForFrame(demoFrameIndex(now), now);

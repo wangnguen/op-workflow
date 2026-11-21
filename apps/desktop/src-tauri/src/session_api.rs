@@ -191,10 +191,45 @@ pub fn session_stop(id: String, service: State<'_, AppService>) -> Result<Sessio
     service.session_stop(&id)
 }
 
-/// Give the session to VS Code (the app only shows it from then on).
+/// Stop one background task of the session (a subagent, a command run in the background).
 #[tauri::command(async)]
-pub fn session_open_vscode(id: String, service: State<'_, AppService>) -> Result<(), ApiError> {
-    service.session_open_vscode(&id)
+pub fn session_stop_task(
+    id: String,
+    task_id: String,
+    service: State<'_, AppService>,
+) -> Result<SessionView, ApiError> {
+    service.session_stop_task(&id, &task_id)
+}
+
+/// The end of what a background task wrote (a command's output).
+#[tauri::command(async)]
+pub fn session_task_output(
+    id: String,
+    task_id: String,
+    service: State<'_, AppService>,
+) -> Result<opw_domain::session::TaskOutput, ApiError> {
+    service.session_task_output(&id, &task_id)
+}
+
+/// The session's model, picked in the chat (`None` = the CLI's default).
+#[tauri::command(async)]
+pub fn session_set_model(
+    id: String,
+    model: Option<String>,
+    service: State<'_, AppService>,
+) -> Result<SessionView, ApiError> {
+    service.session_set_model(&id, model.as_deref())
+}
+
+/// Give the session to VS Code (the app only shows it from then on). `force` stops a turn
+/// running here first.
+#[tauri::command(async)]
+pub fn session_open_vscode(
+    id: String,
+    force: Option<bool>,
+    service: State<'_, AppService>,
+) -> Result<(), ApiError> {
+    service.session_open_vscode(&id, force.unwrap_or(false))
 }
 
 /// Take the session off the Workspace list (its transcript stays).

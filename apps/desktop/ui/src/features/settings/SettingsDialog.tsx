@@ -19,6 +19,7 @@ import {
   setRepoChecks,
   setOnClose,
   setHideOutsideSessions,
+  setUpdateAutoDownload,
   setQuotaProbe,
   setTasksDir,
 } from "../../ipc/client";
@@ -40,6 +41,7 @@ import { Icon } from "../../shared/ui/Icon";
 import { PAGES, searchEntries, type PageKey } from "./pages";
 import { StepsPage } from "./StepsPage";
 import { ThemePicker } from "./ThemePicker";
+import { UpdateActions } from "../update/UpdateActions";
 import "./settings.css";
 
 interface Props {
@@ -504,6 +506,15 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
       .catch((e: unknown) => setUpdate((u) => (u ? { ...u, error: errorMessage(e) } : u)))
       .finally(() => setChecking(false));
   };
+  // the download's progress and result, here and in the top bar
+  const rereadUpdate = useCallback(() => {
+    getUpdateStatus()
+      .then((u) => {
+        setUpdate(u);
+        onUpdateChanged();
+      })
+      .catch(() => undefined);
+  }, [onUpdateChanged]);
 
   const show = (next: PageKey) => {
     setPage(next);
@@ -949,17 +960,35 @@ export function SettingsDialog({ now, links, onClose, onChanged, onUpdateChanged
                           <span className="settings-error">{update.error}</span>
                         </div>
                       )}
+                      {update?.available && (
+                        <div className="set-row">
+                          <UpdateActions update={update} onChanged={rereadUpdate}
+                            onOpenRelease={() => void openReleasePage()} />
+                        </div>
+                      )}
+                      <Row id="autoDownload" label={t.autoDownload} hint={t.autoDownloadHint}>
+                        <input
+                          type="checkbox"
+                          className="set-check"
+                          aria-label={t.autoDownload}
+                          checked={update?.autoDownload ?? true}
+                          disabled={!update?.enabled}
+                          onChange={(e) =>
+                            void setUpdateAutoDownload(e.target.checked)
+                              .then((u) => {
+                                setUpdate(u);
+                                onUpdateChanged();
+                              })
+                              .catch((err: unknown) => setUpdate((u) => (u ? { ...u, error: errorMessage(err) } : u)))
+                          }
+                        />
+                      </Row>
                       <div className="set-row set-row--actions">
                         <span className="set-row-hint">{t.versionHint}</span>
                         <span className="set-actions">
                           <button className="btn" disabled={checking} onClick={check}>
                             {checking ? t.versionChecking : t.versionCheck}
                           </button>
-                          {update?.available && (
-                            <button className="btn btn--primary" onClick={() => void openReleasePage()}>
-                              {t.versionDownload}
-                            </button>
-                          )}
                         </span>
                       </div>
                     </Group>

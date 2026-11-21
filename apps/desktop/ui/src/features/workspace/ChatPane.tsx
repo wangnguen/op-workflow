@@ -7,6 +7,7 @@ import {
   errorMessage,
   getSessionDiff,
   getSessionScripts,
+  getStepModels,
   hideSession,
   interruptSession,
   newSession,
@@ -15,9 +16,10 @@ import {
   openSessionRepo,
   sendToSession,
   setSessionMode,
+  setSessionModel,
   stopSession,
 } from "../../ipc/client";
-import type { AskAnswer, CommentView, RepoScript, TerminalKind, WorkspaceTask } from "../../ipc/types";
+import type { AgentCatalog, AskAnswer, CommentView, RepoScript, TerminalKind, WorkspaceTask } from "../../ipc/types";
 import { formatDateTime } from "../../shared/format";
 import { Markdown } from "../../shared/Markdown";
 import { Icon } from "../../shared/ui/Icon";
@@ -31,6 +33,7 @@ import type { Option } from "../settings/stepChoice";
 import { AskCard } from "./AskCard";
 import { type Focus, repoName, stepItemIndex } from "./chatState";
 import { AttachmentStrip, SuggestList, useAttachments, useSuggest } from "./ComposerExtras";
+import { BackgroundTasks } from "./BackgroundTasks";
 import { useSessionChat } from "./useSessionChat";
 import { WorkspaceSteps } from "./WorkspaceSteps";
 
@@ -75,13 +78,47 @@ interface Props {
 
 const reducedMotion = () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 
+/** The models Claude Code on this machine lists (read once; the backend caches the list). */
+let claudeModels: Promise<AgentCatalog | undefined> | undefined;
+function loadClaudeModels(): Promise<AgentCatalog | undefined> {
+  claudeModels ??= getStepModels(false)
+    .then((m) => m.claude)
+    .catch(() => {
+      claudeModels = undefined;
+      return undefined;
+    });
+  return claudeModels;
+}
+
+/** The model picker: the CLI's default first (named as it resolves), then what the CLI lists, and
+ *  the session's pick if the list no longer has it. */
+function modelChoices(catalog: AgentCatalog | undefined, pick: string): Option[] {
+  const out: Option[] = [{ value: "", label: t.modelCli(catalog?.defaultLabel), about: t.modelCliAbout }];
+  for (const m of catalog?.models ?? []) out.push({ value: m.id, label: m.label, about: m.description });
+  if (pick && !out.some((o) => o.value === pick)) {
+    out.push({ value: pick, label: catalog ? t.modelUnlisted(pick) : pick });
+  }
+  return out;
+}
+
 export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOpenTask, focus }: Props) {
   const { chat, error, reload, setSession } = useSessionChat(sessionId);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState<string>();
-  const [failure, setFailure] = useState<{ message: string; outside: boolean }>();
-  // a draft's mode, set on the session when the first message creates it ("" = the CLI's own)
+  // `outside`: the session looks open elsewhere (offer "Gõ tiếp ở đây"); `vscode`: it runs here
+  // (offer to stop it and open it in VS Code)
+  const [failure, setFailure] = useState<{ message: string; outside: boolean; vscode?: boolean }>();
+  // a draft's mode and model, set on the session when the first message creates it ("" = the CLI's own)
   const [draftMode, setDraftMode] = useState("");
+  const [draftModel, setDraftModel] = useState("");
+  const [catalog, setCatalog] = useState<AgentCatalog>();
+  useEffect(() => {
+    let alive = true;
+    void loadClaudeModels().then((c) => alive && setCatalog(c));
+    return () => {
+      alive = false;
+    };
+  }, []);
   const [view, setView] = useState<{ id?: string; tab: View }>();
   const tab = view?.id === sessionId ? (view?.tab ?? "chat") : "chat";
   const [shell, setShell] = useState<Shell>(savedShell);
@@ -115,6 +152,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
     if (shown.current !== undefined && shown.current !== sessionId) {
       setText("");
       setDraftMode("");
+      setDraftModel("");
       attach.clear();
       setScripts(undefined);
       setCommand(undefined);
@@ -179,7 +217,8 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
       await run();
       onChanged();
     } catch (e) {
-      setFailure({ message: errorMessage(e), outside: errorCode(e) === "session.outside" });
+      const code = errorCode(e);
+      setFailure({ message: errorMessage(e), outside: code === "session.outside", vscode: code === "session.running" });
     } finally {
       setBusy(undefined);
     }
@@ -196,6 +235,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
         const created = await newSession(task ? { wpId: task.wpId } : {});
         id = created.id;
         if (draftMode) await setSessionMode(id, draftMode);
+        if (draftModel) await setSessionModel(id, draftModel);
         onCreated(id);
       }
       const view = await sendToSession(id, message, force, images);
@@ -213,6 +253,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
     void act("terminal", async () => {
       const created = await newSession(task ? { wpId: task.wpId } : {});
       if (draftMode) await setSessionMode(created.id, draftMode);
+      if (draftModel) await setSessionModel(created.id, draftModel);
       setView({ id: created.id, tab: next });
       onCreated(created.id);
     });
@@ -294,9 +335,32 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
     ...(mode && !MODES.includes(mode) ? [{ value: mode, label: mode }] : []),
   ];
 
+  const model = session ? (session.modelPick ?? "") : draftModel;
+  const modelOptions = modelChoices(catalog, model);
+  const pickModel = (m: string | undefined) => {
+    const next = m || undefined;
+    if (draft) setDraftModel(next ?? "");
+    else if (session) void act("model", () => setSessionModel(session.id, next).then(setSession));
+  };
+
   const placeholder = outside ? t.placeholderOutside : running ? t.placeholderBusy : t.placeholder;
   // like the extension: while a turn runs and nothing is typed, the round button stops it
   const stopping = running && session !== undefined && !text.trim() && attach.images.length === 0;
+  // stop was asked and has not finished: the same button ends the process
+  const hardStop = stopping && session?.stopping === true;
+  const background = session?.live ? (session.background ?? []) : [];
+  // "Xem các bước" of a background subagent: its Agent call in the chat, its steps open, a glow
+  const showAgent = (toolUseId: string) => {
+    const el = list.current?.querySelector<HTMLElement>(`[data-tool-id="${CSS.escape(toolUseId)}"]`);
+    if (!el) return;
+    stick.current = false;
+    const sub = el.querySelector<HTMLDetailsElement>(".chat-sub");
+    if (sub) sub.open = true;
+    el.scrollIntoView({ block: "center", behavior: reducedMotion() ? "auto" : "smooth" });
+    el.classList.remove("is-target");
+    void el.offsetWidth;
+    el.classList.add("is-target");
+  };
   const pickSuggestion = (i: number) => {
     const next = suggest.apply(i);
     if (!next) return;
@@ -316,6 +380,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
             if (!sessionId) {
               const created = await newSession({ wpId: task.wpId });
               if (draftMode) await setSessionMode(created.id, draftMode);
+              if (draftModel) await setSessionModel(created.id, draftModel);
               onCreated(created.id);
             }
             setView(undefined);
@@ -513,7 +578,13 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
           {running && !terminal && !chat?.partial && asks.length === 0 && (
             <p className="ws-working faint">
               <StatusIcon state="running" />
-              {chat && chat.items.length > 0 ? t.writing : t.starting}
+              {session?.stopping
+                ? t.stopping
+                : background.length > 0
+                  ? `${t.background(background[0]?.description ?? "")}${background.length > 1 ? ` ${t.backgroundMore(background.length - 1)}` : ""}`
+                  : chat && chat.items.length > 0
+                    ? t.writing
+                    : t.starting}
             </p>
           )}
           {asks.map((a) => (
@@ -538,6 +609,12 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
               {failure.outside && (
                 <button className="btn btn--sm" title={t.forceHint} onClick={() => send(true)}>
                   {t.force}
+                </button>
+              )}
+              {failure.vscode && session && (
+                <button className="btn btn--sm" title={t.openVscodeForceHint} disabled={busy !== undefined}
+                  onClick={() => void act("vscode", () => openSessionInVscode(session.id, true))}>
+                  {t.openVscodeForce}
                 </button>
               )}
             </div>
@@ -589,20 +666,48 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
               }}
             />
             <div className="ws-box-bar">
-              <div className="ws-mode" title={t.modeHint}>
-                <span className="faint">{t.mode}</span>
-                <ModeSelect
-                  value={mode}
-                  options={modeOptions}
-                  label={t.mode}
-                  disabled={busy !== undefined || outside || (!draft && !session)}
-                  onChange={(m) => {
-                    if (draft) setDraftMode(m ?? "");
-                    else if (session && m) void act("mode", () => setSessionMode(session.id, m).then(setSession));
-                  }}
-                />
+              <div className="ws-box-pickers">
+                <div className="ws-mode" title={t.modeHint}>
+                  <span className="faint">{t.mode}</span>
+                  <ModeSelect
+                    value={mode}
+                    options={modeOptions}
+                    label={t.mode}
+                    disabled={busy !== undefined || outside || (!draft && !session)}
+                    onChange={(m) => {
+                      if (draft) setDraftMode(m ?? "");
+                      else if (session && m) void act("mode", () => setSessionMode(session.id, m).then(setSession));
+                    }}
+                  />
+                </div>
+                <div className="ws-mode" title={model ? t.modelHint : `${t.modelHint}\n${t.modelBackHint}`}>
+                  <span className="faint">{t.modelLabel}</span>
+                  <ModeSelect
+                    value={model}
+                    options={modelOptions}
+                    label={t.modelLabel}
+                    disabled={busy !== undefined || outside || (!draft && !session)}
+                    onChange={pickModel}
+                  />
+                </div>
               </div>
-              {stopping ? (
+              <div className="ws-box-end">
+              {session && (
+                <BackgroundTasks sessionId={session.id} tasks={background} disabled={busy !== undefined}
+                  onSession={setSession} onShowAgent={showAgent}
+                  onStopAll={() => void act("interrupt", () => interruptSession(session.id).then(reload))} />
+              )}
+              {hardStop ? (
+                <button
+                  className="ws-send ws-send--stop is-stopping"
+                  title={t.stopHardHint}
+                  aria-label={t.stopHard}
+                  disabled={busy !== undefined}
+                  onClick={() => session && void act("stop", () => stopSession(session.id).then(setSession))}
+                >
+                  <Icon name="stop" size={14} />
+                </button>
+              ) : stopping ? (
                 <button
                   className="ws-send ws-send--stop"
                   title={t.stopHint}
@@ -623,6 +728,7 @@ export function ChatPane({ sessionId, task, onCreated, onHidden, onChanged, onOp
                   <Icon name="arrowUp" size={15} />
                 </button>
               )}
+              </div>
             </div>
           </div>}
         </div>

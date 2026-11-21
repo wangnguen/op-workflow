@@ -8,7 +8,7 @@ import { SidePanel } from "../../shared/ui/SidePanel";
 import { StatusIcon } from "../../shared/ui/StatusIcon";
 import { DetailPanel } from "./DetailPanel";
 import { Legend } from "./Legend";
-import { HOME_VIEW, type MapSummary, OrbitScene, type ViewState } from "./OrbitScene";
+import { HOME_VIEW, OrbitScene, type ViewState } from "./OrbitScene";
 import { focusSystem, systemsOf } from "./focus";
 import { primaryAction, type Go } from "./primary";
 import { VIEW, clampZoom, planetDrift, topLeftFuelLabelX } from "./geometry";
@@ -37,8 +37,6 @@ interface Props {
   onGo?: (go: Go) => void;
   /** task ids whose session waits for an answer: their gate leads to the question */
   waiting?: ReadonlySet<string>;
-  /** the sun in the centre while no task is in progress */
-  summary?: MapSummary;
 }
 
 const NONE: ReadonlySet<string> = new Set();
@@ -81,7 +79,6 @@ export function OrbitView({
   paused = false,
   onGo,
   waiting = NONE,
-  summary,
 }: Props) {
   const [picked, setPicked] = useState<Selection | null>(null);
   // several tasks can be in progress; the picked one sits in the centre
@@ -121,7 +118,6 @@ export function OrbitView({
           layout={layout.overrides}
           onMoveItem={layout.move}
           rot={rot}
-          summary={summary}
         />
 
         {/* wraps before the "Claude Tuần" gauge label (map units → px in orbit.css) */}

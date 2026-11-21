@@ -1,8 +1,6 @@
 import { useState } from "react";
-import { vi } from "../../../i18n/vi";
 import type { InboxItem } from "../../../ipc/types";
-import { formatTokens, formatUsd } from "../../../shared/format";
-import type { ItemDragStart, MapSummary } from "../OrbitScene";
+import type { ItemDragStart } from "../OrbitScene";
 import { nebulaLayout, type Point } from "../geometry";
 import type { LayoutOverrides } from "../useLayout";
 import { nebulaTone } from "../nebulaTone";
@@ -11,8 +9,6 @@ import { textUnits, truncate, wrapText } from "./text";
 
 interface Props {
   inbox: InboxItem[];
-  /** what the sun in the centre shows */
-  summary: MapSummary | undefined;
   selectedTaskId: string | undefined;
   onSelect: (taskId: string) => void;
   layout: LayoutOverrides;
@@ -28,7 +24,6 @@ const MIN_TEXT_SCALE = 0.85;
 const CHAR_W = 6.3;
 /** The bold card title runs a little wider. */
 const TITLE_CHAR_W = 6.8;
-const sun = vi.orbit.sun;
 /** Full-title card shown on hover. */
 const CARD_LINE_CHARS = 38;
 const CARD_LINE_H = 15;
@@ -60,36 +55,8 @@ function TextCard({ at, title, lines }: { at: Point; title?: string; lines: stri
   );
 }
 
-/** The centre while no task is in progress: a sun with what goes on now (sessions running,
- *  waiting for you, today's spend). */
-function IdleCore({ summary }: { summary: MapSummary | undefined }) {
-  const running = summary?.running ?? 0;
-  const waiting = summary?.waiting ?? 0;
-  const today = summary?.today;
-  const money = today ? sun.today(formatUsd(today.costUsd), formatTokens(today.tokens)) : undefined;
-  return (
-    <g className={`idle-core${running > 0 ? " is-busy" : ""}`}>
-      <title>{sun.title(running, waiting, today ? formatUsd(today.costUsd) : undefined, today ? formatTokens(today.tokens) : undefined)}</title>
-      <circle r={70} className="idle-slot" />
-      <circle r={60} className="idle-glow" />
-      <circle r={52} className="idle-sun" />
-      <text y={money ? -11 : -4} className="idle-line idle-line--main">
-        {sun.running(running)}
-      </text>
-      <text y={money ? 8 : 15} className={`idle-line${waiting > 0 ? " idle-line--waiting" : ""}`}>
-        {sun.waiting(waiting)}
-      </text>
-      {money && (
-        <text y={27} className="idle-line idle-line--faint">
-          {money}
-        </text>
-      )}
-    </g>
-  );
-}
-
 /** No active task: inbox tasks drift as dim nebulae waiting to ignite. Drag to rearrange. */
-export function Nebulae({ inbox, summary, selectedTaskId, onSelect, layout, onDragStart }: Props) {
+export function Nebulae({ inbox, selectedTaskId, onSelect, layout, onDragStart }: Props) {
   const [hovered, setHovered] = useState<string | null>(null);
   const spots = nebulaLayout(inbox.length);
   const place = (i: number, taskId: string) => {
@@ -119,7 +86,6 @@ export function Nebulae({ inbox, summary, selectedTaskId, onSelect, layout, onDr
           );
         })}
       </defs>
-      <IdleCore summary={summary} />
       {inbox.map((item, i) => {
         const at = place(i, item.taskId);
         if (!at) return null;

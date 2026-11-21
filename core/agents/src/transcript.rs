@@ -60,6 +60,12 @@ pub struct Item {
     pub failed: bool,
     /// Why the CLI refused the call (not on the allow list, …).
     pub denied: Option<String>,
+    /// What a subagent did under this Agent / Task call (its tool calls and messages).
+    pub children: Vec<Item>,
+    /// A subagent of this call still runs (in the background: the call itself already returned).
+    pub running: bool,
+    /// The tool call's id (`tool_use` id), for a tool item.
+    pub tool_id: Option<String>,
 }
 
 impl Item {
@@ -73,6 +79,9 @@ impl Item {
             output_cut: 0,
             failed: false,
             denied: None,
+            children: Vec::new(),
+            running: false,
+            tool_id: None,
         }
     }
 

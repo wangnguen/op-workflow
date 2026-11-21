@@ -380,10 +380,15 @@
   margin-bottom: -4px;
   scroll-margin-top: 12px;
 }
-/* where another screen sent you (a step's message, the question): a short glow */
+/* where another screen sent you (a step's message, the question, a background subagent): a
+   short glow */
 .ws-step-label.is-target,
-.ask.is-target {
+.ask.is-target,
+.chat-tool.is-target {
   animation: ws-target 1.8s var(--ease-out);
+}
+.chat-tool.is-target {
+  border-radius: var(--radius-sm);
 }
 @keyframes ws-target {
   0%,
@@ -695,6 +700,14 @@
   gap: 8px;
   padding: 2px 6px 6px 14px;
 }
+/* Quyền and Model side by side on the left of the bar; they wrap before pushing the button */
+.ws-box-pickers {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 12px;
+  min-width: 0;
+}
 .ws-mode {
   display: inline-flex;
   align-items: center;
@@ -750,6 +763,11 @@
 }
 .ws-send--stop .icon rect {
   fill: currentColor;
+}
+/* stop was asked and has not finished: the button now ends the process */
+.ws-send--stop.is-stopping {
+  background: var(--st-failed-soft);
+  color: var(--st-failed);
 }
 .ws-repos {
   max-height: 320px;
@@ -904,4 +922,122 @@
 
 .ws-brief-text {
   overflow-wrap: anywhere;
+}
+
+/* ---------- background tasks: the chip by the send button and its list ---------- */
+.ws-box-end {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+.ws-bg {
+  position: relative;
+}
+.ws-bg-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 13px;
+  background: var(--st-running-soft);
+  color: var(--st-running);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.ws-bg-chip:hover,
+.ws-bg-chip.is-open {
+  background: color-mix(in srgb, var(--st-running) 26%, transparent);
+}
+/* opens upward: the composer sits at the bottom of the window */
+.ws-bg-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(440px, 80vw);
+  max-height: min(520px, 70vh);
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--overlay);
+  box-shadow: var(--shadow-pop);
+  animation: sheet-in var(--dur-base) var(--ease-out);
+  transform-origin: bottom right;
+}
+.ws-bg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.ws-bg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.ws-bg-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--fill);
+}
+.ws-bg-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.ws-bg-kind {
+  flex: none;
+}
+.ws-bg-kind--agent {
+  color: var(--claude);
+}
+.ws-bg-what {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-bg-time {
+  flex: none;
+  font-size: 11.5px;
+}
+.ws-bg-activity,
+.ws-bg-empty {
+  margin: 0;
+  font-size: 11.5px;
+}
+.ws-bg-actions {
+  display: flex;
+  gap: 6px;
+}
+.ws-bg-out {
+  max-height: 220px;
+  margin: 2px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
 }

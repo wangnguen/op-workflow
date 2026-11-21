@@ -3,6 +3,7 @@ import type { ProviderLink, QuotaSnapshot, UpdateView } from "../ipc/types";
 import { QuotaGauges } from "../features/quota/QuotaGauges";
 import { OPEN_QUOTA_EVENT } from "../features/quota/quota";
 import { AlertBell } from "./AlertBell";
+import { UpdateChip } from "./UpdateChip";
 import { WindowControls } from "./WindowControls";
 
 export type Tab = "task" | "workspace" | "sessions";
@@ -24,6 +25,8 @@ interface Props {
   onRefresh: () => void;
   onSettings: () => void;
   onOpenRelease: () => void;
+  /** read the update state again (download progress) */
+  onUpdateChanged: () => void;
   /** the window has no frame: the bar carries its buttons and drags it */
   frameless: boolean;
 }
@@ -63,6 +66,7 @@ export function TopBar({
   onRefresh,
   onSettings,
   onOpenRelease,
+  onUpdateChanged,
   frameless,
 }: Props) {
   return (
@@ -101,12 +105,7 @@ export function TopBar({
       <div className="topbar-spacer" />
 
       {update?.available && update.latest && (
-        <button className="chip chip--update" title={vi.topbar.updateHint} onClick={onOpenRelease}>
-          <svg viewBox="0 0 24 24" width={12} height={12} aria-hidden="true">
-            <path d="M12 4v11M7 10l5 5 5-5M5 20h14" className="icon-stroke" />
-          </svg>
-          {vi.topbar.update(update.latest)}
-        </button>
+        <UpdateChip update={update} onChanged={onUpdateChanged} onOpenRelease={onOpenRelease} />
       )}
       {demo && (
         <span className="chip chip--demo" title={vi.app.demoHint}>

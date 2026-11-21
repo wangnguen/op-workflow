@@ -65,8 +65,12 @@ pub struct SessionView {
     /// Permission mode in effect (as the CLI reported it), else the one chosen for the next start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// The model the CLI reported it runs with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The model picked in the chat for this session; `None` = the CLI's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_pick: Option<String>,
     pub cost_usd: f64,
     /// The session has a transcript (a message was sent at least once).
     #[serde(default)]
@@ -83,6 +87,54 @@ pub struct SessionView {
     /// A copy of another conversation that has not run yet: the id it was copied from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_of: Option<String>,
+    /// The running CLI's background tasks (subagents, commands run in the background), while
+    /// they run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background: Vec<BackgroundTask>,
+    /// Stop was asked; the turn or the background tasks are ending.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopping: bool,
+}
+
+/// One background task of a session's CLI, as its `system` events describe it
+/// (`background_tasks_changed`, `task_started`, `task_progress`; CLI 2.1.329).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTask {
+    /// The CLI's task id (what `stop_task` takes).
+    pub id: String,
+    /// `agent` (a subagent), `bash` (a command run in the background) or the CLI's own name.
+    pub kind: String,
+    pub description: String,
+    /// The tool call that started it (an Agent call shows its steps in the chat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    /// When the app saw it start (RFC 3339).
+    pub started_at: String,
+    /// What it does now (the CLI's progress line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_uses: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    /// Stop was asked for this one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopping: bool,
+}
+
+/// The end of what a background task wrote (`tasks/<id>.output` of the session; commands run
+/// in the background write there, subagents leave it empty).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskOutput {
+    pub text: String,
+    /// Bytes left out at the start.
+    #[serde(default)]
+    pub cut: u64,
+    /// The file, when it was found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 /// A task in progress, shown in the tree even before it has a session.

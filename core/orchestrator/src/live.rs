@@ -124,15 +124,38 @@ impl LiveState {
     }
 
     /// Keep the newest Claude reading: probes, the steps' own events and Claude Code's cache
-    /// arrive out of order. `false` when `snap` is not newer than the one kept.
-    pub fn put_claude(&mut self, snap: QuotaSnapshot) -> bool {
-        let newer = self.claude.as_ref().is_none_or(|old| {
-            opw_quota::seconds_between(&old.observed_at, &snap.observed_at).is_none_or(|s| s > 0.0)
-        });
-        if newer {
+    /// arrive out of order. A reading often carries one window only (a `rate_limit_event`
+    /// without `unifiedWindows` names just the window nearest its limit), so a window it lacks
+    /// is kept from the reading before, and an older reading still fills a window the kept one
+    /// lacks. `false` when nothing changed.
+    pub fn put_claude(&mut self, mut snap: QuotaSnapshot) -> bool {
+        let Some(old) = self.claude.as_mut() else {
+            sort_windows(&mut snap);
             self.claude = Some(snap);
+            return true;
+        };
+        let newer = opw_quota::seconds_between(&old.observed_at, &snap.observed_at).is_none_or(|s| s > 0.0);
+        if newer {
+            for w in &old.windows {
+                if !snap.windows.iter().any(|n| n.kind == w.kind) {
+                    snap.windows.push(w.clone());
+                }
+            }
+            sort_windows(&mut snap);
+            *old = snap;
+            return true;
         }
-        newer
+        let missing: Vec<_> = snap
+            .windows
+            .into_iter()
+            .filter(|w| !old.windows.iter().any(|o| o.kind == w.kind))
+            .collect();
+        if missing.is_empty() {
+            return false;
+        }
+        old.windows.extend(missing);
+        sort_windows(old);
+        true
     }
 
     fn link_mut(&mut self, provider: Provider) -> &mut Option<ProviderLink> {
@@ -141,6 +164,12 @@ impl LiveState {
             Provider::Codex => &mut self.codex_link,
         }
     }
+}
+
+/// The 5-hour window first, then the weekly one.
+fn sort_windows(snap: &mut QuotaSnapshot) {
+    snap.windows
+        .sort_by_key(|w| matches!(w.kind, opw_domain::view::QuotaWindowKind::SevenDay));
 }
 
 impl std::fmt::Debug for LiveState {
@@ -951,8 +980,7 @@ fn probe_round(state: &Mutex<LiveState>, settings: &LiveSettings, idle: Duration
     match cli::find_claude() {
         Some(exe) => match probe_claude(&exe, settings) {
             Ok(Some(snap)) => {
-                let old = state.lock().ok().and_then(|s| s.claude.clone());
-                put_claude(state, keep_other_windows(snap, old.as_ref()));
+                put_claude(state, snap);
                 set_link(state, Provider::Claude, LinkStatus::Ok, None);
                 true
             }
@@ -1102,16 +1130,6 @@ fn limit_reached(text: &str, observed_at: &str) -> Option<QuotaSnapshot> {
     })
 }
 
-/// A reading with one window (a refused probe) keeps the other window of the last reading.
-fn keep_other_windows(mut snap: QuotaSnapshot, old: Option<&QuotaSnapshot>) -> QuotaSnapshot {
-    for w in old.map(|o| o.windows.as_slice()).unwrap_or_default() {
-        if !snap.windows.iter().any(|n| n.kind == w.kind) {
-            snap.windows.push(w.clone());
-        }
-    }
-    snap
-}
-
 /// The Claude reading says a window is full until a time still ahead: probing before then
 /// only gets refused again.
 fn full_until_reset(snap: Option<&QuotaSnapshot>, now: &str) -> bool {
@@ -1143,16 +1161,18 @@ mod tests {
         let week = limit_reached("You've hit your weekly limit", at).unwrap();
         assert_eq!(week.windows[0].kind, opw_domain::view::QuotaWindowKind::SevenDay);
         // the other window of the last reading stays
-        let old = QuotaSnapshot {
+        let mut s = LiveState::default();
+        s.put_claude(QuotaSnapshot {
             windows: vec![opw_domain::view::QuotaWindow {
                 kind: opw_domain::view::QuotaWindowKind::SevenDay,
                 used_pct: 40.0,
                 resets_at: None,
             }],
+            observed_at: "2026-11-21T00:00:00Z".into(),
             ..snap.clone()
-        };
-        let merged = keep_other_windows(snap, Some(&old));
-        assert_eq!(merged.windows.len(), 2);
+        });
+        s.put_claude(snap);
+        assert_eq!(s.claude.unwrap().windows.len(), 2);
         let text = result_text(
             &json!({"type":"result","is_error":true,"errors":["Claude AI usage limit reached|1794568800"]}),
         );
@@ -1223,6 +1243,54 @@ mod tests {
         assert!(!s.put_claude(claude_at("2026-11-17T03:40:00Z", 27.0)));
         assert!(s.put_claude(claude_at("2026-11-17T03:40:00.25Z", 30.0)));
         assert!((s.claude.unwrap().windows[0].used_pct - 30.0).abs() < 1e-9);
+    }
+
+    /// The 2026-11-21 bug: a `rate_limit_event` naming only the weekly window left "Claude 5h ?"
+    /// although the 5-hour number was known.
+    #[test]
+    fn a_reading_with_one_window_keeps_the_other() {
+        use opw_domain::view::{QuotaWindow, QuotaWindowKind};
+        let week = |at: &str, used: f64| QuotaSnapshot {
+            windows: vec![QuotaWindow {
+                kind: QuotaWindowKind::SevenDay,
+                used_pct: used,
+                resets_at: None,
+            }],
+            ..claude_at(at, 0.0)
+        };
+        let mut s = LiveState::default();
+        assert!(s.put_claude(claude_at("2026-11-21T04:00:00Z", 2.0)));
+        assert!(s.put_claude(week("2026-11-21T04:05:00Z", 95.0)));
+        let kinds = |s: &LiveState| {
+            s.claude
+                .as_ref()
+                .unwrap()
+                .windows
+                .iter()
+                .map(|w| (w.kind, w.used_pct))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(&s),
+            [
+                (QuotaWindowKind::FiveHour, 2.0),
+                (QuotaWindowKind::SevenDay, 95.0)
+            ]
+        );
+        // only the weekly number known; an older reading (Claude Code's cache) brings the 5-hour one
+        let mut s = LiveState::default();
+        s.put_claude(week("2026-11-21T04:05:00Z", 95.0));
+        assert!(s.put_claude(claude_at("2026-11-21T03:50:00Z", 7.0)));
+        assert_eq!(
+            kinds(&s),
+            [
+                (QuotaWindowKind::FiveHour, 7.0),
+                (QuotaWindowKind::SevenDay, 95.0)
+            ]
+        );
+        assert_eq!(s.claude.as_ref().unwrap().observed_at, "2026-11-21T04:05:00Z");
+        // nothing new in an older reading: unchanged
+        assert!(!s.put_claude(claude_at("2026-11-21T03:00:00Z", 1.0)));
     }
 
     #[test]

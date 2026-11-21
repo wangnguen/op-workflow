@@ -628,54 +628,6 @@
 
 /* ---------- nebulae (idle) ---------- */
 
-.idle-slot {
-  fill: none;
-  stroke: color-mix(in srgb, var(--hue-orange) 18%, transparent);
-  stroke-width: 1;
-  stroke-dasharray: 2 6;
-}
-.idle-glow {
-  fill: color-mix(in srgb, var(--hue-orange) 10%, transparent);
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: breathe 5s ease-in-out infinite;
-}
-.idle-ember {
-  fill: color-mix(in srgb, var(--hue-orange) 45%, var(--text));
-  opacity: 0.75;
-}
-/* the sun: warm, brighter while something runs; its lines say what goes on */
-.idle-sun {
-  fill: color-mix(in srgb, var(--hue-orange) 16%, var(--space-0));
-  stroke: color-mix(in srgb, var(--hue-orange) 40%, transparent);
-  stroke-width: 1;
-  transition: fill var(--dur-base) var(--ease-out);
-}
-.idle-core.is-busy .idle-sun {
-  fill: color-mix(in srgb, var(--hue-orange) 28%, var(--space-0));
-}
-.idle-core.is-busy .idle-glow {
-  fill: color-mix(in srgb, var(--hue-orange) 18%, transparent);
-}
-.idle-line {
-  fill: var(--text-dim);
-  font-size: 13px;
-  text-anchor: middle;
-  pointer-events: none;
-}
-.idle-line--main {
-  fill: var(--text);
-  font-size: 15px;
-  font-weight: 600;
-}
-.idle-line--waiting {
-  fill: var(--st-waiting);
-  font-weight: 600;
-}
-.idle-line--faint {
-  fill: var(--text-faint);
-  font-size: 12px;
-}
 /* Map text gets a dark halo so it stays readable over clouds, rings and arcs. */
 .nebula-id,
 .nebula-title,
@@ -735,6 +687,10 @@
 }
 .far.agent-codex .far-body {
   fill: var(--codex);
+}
+/* the app's own session without a task: the accent colour, apart from those opened outside */
+.far.is-own:not(.far--waiting) .far-body {
+  fill: var(--accent);
 }
 .far--idle .far-body {
   opacity: 0.45;

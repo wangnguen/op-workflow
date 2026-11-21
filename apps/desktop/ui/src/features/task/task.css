@@ -725,6 +725,39 @@
   white-space: nowrap;
   vertical-align: bottom;
 }
+/* a subagent under its Agent call: folded, the count and its last step in the summary */
+.chat-tool-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--st-running);
+}
+.chat-sub summary {
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+.chat-sub-last {
+  display: inline-block;
+  max-width: 60ch;
+  margin-left: 8px;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.chat-sub-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 420px;
+  margin-top: 6px;
+  padding: 6px 4px 6px 10px;
+  border-left: 1px dashed var(--line);
+  overflow-y: auto;
+  animation: tab-in var(--dur-base) var(--ease-out);
+}
 .chat-tool-pre {
   max-height: 280px;
   margin: 4px 0 0;

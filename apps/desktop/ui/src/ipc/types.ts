@@ -632,6 +632,24 @@ export interface UpdateView {
   publishedAt?: string;
   checkedAt?: string;
   error?: string;
+  /** the newer release has an installer and its checksums: the app can download and run it */
+  canInstall: boolean;
+  /** a newer version's installer is downloaded as soon as it is found (Settings → Giới thiệu) */
+  autoDownload: boolean;
+  /** the newer release's installer, downloaded in the background */
+  download?: UpdateDownload;
+}
+
+export type DownloadState = "downloading" | "ready" | "failed";
+export interface UpdateDownload {
+  version: string;
+  state: DownloadState;
+  /** bytes so far */
+  done: number;
+  total?: number;
+  error?: string;
+  /** where the checked installer is (the Downloads folder) */
+  file?: string;
 }
 
 // ---------- orbit ----------
@@ -748,6 +766,8 @@ export interface DistantSession {
   cwd?: string;
   /** where it is open: VS Code, terminal, … */
   openIn?: string;
+  /** one of the app's own sessions without a task (Workspace → Phiên riêng) */
+  own?: boolean;
 }
 
 export interface OrbitSnapshot {
@@ -900,6 +920,12 @@ export interface ChatItem {
   failed?: boolean;
   /** why the CLI refused the call */
   denied?: string;
+  /** what a subagent did under this Agent / Task call, oldest first */
+  children?: ChatItem[];
+  /** a subagent of this call still runs in the background */
+  running?: boolean;
+  /** the tool call's id, so the chat can land on it */
+  toolId?: string;
 }
 
 /** The Chat tab: the transcript of one step run. */
@@ -1126,7 +1152,10 @@ export interface SessionView {
   outside?: string;
   /** permission mode in effect, else the one chosen for the next start */
   mode?: string;
+  /** the model the CLI reported it runs with */
   model?: string;
+  /** the model picked in the chat; absent = the CLI's default */
+  modelPick?: string;
   costUsd: number;
   /** it has a transcript (a message was sent at least once) */
   started: boolean;
@@ -1138,6 +1167,36 @@ export interface SessionView {
   activity?: string;
   /** a copy that has not run yet: the conversation it was copied from */
   forkOf?: string;
+  /** the running CLI's background tasks (subagents, commands run in the background) */
+  background?: BackgroundTask[];
+  /** stop was asked; the turn or the background tasks are ending */
+  stopping?: boolean;
+}
+
+/** One background task of a session's CLI. */
+export interface BackgroundTask {
+  /** the CLI's task id (what Dừng stops) */
+  id: string;
+  /** "agent" (a subagent), "bash" (a command run in the background) or the CLI's own name */
+  kind: string;
+  description: string;
+  /** the tool call that started it (an Agent call shows its steps in the chat) */
+  toolUseId?: string;
+  startedAt: string;
+  /** what it does now */
+  activity?: string;
+  toolUses?: number;
+  tokens?: number;
+  /** stop was asked for this one */
+  stopping?: boolean;
+}
+
+/** The end of what a background task wrote (a command's output). */
+export interface TaskOutput {
+  text: string;
+  /** bytes left out at the start */
+  cut: number;
+  file?: string;
 }
 
 export type TerminalKind = "claude" | "powerShell" | "gitBash";
@@ -1328,6 +1387,9 @@ export interface Commands {
   open_brief: null;
   update_status: UpdateView;
   check_update: UpdateView;
+  download_update: UpdateView;
+  install_update: null;
+  set_update_auto_download: UpdateView;
   open_release_page: null;
   reconnect_quota: null;
   open_login: null;
@@ -1375,6 +1437,9 @@ export interface Commands {
   session_answer: SessionView;
   session_interrupt: null;
   session_set_mode: SessionView;
+  session_set_model: SessionView;
+  session_stop_task: SessionView;
+  session_task_output: TaskOutput;
   session_stop: SessionView;
   session_open_vscode: null;
   session_hide: null;
@@ -1447,8 +1512,13 @@ export interface CommandArgs {
   session_answer: { id: string; askId: string; answer: AskAnswer };
   session_interrupt: { id: string };
   session_set_mode: { id: string; mode: string };
+  session_set_model: { id: string; model: string | null };
+  session_stop_task: { id: string; taskId: string };
+  session_task_output: { id: string; taskId: string };
+  install_update: { force: boolean };
+  set_update_auto_download: { on: boolean };
   session_stop: { id: string };
-  session_open_vscode: { id: string };
+  session_open_vscode: { id: string; force: boolean };
   session_hide: { id: string };
   session_diff: { id: string };
   session_open_file: { id: string; path: string; line?: number };

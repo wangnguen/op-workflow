@@ -15,7 +15,8 @@ interface Props {
 
 const SPARKLE = "M 0 -8 L 1.8 -1.8 L 8 0 L 1.8 1.8 L 0 8 L -1.8 1.8 L -8 0 L -1.8 -1.8 Z";
 
-/** Sessions opened outside the app, as small far-away stars at the edge. Drag to rearrange. */
+/** The app's sessions without a task and those opened outside the app, as small far-away stars
+ *  at the edge. Drag to rearrange. */
 export function DistantStars({ sessions, selectedId, onSelect, layout, onDragStart }: Props) {
   const spots = distantPositions(sessions.length);
   return (
@@ -30,9 +31,9 @@ export function DistantStars({ sessions, selectedId, onSelect, layout, onDragSta
           <g
             key={s.id}
             transform={`translate(${p.x} ${p.y})`}
-            className={`far agent-${s.agent} far--${s.status}${selected ? " is-selected" : ""}`}
+            className={`far agent-${s.agent} far--${s.status}${s.own ? " is-own" : ""}${selected ? " is-selected" : ""}`}
             onPointerDown={onDragStart(key, p)}
-            {...interactive(`${s.label} · ${vi.sessions.outside}`, () => onSelect(s.id), selected)}
+            {...interactive(`${s.label} · ${s.own ? vi.orbit.panel.own : vi.sessions.outside}`, () => onSelect(s.id), selected)}
           >
             <circle r={14} className="far-hit" />
             <path d={SPARKLE} className="far-body" />
@@ -41,7 +42,7 @@ export function DistantStars({ sessions, selectedId, onSelect, layout, onDragSta
               {s.label}
             </text>
             <text y={37} className="far-sub">
-              {agentLabel[s.agent]} · {sessionStatusLabel[s.status]}
+              {s.own ? vi.orbit.ownStar : agentLabel[s.agent]} · {sessionStatusLabel[s.status]}
             </text>
           </g>
         );

@@ -2461,6 +2461,9 @@ pub(crate) fn chat_item(i: transcript::Item) -> ChatItem {
         output_cut: u32::try_from(i.output_cut).unwrap_or(u32::MAX),
         failed: i.failed,
         denied: i.denied,
+        children: i.children.into_iter().map(chat_item).collect(),
+        running: i.running,
+        tool_id: i.tool_id,
     }
 }
 

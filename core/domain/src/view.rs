@@ -1013,6 +1013,40 @@ pub struct UpdateView {
     pub checked_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The newer release has an installer and its checksums: the app can download and run it.
+    #[serde(default)]
+    pub can_install: bool,
+    /// A newer version's installer is downloaded as soon as it is found.
+    #[serde(default)]
+    pub auto_download: bool,
+    /// The newer release's installer, downloaded in the background.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download: Option<UpdateDownload>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DownloadState {
+    Downloading,
+    /// Downloaded and checked against the release's SHA256SUMS.txt.
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDownload {
+    pub version: String,
+    pub state: DownloadState,
+    /// Bytes so far.
+    pub done: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Where the checked installer is (the Downloads folder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 // ---------- orbit ----------
@@ -1435,6 +1469,15 @@ pub struct ChatItem {
     /// Why the CLI refused the call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub denied: Option<String>,
+    /// What a subagent did under this Agent / Task call, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ChatItem>,
+    /// A subagent of this call still runs in the background.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub running: bool,
+    /// The tool call's id, so the chat can land on it (a background task names it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -1766,6 +1809,10 @@ pub struct DistantSession {
     /// Where it is open: VS Code, terminal, …
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub open_in: String,
+    /// One of the app's own sessions without a task (Workspace → Phiên riêng), not one opened
+    /// outside the app.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

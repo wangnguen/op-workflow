@@ -69,6 +69,9 @@ export function primaryAction(sel: Selection | null, s: OrbitSnapshot, waiting: 
     case "nebula":
       return { label: vi.board.start, hint: t.startHint, go: { to: "start", taskId: sel.taskId } };
     case "distant":
-      return { label: t.goOutside, hint: t.goOutsideHint, go: { to: "outside", id: sel.id } };
+      // the app's own session without a task opens as usual; one opened outside is read only
+      return s.distant.find((d) => d.id === sel.id)?.own
+        ? { label: t.goSession, hint: t.goOwnHint, go: { to: "chat", sessionId: sel.id } }
+        : { label: t.goOutside, hint: t.goOutsideHint, go: { to: "outside", id: sel.id } };
   }
 }

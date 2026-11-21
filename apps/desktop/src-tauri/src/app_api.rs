@@ -31,6 +31,32 @@ pub fn check_update(service: State<'_, AppService>) -> UpdateView {
     service.check_update()
 }
 
+/// Download the newer version's installer now (again after a failure), in the background.
+#[tauri::command]
+pub fn download_update(service: State<'_, AppService>) -> UpdateView {
+    service.download_update()
+}
+
+/// "Cài bản mới": start the checked installer (it closes the app, installs without questions and
+/// opens the app again), then quit the way "Thoát hẳn" does. `force` = install although AI work
+/// runs (the UI asked).
+#[tauri::command]
+pub fn install_update(
+    app: AppHandle,
+    service: State<'_, AppService>,
+    force: Option<bool>,
+) -> Result<(), ApiError> {
+    service.install_update(force.unwrap_or(false))?;
+    crate::window_api::quit(&app);
+    Ok(())
+}
+
+/// Settings → Giới thiệu → "Tự tải bản mới".
+#[tauri::command(async)]
+pub fn set_update_auto_download(service: State<'_, AppService>, on: bool) -> Result<UpdateView, ApiError> {
+    service.set_update_auto_download(on)
+}
+
 /// Open the newest release page of the app in the default browser.
 #[tauri::command]
 pub fn open_release_page(service: State<'_, AppService>) -> Result<(), ApiError> {

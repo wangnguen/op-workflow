@@ -12,6 +12,7 @@ import type {
   SessionChat,
   SessionPatch,
   SessionView,
+  TaskOutput,
   WorkspaceSnapshot,
   WorkspaceTask,
 } from "./types";
@@ -84,6 +85,20 @@ add(
     model: "claude-opus-5-5",
     mode: "default",
     updatedAt: iso(4),
+    // `?bg`: a subagent and a dev server still running in the background
+    ...(typeof location !== "undefined" && new URLSearchParams(location.search).has("bg")
+      ? {
+          live: true,
+          state: "running" as const,
+          background: [
+            {
+              id: "a7f3", kind: "agent", description: "Tìm mọi chỗ lọc đơn hàng theo tổ chức", toolUseId: "toolu_mock_agent",
+              startedAt: iso(3), activity: "Đọc src/orders/order.repository.ts", toolUses: 2, tokens: 18_400,
+            },
+            { id: "b2k9", kind: "bash", description: "npm run dev", startedAt: iso(12) },
+          ],
+        }
+      : {}),
   }),
   [
     {
@@ -93,6 +108,18 @@ add(
     },
     { kind: "text", text: "Mình đọc brief trước, rồi tìm chỗ lọc đơn hàng theo tổ chức." },
     { kind: "tool", tool: "Read", text: "brief.md", output: "# [WP-187716] Đơn hàng không hiện…" },
+    {
+      kind: "tool",
+      tool: "Agent",
+      toolId: "toolu_mock_agent",
+      text: "Tìm mọi chỗ lọc đơn hàng theo tổ chức",
+      output: "Chỉ có một chỗ lọc theo orgId: src/orders/order.repository.ts:42 (findForUser).",
+      children: [
+        { kind: "tool", tool: "Grep", text: "orgId  ·  src", output: "src/orders/order.repository.ts:42\nsrc/users/user.service.ts:18" },
+        { kind: "tool", tool: "Read", text: "src/orders/order.repository.ts", output: "export async function findForUser(user) {…" },
+        { kind: "text", text: "Chỉ `findForUser` lọc theo `orgId`; `user.service.ts` chỉ đọc nó." },
+      ],
+    },
     { kind: "tool", tool: "Grep", text: "orgId  ·  src/orders", output: "src/orders/order.repository.ts:42" },
     {
       kind: "text",
@@ -527,10 +554,42 @@ export function mockSessionStop(id: string): SessionView {
   return structuredClone(s.view);
 }
 
-export function mockSessionOpenVscode(id: string): null {
+export function mockSessionStopTask(id: string, taskId: string): SessionView {
   const s = get(id);
-  s.view = { ...s.view, live: false, state: "outside", outside: "VS Code" };
+  s.view = { ...s.view, background: (s.view.background ?? []).filter((b) => b.id !== taskId) };
+  if (s.view.background?.length === 0 && s.view.state === "running") s.view = { ...s.view, state: "idle" };
   push(s, s.items.length);
+  return structuredClone(s.view);
+}
+
+export function mockTaskOutput(_id: string, taskId: string): TaskOutput {
+  const lines = Array.from({ length: 6 + Math.floor((Date.now() / 1000) % 20) }, (_, i) => `  ✓ ${taskId} kiểm thử ${i + 1}`);
+  return { text: ["> vite --port 5174", "", "  VITE v7.1  ready in 412 ms", "  ➜  Local: http://localhost:5174/", ...lines].join("\n"), cut: 0 };
+}
+
+export function mockSessionSetModel(id: string, model: string | undefined): SessionView {
+  const s = get(id);
+  s.view = { ...s.view, modelPick: model };
+  push(s, s.items.length);
+  return structuredClone(s.view);
+}
+
+export function mockSessionOpenVscode(id: string, force = false): null {
+  const s = get(id);
+  if (!force && (s.view.state === "running" || s.view.state === "waiting")) {
+    throw {
+      code: "session.running",
+      message:
+        "Phiên đang chạy trong app. Mở trong VS Code sẽ dừng lượt đang chạy (cả subagent chạy nền) ở đây; VS Code chạy tiếp từ chỗ đã lưu.",
+    };
+  }
+  if (force) mockSessionInterrupt(id);
+  s.items.push({
+    kind: "note",
+    text: "Đã chuyển phiên sang VS Code. Từ giờ phiên chạy ở đó, app chỉ hiện lại hội thoại. Đóng phiên ở VS Code rồi gõ tiếp ở đây để chạy lại trong app.",
+  });
+  s.view = { ...s.view, live: false, state: "outside", outside: "VS Code" };
+  push(s, s.items.length - 1);
   return null;
 }
 

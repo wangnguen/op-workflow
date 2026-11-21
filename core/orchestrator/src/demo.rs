@@ -338,6 +338,7 @@ pub fn orbit(tick: u64) -> OrbitSnapshot {
             title: "Sửa lỗi build trên Windows".into(),
             cwd: r"C:\code\acme-desktop".into(),
             open_in: "VS Code".into(),
+            own: false,
         }],
         quota: quota(),
         notice: None,

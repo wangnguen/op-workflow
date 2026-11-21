@@ -295,7 +295,7 @@ export function DetailPanel({ snapshot, selection, onSelect, now, onStartTask, o
             <span className={`dp-status dp-status--${d.status}`}>{sessionStatusLabel[d.status]}</span>
           </header>
           <h3 className="dp-title">{d.title || d.label}</h3>
-          <p className="dim">{t.distant}</p>
+          <p className="dim">{d.own ? t.own : t.distant}</p>
           {d.cwd && (
             <Row label={t.folder}>
               <span className="mono" title={d.cwd}>

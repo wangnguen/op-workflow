@@ -20,8 +20,9 @@ use opw_agents::env::{Account, is_stripped};
 use opw_agents::session_log::{self, SessionLog};
 use opw_agents::transcript::{ItemKind, claude_tool_text};
 use opw_domain::session::{
-    ArchivedSession, AskAnswer, AskKind, AskOption, AskQuestion, MODES, OutsideChat, OutsideSession,
-    SessionAsk, SessionChat, SessionKind, SessionPatch, SessionState, SessionView,
+    ArchivedSession, AskAnswer, AskKind, AskOption, AskQuestion, BackgroundTask, MODES, OutsideChat,
+    OutsideSession, SessionAsk, SessionChat, SessionKind, SessionPatch, SessionState, SessionView,
+    TaskOutput,
 };
 use opw_domain::view::{ApiError, QuotaSnapshot};
 use opw_storage::{SessionRow, Store};
@@ -164,6 +165,42 @@ struct Entry {
     /// A copy of another conversation ("Tách bản sao"): its first run resumes that one with
     /// `--fork-session`; until then the chat shows the original.
     fork_from: Option<String>,
+    /// The model picked in the chat for this session (`--model` on every start, `set_model`
+    /// while it runs); `None` = the CLI's own default.
+    model_pick: Option<String>,
+    /// Background tasks of the running CLI (subagents, commands run in the background).
+    background: Vec<BackgroundTask>,
+    /// What `task_started` said of a task (tool call, kind, description), kept for when the
+    /// task joins the background list (the two lines can come in either order).
+    started_tasks: HashMap<String, StartedTask>,
+    /// Stop was asked and the turn or the background tasks have not ended yet.
+    stopping: bool,
+}
+
+/// What a `task_started` line says of a task.
+#[derive(Debug, Clone, Default)]
+struct StartedTask {
+    tool_use_id: Option<String>,
+    kind: Option<String>,
+    description: Option<String>,
+}
+
+/// The kind of a background task as the chat names it: `agent`, `bash`, or the CLI's own.
+fn task_kind(task_type: &str) -> String {
+    match task_type {
+        "local_agent" => "agent".to_owned(),
+        "local_bash" => "bash".to_owned(),
+        "" => "other".to_owned(),
+        other => other.trim_start_matches("local_").to_owned(),
+    }
+}
+
+/// The text of a JSON field, when it is a non-empty string.
+fn text_of(v: &Value) -> Option<String> {
+    v.as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 /// A line from the app in a session's chat: shown after the first `after` items of the
@@ -174,8 +211,11 @@ struct AppNote {
     text: String,
 }
 
-/// kv kind of a task session's app notes (key = session id).
+/// kv kind of a session's app notes (key = session id; a session without a task keeps them
+/// under [`NO_TASK`]).
 const NOTES_KV: &str = "session-notes";
+/// App-wide kv (no task): the model picked for a session (key = session id).
+const MODEL_KV: &str = "session-model";
 /// App-wide kv (no task): the conversation a copy was made from (key = the copy's id).
 const FORK_KV: &str = "session-fork";
 /// App-wide kv (no task): sessions opened outside the app the user archived (key = id,
@@ -237,13 +277,122 @@ impl Entry {
             commands: Vec::new(),
             notes: Vec::new(),
             fork_from: None,
+            model_pick: None,
+            background: Vec::new(),
+            started_tasks: HashMap::new(),
+            stopping: false,
         }
+    }
+
+    /// A turn runs, or a background task (a subagent) of the running CLI does.
+    fn busy(&self) -> bool {
+        self.proc.is_some() && (self.open_turns > 0 || !self.background.is_empty())
+    }
+
+    /// `background_tasks_changed`: the CLI's whole list of what still runs in the background.
+    /// Tasks already known keep when they started and what they do.
+    fn set_background(&mut self, tasks: &[Value]) {
+        let mut next = Vec::new();
+        for t in tasks {
+            let Some(id) = text_of(&t["task_id"]) else {
+                continue;
+            };
+            if let Some(known) = self.background.iter().find(|b| b.id == id) {
+                next.push(known.clone());
+                continue;
+            }
+            let started = self.started_tasks.get(&id).cloned().unwrap_or_default();
+            let description = text_of(&t["description"])
+                .or(started.description)
+                .or_else(|| text_of(&t["subagent_type"]))
+                .unwrap_or_else(|| "việc nền".to_owned());
+            next.push(BackgroundTask {
+                kind: started
+                    .kind
+                    .unwrap_or_else(|| task_kind(t["task_type"].as_str().unwrap_or_default())),
+                description: one_line(&description, ACTIVITY_MAX),
+                tool_use_id: started.tool_use_id,
+                started_at: now(),
+                activity: None,
+                tool_uses: None,
+                tokens: None,
+                stopping: false,
+                id,
+            });
+        }
+        self.started_tasks
+            .retain(|id, _| next.iter().any(|b| &b.id == id));
+        self.background = next;
+    }
+
+    /// Ask the CLI to stop one background task; it leaves the list when the CLI says it ended.
+    fn stop_background(&mut self, task_id: &str) -> Result<(), ApiError> {
+        self.control(json!({ "subtype": "stop_task", "task_id": task_id }))?;
+        if let Some(b) = self.background.iter_mut().find(|b| b.id == task_id) {
+            b.stopping = true;
+        }
+        Ok(())
+    }
+
+    /// `task_started` / `task_progress`: what a task is and what it does now.
+    fn task_event(&mut self, v: &Value) {
+        let Some(id) = text_of(&v["task_id"]) else {
+            return;
+        };
+        if v["subtype"] == "task_started" {
+            let started = StartedTask {
+                tool_use_id: text_of(&v["tool_use_id"]),
+                kind: v["task_type"].as_str().map(task_kind),
+                description: text_of(&v["description"]),
+            };
+            if let Some(b) = self.background.iter_mut().find(|b| b.id == id) {
+                b.tool_use_id = b.tool_use_id.take().or_else(|| started.tool_use_id.clone());
+                if let Some(kind) = &started.kind {
+                    b.kind.clone_from(kind);
+                }
+            }
+            self.started_tasks.insert(id, started);
+            return;
+        }
+        let Some(b) = self.background.iter_mut().find(|b| b.id == id) else {
+            return;
+        };
+        b.activity = text_of(&v["description"])
+            .or_else(|| text_of(&v["last_tool_name"]))
+            .map(|a| one_line(&a, ACTIVITY_MAX));
+        b.tool_uses = v.pointer("/usage/tool_uses").and_then(Value::as_u64);
+        b.tokens = v.pointer("/usage/total_tokens").and_then(Value::as_u64);
+    }
+
+    /// The AI writes with no turn open: the CLI started one on its own (a background subagent
+    /// finished and its result went back to the AI). It ends with a `result` like any other.
+    /// `true` when that is new.
+    fn turn_began_by_itself(&mut self) -> bool {
+        if self.proc.is_none() || self.open_turns > 0 {
+            return false;
+        }
+        self.open_turns = 1;
+        self.last_activity = Instant::now();
+        true
     }
 
     /// One line on what it did last, for the sessions table.
     fn activity(&self) -> Option<String> {
         if !self.asks.is_empty() {
             return Some("Đang chờ bạn trả lời".to_owned());
+        }
+        if self.stopping && self.busy() {
+            return Some("Đang dừng…".to_owned());
+        }
+        if self.proc.is_some() && self.open_turns == 0 {
+            if let Some(b) = self.background.first() {
+                let what = if b.kind == "bash" {
+                    "Lệnh chạy nền"
+                } else {
+                    "Subagent đang chạy nền"
+                };
+                return Some(one_line(&format!("{what}: {}", b.description), ACTIVITY_MAX));
+            }
         }
         let item = self.log.items().iter().rev().find(|i| {
             matches!(
@@ -296,7 +445,7 @@ impl Entry {
         });
         let state = if !self.asks.is_empty() || matches!(terminal_status, Some("waiting")) {
             SessionState::Waiting
-        } else if (self.proc.is_some() && self.open_turns > 0) || matches!(terminal_status, Some("busy")) {
+        } else if self.busy() || matches!(terminal_status, Some("busy")) {
             SessionState::Running
         } else if outside.is_some() {
             SessionState::Outside
@@ -319,6 +468,7 @@ impl Entry {
             outside,
             mode: self.live_mode.clone().or_else(|| self.row.mode.clone()),
             model: self.row.model.clone(),
+            model_pick: self.model_pick.clone(),
             cost_usd: self.row.cost_usd,
             started: self.started,
             created_at: self.row.created_at.clone(),
@@ -326,6 +476,12 @@ impl Entry {
             error: self.error.clone(),
             activity: self.activity(),
             fork_of: self.fork_from.clone().filter(|_| !self.started),
+            background: if self.proc.is_some() {
+                self.background.clone()
+            } else {
+                Vec::new()
+            },
+            stopping: self.stopping && self.busy(),
         }
     }
 
@@ -464,14 +620,15 @@ impl Entry {
         }) else {
             return;
         };
-        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        // a subagent writes only to its own file: that counts as a change too
+        let modified = session_log::last_write(&path);
         if modified.is_some() && modified == self.read_at {
             return;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Ok(log) = SessionLog::read_file(&path) else {
             return;
         };
-        self.log = SessionLog::from_transcript(&text);
+        self.log = log;
         self.read_at = modified;
         self.seq += 1;
         if own {
@@ -488,6 +645,9 @@ impl Entry {
         self.open_turns = 0;
         self.held.clear();
         self.mcp = None;
+        self.background.clear();
+        self.started_tasks.clear();
+        self.stopping = false;
     }
 
     fn pane(&self, kind: TerminalKind) -> Option<&Pane> {
@@ -777,6 +937,9 @@ fn note_item(text: &str) -> opw_domain::view::ChatItem {
         output_cut: 0,
         failed: false,
         denied: None,
+        children: Vec::new(),
+        running: false,
+        tool_id: None,
     }
 }
 
@@ -1213,7 +1376,10 @@ impl Sessions {
                     e.open_turns = 0;
                     self.emit(&id, &mut e);
                 }
-            } else if e.last_activity.elapsed() > IDLE_CLOSE && lock(&e.active_step).is_none() {
+            } else if e.last_activity.elapsed() > IDLE_CLOSE
+                && e.background.is_empty()
+                && lock(&e.active_step).is_none()
+            {
                 if let Some(proc) = e.proc.take() {
                     close_proc(proc, EXIT_WAIT);
                 }
@@ -1283,16 +1449,18 @@ impl Sessions {
             task.as_ref().map(|t| t.display_id.clone()),
             task.and_then(|t| t.branch),
         );
-        if let Some(wp_id) = entry.row.wp_id {
-            let read = |kind: &str| self.store().kv_get(wp_id, kind, &id).ok().flatten();
+        let owner = entry.row.wp_id.unwrap_or(NO_TASK);
+        let read = |kind: &str| self.store().kv_get(owner, kind, &id).ok().flatten();
+        if entry.row.wp_id.is_some() {
             entry.step_labels = read("session-step-labels")
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or_default();
-            entry.notes = read(NOTES_KV)
-                .and_then(|text| serde_json::from_str(&text).ok())
-                .unwrap_or_default();
         }
+        entry.notes = read(NOTES_KV)
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
         entry.fork_from = self.store().kv_get(NO_TASK, FORK_KV, &id).ok().flatten();
+        entry.model_pick = self.store().kv_get(NO_TASK, MODEL_KV, &id).ok().flatten();
         if !entry.started {
             entry.started = transcript_path(&entry.row.repo, &entry.row.id).is_some();
         }
@@ -1569,10 +1737,17 @@ impl Sessions {
     pub fn note(&self, id: &str, text: &str) -> Result<(), ApiError> {
         let arc = self.entry(id)?;
         let mut e = lock(&arc);
-        let wp_id = e
-            .row
-            .wp_id
-            .ok_or_else(|| err("session.task", "Phiên này không thuộc task nào"))?;
+        if e.row.wp_id.is_none() {
+            return Err(err("session.task", "Phiên này không thuộc task nào"));
+        }
+        self.push_note(id, &mut e, text)?;
+        self.emit(id, &mut e);
+        Ok(())
+    }
+
+    /// A line from the app after the last message of the chat, kept in the database (with the
+    /// task, or app-wide for a session without one).
+    fn push_note(&self, id: &str, e: &mut Entry, text: &str) -> Result<(), ApiError> {
         let after = e.log.dropped() + e.log.items().len();
         e.notes.push(AppNote {
             after,
@@ -1580,10 +1755,8 @@ impl Sessions {
         });
         let json = serde_json::to_string(&e.notes).map_err(|x| err("storage", x.to_string()))?;
         self.store()
-            .kv_set(wp_id, NOTES_KV, id, &json, &now())
-            .map_err(|x| err("storage", x.to_string()))?;
-        self.emit(id, &mut e);
-        Ok(())
+            .kv_set(e.row.wp_id.unwrap_or(NO_TASK), NOTES_KV, id, &json, &now())
+            .map_err(|x| err("storage", x.to_string()))
     }
 
     /// The newest session of a task, if it has one.
@@ -2187,6 +2360,9 @@ impl Sessions {
             *trust == TrustRun::UserOnly,
             fork.as_deref(),
         );
+        if let Some(model) = e.model_pick.as_deref() {
+            args.extend(["--model".to_owned(), model.to_owned()]);
+        }
         let mcp = self.prepare_mcp(e, &repo, &mut args);
         let mut cmd = Command::new(exe);
         cmd.args(&args)
@@ -2284,6 +2460,12 @@ impl Sessions {
             }
             "control_response" => self.on_response(id, &mut e, v),
             "stream_event" => {
+                if v["parent_tool_use_id"].is_null()
+                    && v.pointer("/event/type") == Some(&json!("message_start"))
+                    && e.turn_began_by_itself()
+                {
+                    self.emit(id, &mut e);
+                }
                 if let Some(delta) = session_log::text_delta(v) {
                     e.partial.push_str(delta);
                     if e.partial_sent.elapsed() >= PARTIAL_EVERY {
@@ -2293,7 +2475,27 @@ impl Sessions {
                 }
             }
             "system" => {
-                let mut changed = v["subtype"] == "compact_boundary";
+                let subtype = v["subtype"].as_str().unwrap_or_default();
+                let mut changed = matches!(
+                    subtype,
+                    "compact_boundary" | "task_started" | "task_notification" | "task_updated"
+                );
+                match subtype {
+                    "background_tasks_changed" => {
+                        let tasks = v["tasks"].as_array().cloned().unwrap_or_default();
+                        e.set_background(&tasks);
+                        if e.open_turns == 0 && e.background.is_empty() {
+                            e.stopping = false;
+                        }
+                        changed = true;
+                    }
+                    "task_started" => e.task_event(v),
+                    "task_progress" => {
+                        e.task_event(v);
+                        changed = true;
+                    }
+                    _ => {}
+                }
                 if v["subtype"] == "init" {
                     let commands: Vec<String> = v["slash_commands"]
                         .as_array()
@@ -2345,6 +2547,9 @@ impl Sessions {
                 if text && v["parent_tool_use_id"].is_null() {
                     e.partial.clear();
                 }
+                if v["parent_tool_use_id"].is_null() {
+                    e.turn_began_by_itself();
+                }
                 e.log.apply(v);
                 self.emit(id, &mut e);
             }
@@ -2382,6 +2587,9 @@ impl Sessions {
                 e.partial.clear();
                 if e.open_turns == 0 {
                     e.asks.clear();
+                    if e.background.is_empty() {
+                        e.stopping = false;
+                    }
                 }
                 if e.transcript.is_none() {
                     e.transcript = transcript_path(&e.row.repo, id);
@@ -2528,15 +2736,100 @@ impl Sessions {
         Ok(e.view(None))
     }
 
-    /// Stop the running turn (the session stays open).
+    /// Stop the running turn and the subagents running in the background (the session stays
+    /// open). Until the CLI says they ended, the chat shows "Đang dừng…".
     pub fn interrupt(&self, id: &str) -> Result<(), ApiError> {
         let arc = self.entry(id)?;
         let mut e = lock(&arc);
-        if e.proc.is_none() {
+        if !e.busy() {
             return Ok(());
         }
-        e.control(json!({ "subtype": "interrupt" }))?;
+        if e.open_turns > 0 {
+            e.control(json!({ "subtype": "interrupt" }))?;
+        }
+        let tasks: Vec<String> = e.background.iter().map(|b| b.id.clone()).collect();
+        for task in tasks {
+            e.stop_background(&task)?;
+        }
+        e.stopping = true;
+        e.last_activity = Instant::now();
+        self.emit(id, &mut e);
         Ok(())
+    }
+
+    /// Stop one background task (a subagent, a command run in the background); the rest and
+    /// the turn go on.
+    pub fn stop_task(&self, id: &str, task_id: &str) -> Result<SessionView, ApiError> {
+        let arc = self.entry(id)?;
+        let mut e = lock(&arc);
+        if e.proc.is_none() || !e.background.iter().any(|b| b.id == task_id) {
+            return Err(err("task.missing", "Việc nền này đã xong hoặc phiên đã tắt"));
+        }
+        e.stop_background(task_id)?;
+        e.last_activity = Instant::now();
+        self.emit(id, &mut e);
+        Ok(e.view(None))
+    }
+
+    /// The end of what a background task wrote: the CLI keeps it in `tasks/<task>.output` under
+    /// its temp folder for the session (`%TEMP%\claude\<project>\<session>\`). Commands run in
+    /// the background write their output there; a subagent's steps are in the chat instead.
+    pub fn task_output(&self, id: &str, task_id: &str) -> Result<TaskOutput, ApiError> {
+        if task_id.is_empty()
+            || !task_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(err("task.id", "Mã việc nền không hợp lệ"));
+        }
+        // the session must be one of the app's (its id names the folder)
+        let _ = self.entry(id)?;
+        let Some(file) = task_output_file(&std::env::temp_dir(), id, task_id) else {
+            return Ok(TaskOutput {
+                text: String::new(),
+                cut: 0,
+                file: None,
+            });
+        };
+        let (text, cut) = read_tail(&file, OUTPUT_TAIL)
+            .map_err(|e| err("task.output", format!("Không đọc được output: {e}")))?;
+        Ok(TaskOutput {
+            text: clean_output(&text),
+            cut,
+            file: Some(file.to_string_lossy().into_owned()),
+        })
+    }
+
+    /// The model of the session, picked in the chat: now if it runs, and on every later start.
+    /// `None` goes back to the CLI's default (from the next start; a running process keeps the
+    /// model it has).
+    pub fn set_model(&self, id: &str, model: Option<&str>) -> Result<SessionView, ApiError> {
+        let model = model.map(str::trim).filter(|m| !m.is_empty());
+        if model.is_some_and(|m| m.len() > 120 || m.chars().any(char::is_whitespace)) {
+            return Err(err("session.model", "Tên model không hợp lệ"));
+        }
+        let arc = self.entry(id)?;
+        let mut e = lock(&arc);
+        if e.terminal.is_some() {
+            return Err(err(
+                "session.terminal",
+                "Đổi model ngay trong Terminal của phiên (/model)",
+            ));
+        }
+        if let (Some(m), true) = (model, e.proc.is_some()) {
+            e.control(json!({ "subtype": "set_model", "model": m }))?;
+        }
+        e.model_pick = model.map(str::to_owned);
+        {
+            let store = self.store();
+            let saved = match model {
+                Some(m) => store.kv_set(NO_TASK, MODEL_KV, id, m, &now()),
+                None => store.kv_delete(NO_TASK, MODEL_KV, id).map(|_| ()),
+            };
+            saved.map_err(|x| err("storage", x.to_string()))?;
+        }
+        self.emit(id, &mut e);
+        Ok(e.view(None))
     }
 
     /// The permission mode: now if the session runs, and for every later start.
@@ -2574,8 +2867,10 @@ impl Sessions {
     }
 
     /// Give the session to VS Code: end the process here, open the repo's window, then the
-    /// session in the extension (`vscode://anthropic.claude-code/open?session=<id>`).
-    pub fn open_vscode(&self, id: &str) -> Result<(), ApiError> {
+    /// session in the extension (`vscode://anthropic.claude-code/open?session=<id>`, passed to
+    /// VS Code itself the way Windows does for the link). While a turn or a subagent runs, only
+    /// with `force` (the user said to stop it here); a note in the chat says where it went.
+    pub fn open_vscode(&self, id: &str, force: bool) -> Result<(), ApiError> {
         let arc = self.entry(id)?;
         let mut e = lock(&arc);
         if e.terminal.is_some() {
@@ -2587,16 +2882,29 @@ impl Sessions {
         if !e.started {
             return Err(err("session.empty", "Phiên chưa có tin nào để mở trong VS Code"));
         }
+        if !force && (e.busy() || !e.asks.is_empty()) {
+            return Err(err(
+                "session.running",
+                "Phiên đang chạy trong app. Mở trong VS Code sẽ dừng lượt đang chạy (cả subagent chạy nền) ở đây; VS Code chạy tiếp từ chỗ đã lưu.",
+            ));
+        }
+        let code = vscode_cli()
+            .ok_or_else(|| err("vscode.missing", "Không tìm thấy lệnh code (VS Code) trên PATH"))?;
         if let Some(proc) = e.proc.take() {
             close_proc(proc, EXIT_WAIT);
         }
         e.clear_turn();
+        let _ = self.push_note(
+            id,
+            &mut e,
+            "Đã chuyển phiên sang VS Code. Từ giờ phiên chạy ở đó, app chỉ hiện lại hội thoại. Đóng phiên ở VS Code rồi gõ tiếp ở đây để chạy lại trong app.",
+        );
         self.emit(id, &mut e);
         let repo = opw_config::expand_home(&e.row.repo);
         let url = format!("vscode://anthropic.claude-code/open?session={id}");
         drop(e);
         std::thread::spawn(move || {
-            open_in_vscode(&repo, &url);
+            open_in_vscode(&code, &repo, &url);
         });
         Ok(())
     }
@@ -2788,27 +3096,116 @@ pub(crate) fn open_repo_in_vscode(repo: &Path) -> Result<(), ApiError> {
         .map_err(|e| err("vscode.open", e.to_string()))
 }
 
-fn open_in_vscode(repo: &Path, url: &str) {
-    if let Some(code) = cli::find_in_path(
+/// How much of a background task's output is shown (its end).
+const OUTPUT_TAIL: u64 = 64 * 1024;
+
+/// `<temp>/claude/<project>/<session>/tasks/<task>.output`; the project folder's name is the
+/// CLI's own (a hash or the path made safe), so each one is looked in.
+fn task_output_file(temp: &Path, session: &str, task: &str) -> Option<PathBuf> {
+    std::fs::read_dir(temp.join("claude"))
+        .ok()?
+        .flatten()
+        .map(|project| {
+            project
+                .path()
+                .join(session)
+                .join("tasks")
+                .join(format!("{task}.output"))
+        })
+        .find(|f| f.is_file())
+}
+
+/// The last `max` bytes of a file (from a line start when it is cut) and how many were left out.
+fn read_tail(path: &Path, max: u64) -> std::io::Result<(String, u64)> {
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut cut = len.saturating_sub(max);
+    file.seek(SeekFrom::Start(cut))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    // the cut line goes too, counted with what was left out
+    if cut > 0 {
+        if let Some(nl) = bytes.iter().position(|b| *b == b'\n') {
+            bytes.drain(..=nl);
+            cut += nl as u64 + 1;
+        }
+    }
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), cut))
+}
+
+/// Terminal output as plain text: colour codes out, and a line redrawn with `\r` (a progress
+/// bar) keeps only what it ended as.
+fn clean_output(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                // parameters, then one final letter
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() || c == '~' {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        plain.push(c);
+    }
+    plain
+        .split('\n')
+        .map(|line| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            line.rsplit('\r').next().unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// VS Code's `code` command on PATH.
+fn vscode_cli() -> Option<PathBuf> {
+    cli::find_in_path(
         &["code.cmd", "code"],
         &std::env::var_os("PATH").unwrap_or_default(),
-    ) {
-        let mut cmd = Command::new("cmd");
-        cmd.arg("/C").arg(code).arg(repo);
-        cmd.stdin(Stdio::null())
+    )
+}
+
+/// The repo's window first (opened or brought to the front, so the link lands in it), then the
+/// link, handed to VS Code the way Windows hands it a `vscode://` link it registered:
+/// `Code.exe --open-url -- <url>`. Giving the link to Explorer instead opened a folder window
+/// (Documents) on a machine where the link is not registered (2026-11-21).
+fn open_in_vscode(code: &Path, repo: &Path, url: &str) {
+    let run = |args: &[&std::ffi::OsStr]| {
+        // `bin/code.cmd` sits next to `Code.exe` one folder up; without it, through the command
+        let exe = code
+            .parent()
+            .and_then(Path::parent)
+            .map(|dir| dir.join("Code.exe"))
+            .filter(|p| p.is_file() && code.extension().is_some_and(|x| x == "cmd"));
+        let mut cmd = match &exe {
+            Some(exe) => Command::new(exe),
+            None => {
+                let mut cmd = Command::new("cmd");
+                cmd.arg("/C").arg(code);
+                cmd
+            }
+        };
+        cmd.args(args)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         hide_window(&mut cmd);
-        let _ = cmd.status();
-        std::thread::sleep(VSCODE_DELAY);
-    }
-    #[cfg(windows)]
-    let mut cmd = Command::new("explorer.exe");
-    #[cfg(target_os = "macos")]
-    let mut cmd = Command::new("open");
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = Command::new("xdg-open");
-    let _ = cmd.arg(url).spawn();
+        if exe.is_some() {
+            // Code.exe stays running as the editor: start it, do not wait for it
+            cmd.spawn().map(drop)
+        } else {
+            cmd.status().map(drop)
+        }
+    };
+    let _ = run(&[repo.as_os_str()]);
+    std::thread::sleep(VSCODE_DELAY);
+    let _ = run(&["--open-url".as_ref(), "--".as_ref(), url.as_ref()]);
 }
 
 /// What the API takes: a few images of the usual kinds, each under 5 MB.
@@ -3297,5 +3694,94 @@ items: {texts:#?}",
             )
         );
         assert_eq!(describe_suggestions(&json!([])), None);
+    }
+
+    fn free_entry() -> Entry {
+        Entry::new(
+            SessionRow {
+                id: "s-1".into(),
+                wp_id: None,
+                repo: "C:/r".into(),
+                kind: "free".into(),
+                title: String::new(),
+                mode: None,
+                model: None,
+                cost_usd: 0.0,
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            None,
+            None,
+        )
+    }
+
+    /// The `system` lines of CLI 2.1.329 for a subagent and a command run in the background.
+    #[test]
+    fn background_tasks_follow_the_cli_events() {
+        let mut e = free_entry();
+        // task_started may come before the task is on the list
+        e.task_event(
+            &json!({"subtype":"task_started","task_id":"b1","tool_use_id":"T2",
+            "task_type":"local_bash","description":"npm run dev"}),
+        );
+        e.set_background(&[
+            json!({"task_id":"a1","task_type":"local_agent","subagent_type":"general-purpose","description":"Count files"}),
+            json!({"task_id":"b1","task_type":"local_bash","description":"npm run dev"}),
+        ]);
+        e.task_event(
+            &json!({"subtype":"task_started","task_id":"a1","tool_use_id":"T1","task_type":"local_agent"}),
+        );
+        e.task_event(
+            &json!({"subtype":"task_progress","task_id":"a1","description":"Finding *.md",
+            "usage":{"total_tokens":29345,"tool_uses":1}}),
+        );
+        let kinds: Vec<_> = e
+            .background
+            .iter()
+            .map(|b| (b.id.as_str(), b.kind.as_str(), b.tool_use_id.as_deref()))
+            .collect();
+        assert_eq!(kinds, [("a1", "agent", Some("T1")), ("b1", "bash", Some("T2"))]);
+        let a = &e.background[0];
+        assert_eq!(
+            (a.activity.as_deref(), a.tool_uses, a.tokens),
+            (Some("Finding *.md"), Some(1), Some(29_345))
+        );
+        let started = a.started_at.clone();
+        // the list again: a1 keeps what it had, b1 is gone
+        e.set_background(&[json!({"task_id":"a1","task_type":"local_agent","description":"Count files"})]);
+        assert_eq!(e.background.len(), 1);
+        assert_eq!(e.background[0].started_at, started);
+        assert_eq!(e.background[0].activity.as_deref(), Some("Finding *.md"));
+        assert!(!e.started_tasks.contains_key("b1"));
+        // without a running process none of it counts as busy
+        assert!(!e.busy());
+        e.set_background(&[]);
+        assert!(e.background.is_empty());
+    }
+
+    #[test]
+    fn a_background_command_output_is_found_and_cleaned() {
+        let temp = tempfile::tempdir().unwrap();
+        let tasks = temp
+            .path()
+            .join("claude")
+            .join("c--repo")
+            .join("s-1")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        std::fs::write(
+            tasks.join("b1.output"),
+            "\u{1b}[32mok\u{1b}[0m\r\n10%\r50%\r100%\ndone\n",
+        )
+        .unwrap();
+        let file = task_output_file(temp.path(), "s-1", "b1").unwrap();
+        assert!(task_output_file(temp.path(), "s-1", "zz").is_none());
+        let (text, cut) = read_tail(&file, OUTPUT_TAIL).unwrap();
+        assert_eq!(cut, 0);
+        assert_eq!(clean_output(&text), "ok\n100%\ndone\n");
+        // a long output: its end, from a line start
+        std::fs::write(tasks.join("b2.output"), "first line\nsecond line\nthird\n").unwrap();
+        let (tail, cut) = read_tail(&tasks.join("b2.output"), 10).unwrap();
+        assert_eq!((tail.as_str(), cut), ("third\n", 23));
     }
 }
