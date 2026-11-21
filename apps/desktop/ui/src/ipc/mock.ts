@@ -357,7 +357,7 @@ export function mockReconnect(provider?: Provider): null {
 }
 
 export function mockAppInfo(): AppInfo {
-  return { version: "0.4.1-demo", core: "mock" };
+  return { version: "0.4.2-demo", core: "mock" };
 }
 
 export function mockQuota(frameIndex: number, now: number): QuotaSnapshot[] {
@@ -1076,7 +1076,7 @@ const MOCK_SIZE = 5_647_794;
 export function mockUpdate(): UpdateView {
   const elapsed = mockDownloadAt === undefined ? undefined : Date.now() - mockDownloadAt;
   return {
-    current: "0.4.1",
+    current: "0.4.2",
     enabled: true,
     latest: "0.5.0",
     available: true,
